@@ -240,6 +240,15 @@ import { readFile } from 'node:fs/promises';
 
 const log = (msg) => process.stderr.write('[runner] ' + msg + '\\n');
 
+// Ensure opencode binary is findable by createOpencodeServer (cross-spawn uses PATH).
+// The installer puts it in /usr/local/bin (-b flag) as primary; fall back to ~/.opencode/bin.
+process.env.PATH = [
+  '/usr/local/bin',
+  '/root/.opencode/bin',
+  '/root/.bun/bin',
+  process.env.PATH ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+].join(':');
+
 const cfg = JSON.parse(await readFile('./config.json', 'utf8'));
 const { cloneUrl, base, branch, dir, model, prompt, commitMsg } = cfg;
 

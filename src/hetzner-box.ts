@@ -69,9 +69,8 @@ export const workerCloudInit = (sshPubKey: string): string =>
     // bun install (also populates the global package cache used by the runner)
     '  - curl -fsSL https://bun.sh/install | bash',
     '  - /root/.bun/bin/bun add -g @opencode-ai/sdk@1.17.11',
-    // opencode binary (spawned by createOpencodeServer via cross-spawn)
-    "  - curl -fsSL 'https://opencode.ai/install' | bash -s -- --version 1.17.11 --no-modify-path",
-    '  - ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode',
+    // opencode binary (spawned by createOpencodeServer via cross-spawn); -b puts it in PATH
+    "  - curl -fsSL 'https://opencode.ai/install' | bash -s -- -v 1.17.11 -b /usr/local/bin",
     // ensure opencode auth dir exists; JIT auth.json is delivered over SSH
     '  - mkdir -p /root/.local/share/opencode',
     // sentinel: the runner polls this before delivering auth + executing work
