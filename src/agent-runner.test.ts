@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { parseUsage, parseVerdict } from './agent-runner.ts';
+import { commitMessage, parseUsage, parseVerdict } from './agent-runner.ts';
 
 /**
  * Usage parsing is the proof-of-real-work signal (`tp doctor` asserts non-zero
@@ -92,5 +92,14 @@ describe('parseVerdict', () => {
       parseVerdict('I would approve but actually REQUEST CHANGES'),
       'request_changes',
     );
+  });
+});
+
+describe('commitMessage', () => {
+  it('leads with the ticket id then a conventional subject (the graded standard)', () => {
+    const msg = commitMessage({ id: 'tckt_001', title: 'add slugify' });
+    assert.strictEqual(msg, '#tckt_001 feat: add slugify');
+    // Must satisfy the repo's commit header pattern.
+    assert.match(msg, /^#(tckt_[0-9a-z]+) (\w+)(?:\(([^)]+)\))?: (.+)$/);
   });
 });

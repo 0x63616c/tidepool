@@ -92,3 +92,11 @@ export const parseVerdict = (text: string): ReviewVerdict => {
   if (/\bAPPROVED?\b/.test(upper)) return 'approve';
   return 'request_changes';
 };
+
+/**
+ * The commit the runner writes after the agent edits files. The runner owns the
+ * message (not the agent) so the graded standard — ticket id first, then a
+ * conventional subject — holds mechanically every time.
+ */
+export const commitMessage = (ticket: { readonly id: string; readonly title: string }): string =>
+  `#${ticket.id} feat: ${ticket.title}`;
