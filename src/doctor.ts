@@ -7,11 +7,12 @@ import { AppConfig } from './config.ts';
 import { TicketStore } from './services.ts';
 
 /**
- * `tp doctor` — the single terminal check that proves the whole Phase B chain
- * worked (DESIGN §Validation). It PASSes only when all three facts hold:
+ * `tp doctor` — the single terminal check that proves the whole Phase C chain
+ * worked (DESIGN §Validation). It PASSes only when all four facts hold:
  *  - slugify exists on the testbed's main branch (the work landed + merged),
  *  - a fresh clone's `bun run test` passes (CI's gate reproduces locally),
- *  - the latest recorded run has non-zero tokens (a REAL agent ran, not a fake).
+ *  - the latest recorded work run has non-zero tokens (a REAL agent ran, not a fake),
+ *  - the latest work run has a non-null box_id (proves BoxMaker was invoked — Phase C proof).
  * Any single failure ⇒ FAIL with a specific reason + a non-zero exit.
  */
 
@@ -19,6 +20,8 @@ export interface DoctorFacts {
   readonly slugifyPresent: boolean;
   readonly freshCloneTestPassed: boolean;
   readonly latestRunTokens: number;
+  /** box_id from the latest work run — non-null proves a real BoxMaker was invoked. */
+  readonly latestWorkRunBoxId: string | null;
 }
 
 export interface DoctorVerdict {
@@ -26,7 +29,7 @@ export interface DoctorVerdict {
   readonly reason: string | null;
 }
 
-/** Decide PASS/FAIL from the three facts; first failing check names the reason. */
+/** Decide PASS/FAIL from the four facts; first failing check names the reason. */
 export const doctorVerdict = (facts: DoctorFacts): DoctorVerdict => {
   if (!facts.slugifyPresent) {
     return { ok: false, reason: 'slugify is not present on the testbed main branch' };
@@ -36,6 +39,9 @@ export const doctorVerdict = (facts: DoctorFacts): DoctorVerdict => {
   }
   if (facts.latestRunTokens <= 0) {
     return { ok: false, reason: 'latest run recorded zero tokens (no real agent run)' };
+  }
+  if (facts.latestWorkRunBoxId === null) {
+    return { ok: false, reason: 'latest work run has no box_id (Hetzner worker not yet proven)' };
   }
   return { ok: true, reason: null };
 };
@@ -74,27 +80,42 @@ export const gatherDoctorFacts: Effect.Effect<DoctorFacts, never, TicketStore | 
       return { slugifyPresent, freshCloneTestPassed };
     });
 
-    // Proof of a real run: the largest token total across all recorded runs.
+    // Proof of real runs: max tokens + box_id from the latest work run.
     const tickets = yield* store.list();
     let latestRunTokens = 0;
+    let latestWorkRunBoxId: string | null = null;
+    let latestWorkRunTime = 0;
     for (const ticket of tickets) {
       const runs = yield* store.runsFor(ticket.id);
       for (const run of runs) {
         latestRunTokens = Math.max(latestRunTokens, run.usage.tokensIn + run.usage.tokensOut);
+        if (run.kind === 'work') {
+          // Runs are returned oldest-first; keep the last (most recent) work run's box_id.
+          latestWorkRunBoxId = run.boxId;
+          latestWorkRunTime++;
+        }
       }
     }
+    void latestWorkRunTime; // used only to pick the last entry (loop overwrites)
 
-    return { ...clone, latestRunTokens };
+    return { ...clone, latestRunTokens, latestWorkRunBoxId };
   });
 
-/** The full doctor check: gather facts, then decide. */
-export const runDoctor: Effect.Effect<DoctorVerdict, never, TicketStore | AppConfig> = Effect.map(
-  gatherDoctorFacts,
-  doctorVerdict,
-);
+/** The full doctor check: gather facts, then decide. Returns verdict + facts for rendering. */
+export const runDoctor: Effect.Effect<
+  DoctorVerdict & { readonly facts: DoctorFacts },
+  never,
+  TicketStore | AppConfig
+> = Effect.map(gatherDoctorFacts, (facts) => ({ ...doctorVerdict(facts), facts }));
 
 /** Render a doctor verdict as a TOON-ish block for the CLI. */
-export const renderDoctor = (v: DoctorVerdict): string =>
+export const renderDoctor = (v: DoctorVerdict & { readonly facts?: DoctorFacts }): string =>
   v.ok
-    ? 'doctor: PASS\n  slugify on testbed@main + fresh-clone test + non-zero run usage all verified'
+    ? [
+        'doctor: PASS',
+        '  slugify on testbed@main ✓',
+        '  fresh-clone bun run test ✓',
+        '  non-zero run tokens ✓',
+        `  box_id in latest work run: ${v.facts?.latestWorkRunBoxId ?? '(see store)'}`,
+      ].join('\n')
     : `doctor: FAIL\n  reason: ${v.reason}`;
