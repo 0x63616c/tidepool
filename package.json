@@ -13,7 +13,7 @@
     "format": "biome format --write .",
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "bun --bun vitest run",
     "commitlint": "commitlint --last --verbose",
     "check": "biome check . && bun run typecheck && bun run test",
     "prepare": "lefthook install"
@@ -24,6 +24,7 @@
     "@effect/platform": "0.96.2",
     "@effect/platform-bun": "0.90.0",
     "@effect/cli": "0.75.2",
+    "@effect/experimental": "0.60.0",
     "@effect/sql": "0.51.1",
     "@effect/sql-sqlite-bun": "0.52.0",
     "drizzle-orm": "0.45.2",

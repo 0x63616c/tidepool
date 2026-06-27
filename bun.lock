@@ -5,6 +5,7 @@
       "name": "tidepool",
       "dependencies": {
         "@effect/cli": "0.75.2",
+        "@effect/experimental": "0.60.0",
         "@effect/platform": "0.96.2",
         "@effect/platform-bun": "0.90.0",
         "@effect/sql": "0.51.1",

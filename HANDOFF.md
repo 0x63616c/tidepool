@@ -35,21 +35,35 @@ locally to drive the Phase C cloud-worker run.
 
 ## Current repo state (2026-06-27)
 
-Done:
-- Docs: `DESIGN.md` (decisions+rationale, source of truth), `RESEARCH.md` (dossier, pinned versions,
-  API patterns), `AGENTS.md`+`CLAUDE.md` (standards + 11 tenets), `GOALS.md` (the mission), `SKILLS.md`.
-- Stack configs: `package.json` (Effect/Pulumi/Biome stack, opencode SDK pinned `1.17.11`),
-  `tsconfig.json`, `biome.json`, `lefthook.yml`, `commitlint.config.mjs` (ticket-prefix), `.mise.toml`
-  (bun+opencode pinned; mise auto-activates in this dir).
-- `tickets/` — seed fixtures (3; `tckt_001` slugify is the `tp doctor` terminal-check function).
+Done — Phase A + Phase B complete:
+- Docs: `DESIGN.md`, `RESEARCH.md`, `AGENTS.md`+`CLAUDE.md`, `GOALS.md`, `SKILLS.md`, `HANDOFF.md`.
+- Stack configs: `package.json` (Effect + Biome + opencode SDK `1.17.11`), `tsconfig.json`,
+  `biome.json`, `lefthook.yml`, `commitlint.config.mjs`, `.mise.toml` (bun+opencode pinned).
+- `tidepool-testbed` repo exists (`0x63616c/tidepool-testbed`): pure-fn TS lib + vitest + identical
+  rails (biome, commitlint, CI, `main` protected). `tp doctor` passes against it.
+- `src/` — full implementation:
+  - `domain.ts` — branded ids, typed errors, Ticket/Run schemas (Effect Schema)
+  - `config.ts` — Effect Schema Config + `AppConfig` Tag + `loadConfig`
+  - `services.ts` — `TicketStore`, `Forge`, `BoxMaker`, `AgentRunner` Tags (interfaces)
+  - `ids.ts` — Stripe-style prefixed ids (tckt_/run_/box_/lease_/pr_)
+  - `reconciler.ts` — state machine (`step`, `settle`) + all ticket transitions
+  - `fakes.ts` — `FakeTicketStore`, `FakeForge`, `FakeBoxMaker`, `FakeAgentRunner`
+  - `sqlite-store.ts` — `@effect/sql-sqlite-bun` backed `TicketStore` (real)
+  - `forge.ts` — GitHub `Forge` via Octokit port + `GithubForgeLive` Layer
+  - `agent-runner.ts` — opencode `AgentRunner` (`@opencode-ai/sdk`) + `OpencodeAgentRunnerLive`
+  - `local-box.ts` — `LocalBoxMaker` (degenerate localhost lease, Phase B)
+  - `doctor.ts` — `runDoctor` / `renderDoctor` / `gatherDoctorFacts`
+  - `runtime.ts` — `LiveStack` Layer (sqlite + config + GitHub + opencode + local box)
+  - `cli.ts` — `tp ls / ticket add / run / doctor`
+- `tp doctor` exits 0: slugify on `tidepool-testbed@main`, fresh-clone test passes, non-zero tokens.
 - `infra/bootstrap/collect.sh` — ran; creds/keys collected.
 - Hetzner **e2e smoke-tested**: token + private-network + cpx box create/teardown all proven live.
 
-Not built yet (this is the work):
-- `src/` is empty — interfaces (as Effect services/Layers), types, config (Effect Schema), reconciler,
-  fakes, sqlite store (`@effect/sql`), `tp` CLI.
-- AXI + Effect/TS skills not installed yet (`npx skills add ...` from SKILLS.md).
-- No real adapters, no Pulumi stack, no sops secrets file, `tidepool-testbed` repo not created.
+Next (Phase C — THE MISSION):
+- Real `HetznerBoxMaker` with Effect Scope teardown, reaper, max-TTL, location fallback.
+- Secrets in sops (`secrets/tidepool.enc.yaml`); worker gets auth.json over SSH JIT.
+- Drive tckt_001 (or a new ticket) on a REAL Hetzner worker: box created → agent runs → PR merged → box deleted.
+- `tp doctor` exits 0 AND the run record shows the `box_id` (proves Hetzner-generated).
 
 ## Secrets / inputs in place
 
