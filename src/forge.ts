@@ -111,60 +111,57 @@ export const httpStatusOf = (e: unknown): number =>
     : 0;
 
 /** Build the `ForgeApi` over a `GithubRest` port. */
-export const makeGithubForge = (rest: GithubRest): ForgeApi => {
-  const notImpl = Effect.dieMessage('github-forge: not implemented');
-  return {
-    openPR: (input) =>
-      Effect.gen(function* () {
-        const { owner, name } = parseRepo(input.repo);
-        const pr = yield* Effect.tryPromise({
-          try: () =>
-            rest.createPull({
-              owner,
-              repo: name,
-              head: input.branch,
-              base: input.base,
-              title: input.title,
-              body: input.body,
-            }),
-          catch: (e) => new ForgeError({ op: 'openPR', reason: String(e) }),
-        });
-        return { id: newPrId(), number: pr.number, url: pr.url };
-      }),
-    checks: (input) =>
-      Effect.gen(function* () {
-        const { owner, name } = parseRepo(input.repo);
-        const sha = yield* Effect.tryPromise({
-          try: () => rest.headSha({ owner, repo: name, pull_number: input.prNumber }),
-          catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
-        });
-        const runs = yield* Effect.tryPromise({
-          try: () => rest.checkRuns({ owner, repo: name, ref: sha }),
-          catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
-        });
-        const statuses = yield* Effect.tryPromise({
-          try: () => rest.commitStatuses({ owner, repo: name, ref: sha }),
-          catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
-        });
-        const states = [
-          ...runs.map((r) => checkRunState(r.status, r.conclusion)),
-          ...statuses.map((s) => commitStatusState(s.state)),
-        ];
-        return combineCI(states);
-      }),
-    merge: (input) =>
-      Effect.gen(function* () {
-        const { owner, name } = parseRepo(input.repo);
-        return yield* Effect.tryPromise({
-          try: () => rest.squashMerge({ owner, repo: name, pull_number: input.prNumber }),
-          catch: (e) =>
-            classifyMergeError(httpStatusOf(e)) === 'conflict'
-              ? new MergeConflict({ prNumber: input.prNumber })
-              : new ForgeError({ op: 'merge', reason: String(e) }),
-        });
-      }),
-  };
-};
+export const makeGithubForge = (rest: GithubRest): ForgeApi => ({
+  openPR: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      const pr = yield* Effect.tryPromise({
+        try: () =>
+          rest.createPull({
+            owner,
+            repo: name,
+            head: input.branch,
+            base: input.base,
+            title: input.title,
+            body: input.body,
+          }),
+        catch: (e) => new ForgeError({ op: 'openPR', reason: String(e) }),
+      });
+      return { id: newPrId(), number: pr.number, url: pr.url };
+    }),
+  checks: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      const sha = yield* Effect.tryPromise({
+        try: () => rest.headSha({ owner, repo: name, pull_number: input.prNumber }),
+        catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
+      });
+      const runs = yield* Effect.tryPromise({
+        try: () => rest.checkRuns({ owner, repo: name, ref: sha }),
+        catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
+      });
+      const statuses = yield* Effect.tryPromise({
+        try: () => rest.commitStatuses({ owner, repo: name, ref: sha }),
+        catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
+      });
+      const states = [
+        ...runs.map((r) => checkRunState(r.status, r.conclusion)),
+        ...statuses.map((s) => commitStatusState(s.state)),
+      ];
+      return combineCI(states);
+    }),
+  merge: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      return yield* Effect.tryPromise({
+        try: () => rest.squashMerge({ owner, repo: name, pull_number: input.prNumber }),
+        catch: (e) =>
+          classifyMergeError(httpStatusOf(e)) === 'conflict'
+            ? new MergeConflict({ prNumber: input.prNumber })
+            : new ForgeError({ op: 'merge', reason: String(e) }),
+      });
+    }),
+});
 
 /** Bind the `GithubRest` port to a real Octokit client. */
 export const octokitRest = (token: string): GithubRest => {
