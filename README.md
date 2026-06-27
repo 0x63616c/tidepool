@@ -4,7 +4,7 @@
 
 A thin always-on box runs a reconciler loop + ticket backlog. When tickets exist it spins ephemeral
 worker boxes that drive coding agents (via the opencode SDK, on your Codex subscription) against a
-target repo: `branch → PR → review → auto-merge-on-green`. Infra is declarative (OpenTofu in CI),
+target repo: `branch → PR → review → auto-merge-on-green`. Infra is declarative (Pulumi in CI),
 secrets are sops+age, and you drive it with the `tp` CLI.
 
 - **Design & decisions:** [`DESIGN.md`](./DESIGN.md)
@@ -20,7 +20,7 @@ Scaffolding. Design locked. v1 target: a working **N=1** loop against `tidepool-
 ```
 src/            cli, reconciler, runner, interfaces, store   (TypeScript + Bun)
 tickets/        git-backed backlog (markdown, frontmatter)
-infra/          OpenTofu (main box, firewall, worker snapshot) + bootstrap
+infra/          Pulumi (main box, firewall) + Hetzner-API workers + bootstrap
 secrets/        sops+age encrypted secrets (steady state)
 .github/        CI rails (prettier, typecheck, commitlint, vitest)
 ```
