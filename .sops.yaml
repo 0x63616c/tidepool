@@ -1,0 +1,13 @@
+# sops creation rules — encrypts secrets in git to three age recipients:
+#   mainbox    — the always-on control plane (its private key lives ONLY on the box)
+#   ci         — GitHub Actions (decrypts to provide Pulumi config at provision time)
+#   breakglass — Calum's offline recovery key
+# Holds NO secret values (those live in secrets/*.enc.yaml, encrypted). Tenet 9:
+# the master key never leaves the main box; workers get JIT-decrypted creds over SSH.
+creation_rules:
+  - path_regex: secrets/.*\.enc\.(yaml|json)$
+    key_groups:
+      - age:
+          - age1368zpnurgca5mraqvf3d8d6sl6ctkpxd7ht2mwuvmevpxu74j5tsms9lur # mainbox
+          - age1c8rzq8txxlq4g6zu0yn46rr9rdzfyn3j5u9d8cxnq2h5w3yrve6sjs3gkc # ci
+          - age1ewkw53p9v6w44uae75kxnnwnmnt9etqpkems2kjqkyjwldrjju0qe2t4tn # breakglass

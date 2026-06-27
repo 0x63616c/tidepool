@@ -14,8 +14,12 @@ secrets/*.dec.*
 *.plaintext
 .bootstrap/
 
-# OpenTofu
-infra/**/.terraform/
-infra/**/*.tfstate
-infra/**/*.tfstate.*
-infra/**/.terraform.lock.hcl
+# Pulumi
+infra/**/Pulumi.*.yaml
+infra/**/.pulumi/
+
+# agent skills — local ergonomics, regenerable via SKILLS.md (not product source)
+# .agents/skills/ holds the real files; .claude/skills is a symlink into it so
+# Claude Code + opencode both auto-discover them.
+.agents/
+.claude/

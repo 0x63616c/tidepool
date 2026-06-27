@@ -1,0 +1,111 @@
+import { Data, Schema } from 'effect';
+import { BoxId, PrId, RunId, TicketId } from './ids.ts';
+
+/**
+ * Domain model — the single source of truth for ticket/run shape. Everything
+ * persisted, displayed, or moved by the reconciler is one of these. Validated
+ * with `effect/Schema` (no zod — tenet 10, one way of doing things).
+ */
+
+/** Ticket lifecycle. Terminal: `done`, `failed`. `rate_capped` is requeueable. */
+export const TicketState = Schema.Literal(
+  'backlog',
+  'in_progress',
+  'review',
+  'done',
+  'failed',
+  'rate_capped',
+);
+export type TicketState = typeof TicketState.Type;
+
+export const isTerminal = (s: TicketState): boolean => s === 'done' || s === 'failed';
+
+/** Token + model accounting for one agent invocation. Non-zero tokens prove a real run. */
+export const Usage = Schema.Struct({
+  model: Schema.String,
+  tokensIn: Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)),
+  tokensOut: Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)),
+  wallTimeSec: Schema.Number.pipe(Schema.greaterThanOrEqualTo(0)),
+});
+export type Usage = typeof Usage.Type;
+
+export const AgentKind = Schema.Literal('work', 'review');
+export type AgentKind = typeof AgentKind.Type;
+
+/** One agent invocation. `boxId` set ⇒ ran on a Hetzner worker (Phase C proof). */
+export const Run = Schema.Struct({
+  id: RunId,
+  ticketId: TicketId,
+  kind: AgentKind,
+  boxId: Schema.NullOr(BoxId),
+  usage: Usage,
+});
+export type Run = typeof Run.Type;
+
+/**
+ * Ticket — a first-class store row (the backlog IS the db, never files).
+ * `branch`/`prNumber` are the reattach handles; `workedAttempt` records which
+ * attempt's work run already produced the open PR, so a reconstructed reconciler
+ * resumes (advances to review) rather than restarting the agent.
+ */
+export const Ticket = Schema.Struct({
+  id: TicketId,
+  title: Schema.String,
+  goal: Schema.String,
+  target: Schema.String,
+  state: TicketState,
+  branch: Schema.NullOr(Schema.String),
+  prNumber: Schema.NullOr(Schema.Int),
+  prId: Schema.NullOr(PrId),
+  mergeSha: Schema.NullOr(Schema.String),
+  attempts: Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)),
+  workedAttempt: Schema.NullOr(Schema.Int),
+});
+export type Ticket = typeof Ticket.Type;
+
+/** Input to create a ticket. The store assigns id + initial state. */
+export const NewTicket = Schema.Struct({
+  title: Schema.String,
+  goal: Schema.String,
+  target: Schema.String,
+});
+export type NewTicket = typeof NewTicket.Type;
+
+export const CIStatus = Schema.Literal('pending', 'green', 'red');
+export type CIStatus = typeof CIStatus.Type;
+
+export const ReviewVerdict = Schema.Literal('approve', 'request_changes');
+export type ReviewVerdict = typeof ReviewVerdict.Type;
+
+// ── Typed errors (flow in Effect channels, never thrown) ────────────────────
+
+/** Box could not be provisioned (Hetzner capacity, boot failure, ssh timeout). */
+export class BoxFailed extends Data.TaggedError('BoxFailed')<{
+  readonly reason: string;
+}> {}
+
+/** Agent run could not complete (opencode crash, non-zero exit, push failure). */
+export class AgentFailed extends Data.TaggedError('AgentFailed')<{
+  readonly reason: string;
+}> {}
+
+/** Provider rate-cap hit. Surfaced + requeued, never crashes the loop. */
+export class RateCapped extends Data.TaggedError('RateCapped')<{
+  readonly retryAfterSec?: number;
+}> {}
+
+/** Forge operation failed (network, auth, GitHub 5xx). */
+export class ForgeError extends Data.TaggedError('ForgeError')<{
+  readonly op: string;
+  readonly reason: string;
+}> {}
+
+/** Merge blocked by a conflict — the branch is stale vs base. */
+export class MergeConflict extends Data.TaggedError('MergeConflict')<{
+  readonly prNumber: number;
+}> {}
+
+/** Looked-up ticket not present in the store. */
+export class TicketNotFound extends Data.TaggedError('TicketNotFound')<{
+  readonly id: string;
+}> {}
