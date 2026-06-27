@@ -88,6 +88,9 @@ describe('parseVerdict', () => {
   });
 
   it('fails closed: request_changes when both appear', () => {
-    assert.strictEqual(parseVerdict('I would approve but actually REQUEST CHANGES'), 'request_changes');
+    assert.strictEqual(
+      parseVerdict('I would approve but actually REQUEST CHANGES'),
+      'request_changes',
+    );
   });
 });

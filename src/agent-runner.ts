@@ -80,7 +80,15 @@ export const parseUsage = (events: ReadonlyArray<unknown>): Usage => {
   return { model, tokensIn, tokensOut, wallTimeSec };
 };
 
-/** Stub — implemented in the GREEN step. */
-export const parseVerdict = (_text: string): ReviewVerdict => {
-  throw new Error('agent-runner: parseVerdict not implemented');
+/**
+ * Extract the review verdict from the agent's free text. Fail-closed: anything
+ * ambiguous — no marker, or both signals present — is `request_changes`, so a
+ * murky review can never auto-merge. `request_changes` is checked first for that
+ * reason.
+ */
+export const parseVerdict = (text: string): ReviewVerdict => {
+  const upper = text.toUpperCase();
+  if (/REQUEST[\s_-]?CHANGES/.test(upper)) return 'request_changes';
+  if (/\bAPPROVED?\b/.test(upper)) return 'approve';
+  return 'request_changes';
 };
