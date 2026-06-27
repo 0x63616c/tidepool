@@ -1,99 +1,72 @@
 # HANDOFF — start here
 
-> Read order: **this file → `DESIGN.md` → `RESEARCH.md` → `AGENTS.md`.**
-> This is the orientation + operating model + roadmap for the session that *builds* Tidepool.
-> The design is locked (captured in DESIGN.md from a long grilling session on 2026-06-27). Your job
-> is execution, not re-deciding. If you think a locked decision is wrong, raise it with Calum in one
-> line — don't silently diverge.
+> Read order: **this file → `GOALS.md` → `DESIGN.md` → `RESEARCH.md` → `AGENTS.md` → `SKILLS.md`.**
+> The design is LOCKED (DESIGN.md, from a long grilling session 2026-06-27). Your job is execution,
+> not re-deciding. If a locked decision looks wrong, raise it with Calum in one line — don't silently
+> diverge. **`GOALS.md` is the mission.**
 
 ## What Tidepool is (10-second version)
 
-A personal agentic-coding control plane. Thin always-on Hetzner box runs a TS+Bun reconciler loop +
-a **sqlite ticket store** (single source of truth). Tickets spin ephemeral Hetzner workers that drive coding agents
-(opencode SDK, on Calum's Codex subscription) against a target repo: `branch → PR → review →
-auto-merge-on-green`. Declarative infra (OpenTofu in CI), secrets sops+age, driven by the `tp` CLI.
-Full shape + every decision and its rationale is in `DESIGN.md`.
+A personal agentic-coding control plane. A thin always-on Hetzner box runs a TS+Bun reconciler loop +
+a **sqlite ticket store** (single source of truth). Tickets spin ephemeral Hetzner workers that drive
+coding agents (opencode SDK, on Calum's Codex subscription) against a target repo: `branch → PR →
+review → auto-merge-on-green`. Declarative infra (Pulumi in CI), secrets sops+age, driven by `tp`.
+Full rationale in `DESIGN.md`.
 
-## How you (the lead) should operate THIS project
+## How you (the lead) operate this project
 
-Calum wants to talk to you like a **senior manager talks to a lead** — high-level, low direct context.
-You keep the conversation with him short; you do the heavy lifting by **dispatching agent teams and
-validators**, not by grinding everything inline.
+Calum talks to you like a **senior manager to a lead** — high-level, low direct context. You do the
+work by **dispatching parallel agent teams + validators** (Workflow tool, Opus), not by grinding inline.
+- **Work backward from a terminal check** (GOALS.md defines them). Never take "implement X" raw.
+- **Dispatch, don't grind.** Keep your context lean; summarize up, don't dump transcripts.
+- **Evidence before claims.** "Done" = the terminal check passed and you saw the output.
+- **Tiered autonomy by blast radius** (DESIGN §4.5): testbed = full auto / cheap model (`gpt-5.4-mini`).
+- **Effect-first, one way of doing things** (tenet 10). **Update docs in the same change** (tenet 11).
 
-- **Work backward from a terminal check.** Never take "go implement X" raw. For each milestone there
-  is a single checkable end-state that implies everything upstream worked (see Validation below).
-  Define it, then dispatch toward it.
-- **Dispatch, don't grind.** Use the `Workflow` tool / subagents for parallel build + validation.
-  Keep your own context lean — summarize results up to Calum, don't dump transcripts.
-- **Report concisely.** Status to Calum = what's done (with the terminal check that proves it),
-  what's blocked, what needs his decision. One screen, not ten.
-- **Respect tiered autonomy by blast radius** (DESIGN §4.5): testbed = full auto / cheap models;
-  real repos = gated + strong models + human lane for risky paths.
-- **Evidence before claims.** "Done" means the terminal check passed and you saw the output.
+## Spend is authorized
+
+Calum authorized real spend — **no permission needed** for `pulumi up` / Hetzner boxes. The controls
+are the **guardrails** (5-box project limit, reaper, Effect `Scope` teardown, max-TTL), not a gate.
+Respect them: ≤5 boxes, every box deleted, N=1.
+
+The ONLY thing still needing Calum: a **Pulumi Cloud account + access token** (Phase D, the always-on
+main box). Not required for the mission — workers are Hetzner-API cattle; the reconciler can run
+locally to drive the Phase C cloud-worker run.
 
 ## Current repo state (2026-06-27)
 
-Built (docs + skeleton):
-- `DESIGN.md` — all locked decisions + rationale. **Source of truth.**
-- `RESEARCH.md` — full research dossier (go/no-go table, pinned versions, exact API patterns).
-- `AGENTS.md` (+ `CLAUDE.md` symlink) — standards every agent/human follows.
-- `README.md`, `.gitignore`, `package.json` (bun, opencode SDK pinned `1.17.11`), `tsconfig.json`,
-  `.prettierrc.json`.
-- `tickets/` — backlog: 3 seed tickets targeting `tidepool-testbed` (`tckt_001` slugify is the
-  terminal-check function).
-- `infra/bootstrap/collect.sh` — ran; bootstrap creds/keys collected (see Secrets below).
+Done:
+- Docs: `DESIGN.md` (decisions+rationale, source of truth), `RESEARCH.md` (dossier, pinned versions,
+  API patterns), `AGENTS.md`+`CLAUDE.md` (standards + 11 tenets), `GOALS.md` (the mission), `SKILLS.md`.
+- Stack configs: `package.json` (Effect/Pulumi/Biome stack, opencode SDK pinned `1.17.11`),
+  `tsconfig.json`, `biome.json`, `lefthook.yml`, `commitlint.config.mjs` (ticket-prefix), `.mise.toml`
+  (bun+opencode pinned; mise auto-activates in this dir).
+- `tickets/` — seed fixtures (3; `tckt_001` slugify is the `tp doctor` terminal-check function).
+- `infra/bootstrap/collect.sh` — ran; creds/keys collected.
+- Hetzner **e2e smoke-tested**: token + private-network + cpx box create/teardown all proven live.
 
-NOT built yet (this is your M1–M2 work):
-- `src/` is empty — no interfaces, types, config loader, cli, reconciler, fakes, store yet.
-- No commitlint config, husky hooks, CI workflow, AXI skill install.
-- No real adapters (Hetzner/GitHub/opencode), no tofu module, no sops secrets file.
+Not built yet (this is the work):
+- `src/` is empty — interfaces (as Effect services/Layers), types, config (Effect Schema), reconciler,
+  fakes, sqlite store (`@effect/sql`), `tp` CLI.
+- AXI + Effect/TS skills not installed yet (`npx skills add ...` from SKILLS.md).
+- No real adapters, no Pulumi stack, no sops secrets file, `tidepool-testbed` repo not created.
 
-## Blocked on Calum (do NOT do these without his explicit go)
+## Secrets / inputs in place
 
-1. **Provisioning real infra** (Hetzner spend) — needs his go. Everything through M4 is free/local.
-2. **Applying secrets** into sops + GitHub Actions secrets — security-sensitive; prepare the code,
-   apply on his go.
-3. **The cap>1 strategy** (credential broker vs N accounts vs API-key burst) — parked; v1 is N=1.
-4. **Object Storage state backend** keys — deferred; settle when provisioning.
-5. **Dedicated GitHub identity** (bot/App) — later; v0 uses his `0x63616c` account.
+- `~/.tidepool/bootstrap/`: `hcloud_token`, `opencode-auth.json`, age keys (`age-mainbox/-breakglass/
+  -ci`), `ssh-tidepool`. Backed up in 1Password (Homelab) item `tidepool`.
+- `gh` authed as `0x63616c` (`repo`,`workflow`). Tooling present: bun, opencode 1.17.11, sops, age,
+  mise (auto-activates), gh, jq. (Pulumi CLI + Pulumi Cloud token: not yet — Phase D.)
 
-## Secrets / inputs already in place
+## The mission & milestones
 
-- Bootstrap dir `~/.tidepool/bootstrap/`: `hcloud_token`, `opencode-auth.json`, age keys
-  (`age-mainbox`, `age-breakglass`, `age-ci`), `ssh-tidepool`. (Public keys recorded in DESIGN/1Password.)
-- 1Password (Homelab vault) item **`tidepool`** = offline backup of all the above.
-- `gh` authed as `0x63616c` (scopes `repo`, `workflow`).
-- Local tooling present: bun, node, opencode 1.17.11, sops, age, terraform (NOT tofu yet), gh, jq.
+See **`GOALS.md`** — one mission (a PR merged into `tidepool-testbed@main`, generated by opencode on a
+real Hetzner worker box, full flow e2e, proven by `tp doctor`), built in phases A (fakes) → B (real
+adapters, local) → C (real Hetzner worker = the mission) → D (Pulumi always-on, needs the token).
 
-## Roadmap — milestones, each with a terminal check
+## Key invariants (full set + 11 tenets in AGENTS.md)
 
-- **M1 — scaffold + rails.** Finish `src/` (deep-module interfaces `BoxMaker`/`CredentialBroker`/
-  `AgentRunner`/`Forge`/`TicketStore`, `types.ts`, `config.ts` zod loader, `tidepool.config.ts`,
-  `cli.ts` AXI-style), commitlint (ticket-prefix convention from AGENTS.md), husky hooks, CI workflow,
-  `npx skills add kunchenguid/axi`. **Terminal check:** `bun install && bun run check` green.
-- **M2 — fakes + reconciler + tests (the loop-logic proof).** `Fake{BoxMaker,Forge,AgentRunner}` +
-  in-memory `TicketStore`; reconciler state machine (claim → run → review → merge-on-green → done;
-  failure → requeue with bounded attempts; reattach handles + restart). **Terminal check:** reconciler
-  vitest suite green, including a "deploy mid-task → reattach → resume" test.
-- **M3 — `tp` CLI against in-memory store.** `tp ticket add|ls`, `tp run logs`. **Terminal check:**
-  `tp ticket add` then `tp ticket ls` shows it grouped by state.
-- **M4 — `tidepool-testbed` repo.** Scaffold the pure-fn TS lib + vitest + identical rails + AGENTS.md;
-  push (private). **Terminal check:** testbed CI green on a hand-made PR.
-- **M5 — real adapters (NEEDS CALUM GO + SPEND).** Hetzner `BoxMaker`, GitHub `Forge`, opencode
-  `AgentRunner` (+ API-key fallback + auth health-check), sops secrets, tofu main-box module, cloud-init,
-  systemd self-update. **Terminal check:** `tp doctor` = `slugify` on `tidepool-testbed@main` + test
-  passes + sqlite `usage` row non-zero (proves the whole real chain end-to-end).
-
-## Validation strategy (how you prove it works)
-
-Two terminal checks, per DESIGN §4.6:
-- **Free/today:** reconciler suite green (M2) ⇒ state machine + resumability proven, no infra.
-- **Real:** `tp doctor` (M5) ⇒ the one assertion that implies the entire real pipeline (non-zero
-  tokens proves opencode actually ran on the live subscription, not a fake).
-
-## Key invariants (full set in AGENTS.md)
-
-PR not MR (forge = GitHub). Stripe IDs `tckt_/run_/box_/lease_/pr_`. Commit subject leads with
-`#tckt_xxx `. Branch `tp/<tckt_id>-slug`. Squash-merge, linear history, `main` protected. Quality gates
-mechanical via git hooks + CI (never trust local). Deep modules, no leaky abstractions. Design-for-N,
-run N=1.
+PR not MR (GitHub). Stripe IDs `tckt_/run_/box_/lease_/pr_`. Commit subject leads `#tckt_xxx`. Branch
+`tp/<tckt_id>-slug`. Squash-merge, linear history, `main` protected. Gates mechanical via git hooks +
+CI. Deep modules, no leaky abstractions. Single source of truth. Design-for-N, run N=1. Box type =
+**CPX/x86** (ARM unavailable). Effect-first. Docs track reality.

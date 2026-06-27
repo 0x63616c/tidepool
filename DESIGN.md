@@ -16,7 +16,7 @@ exist, the reconciler spins **ephemeral Hetzner worker boxes** (elastic 0→3, s
 idle). Each worker runs a TS **runner** that embeds the **opencode TypeScript SDK** to drive
 coding agents against a target GitHub repo: `branch → PR → review-agent → auto-merge-on-green`.
 Models run via a **ChatGPT/Codex subscription** (OAuth, not metered API) through opencode's
-`openai` provider. Infra is **declarative via OpenTofu** applied in **GitHub Actions CI**.
+`openai` provider. Infra is **declarative via Pulumi** applied in **GitHub Actions CI**.
 Secrets via **sops + age**. You drive it with the **`tp`** CLI.
 
 ```
@@ -86,7 +86,7 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
   Neither is built until N>1 is actually wanted. (opencode's exact refresh-locking mechanism — file
   lock vs re-read-on-401 — to be confirmed *at that milestone*, not now.)
 - **CI/GitOps boundary:** persistent infra (main box, network, firewall, worker snapshot) is
-  **declarative via OpenTofu, applied in CI**. Worker boxes are **runtime cattle** created by the
+  **declarative via Pulumi, applied in CI**. Worker boxes are **runtime cattle** created by the
   reconciler — imperative, outside CI, by design.
 
 ### Agent runtime
@@ -184,14 +184,14 @@ everything upstream). Two levels:
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
 
 ### Provisioning / bootstrap
-- **Declarative layer = OpenTofu + Hetzner provider** (not Pulumi — keep infra boring). Defines
+- **Declarative layer = Pulumi (TS) + pulumi-hcloud provider**. Defines
   only persistent stuff (~50 lines). State backend = **Hetzner Object Storage (S3)**. *(Pending
   research confirms.)*
 - **Bootstrap root of trust = GitHub Actions secrets** (Hetzner token + main-box age private key).
   Everything else flows from sops afterward. One clean handoff: GH Actions secrets = bootstrap,
   sops = steady state.
 - Sequence: generate age keypairs → pubkey to repo as sops recipient → GH Actions secrets hold
-  Hetzner token + age privkey → CI `tofu apply` creates main box → cloud-init installs bun, clones
+  Hetzner token + age privkey → CI `pulumi up` creates main box → cloud-init installs bun, clones
   tidepool, injects age privkey, starts reconciler → main box decrypts sops → alive.
 
 ### Spend guardrails (defense in depth — "$100k bill is impossible by construction")
@@ -203,24 +203,26 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
 - **L2 — reconciler hard cap** (`workers.max`): never spawn beyond it.
 - **L3 — Effect `Scope`/`acquireRelease`:** a box is created *in a scope* → guaranteed `DELETE` on
   scope close, even on crash/exception. Teardown is structural, not best-effort.
-- **L4 — the reaper:** periodic sweep lists ALL boxes by label (`managed_by=tidepool`) and destroys
-  any orphaned (no live ticket) / over-TTL / over-cap. Catches leaked boxes the reconciler lost.
+- **L4 — the reaper:** periodic sweep lists **worker** boxes (`managed_by=tidepool,role=worker`) and
+  destroys orphaned (no live ticket) / over-TTL / over-cap. Catches leaked workers the reconciler lost.
+  **The management box (`role=management`) is persistent — never reaped, no TTL, kept around.**
+  "Return to baseline" = workers->0; the management box stays. Worker and management are the only roles.
 - **L5 — per-box max-TTL self-destruct** (box-side timer) + idle self-destruct. Two-sided kill.
 - **L6 — spend circuit-breaker:** if live-boxes or spawn-rate exceeds a ceiling, STOP and alert Calum
   instead of spawning (dead-man's switch).
 - Cost safety is a tenet-level concern: any change that could weaken L1–L6 needs human approval.
 
 ### Deploy & GitOps for the control plane itself
-- **First install = cloud-init (the only imperative first-touch).** CI `tofu apply` creates the main
+- **First install = cloud-init (the only imperative first-touch).** CI `pulumi up` creates the main
   box; cloud-init installs runtime (bun/node/git/sops/age), clones `tidepool` @ pinned ref, injects
-  the main-box age key (CI decrypts from sops → tofu var), `sops -d` secrets, `bun install
+  the main-box age key (CI decrypts from sops → Pulumi config), `sops -d` secrets, `bun install
   --frozen-lockfile`, writes `tidepool.service`, `systemctl enable --now`.
 - **Ongoing deploy = pull-based, two lanes:**
   - *App/reconciler/config/secrets:* merge to `main` → box **self-update systemd timer** sees new SHA
     → `git pull` + `bun install --frozen-lockfile` + graceful `systemctl restart`. Pull-based → **no
     inbound access needed** (fits outbound-only box). Restart is safe mid-task (reattach handles +
     persistent volume).
-  - *Infra (`infra/**`):* PR → CI `tofu plan`; merge → CI `tofu apply`. Reprovision → cloud-init
+  - *Infra (`infra/**`):* PR → CI `pulumi preview`; merge → CI `pulumi up`. Reprovision → cloud-init
     reinstalls → resume from volume.
 - **Workers:** snapshot bakes heavy invariant runtime (bun/node/opencode binary); worker **clones
   `tidepool` @ pinned ref at boot** and runs the runner from source → always-current, no
@@ -240,7 +242,7 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
 - **v1 floor:** deny-all-inbound firewall except key-only SSH (ideally IP-pinned); reconciler is
   **outbound-only** (no public listen port). `tp ls/logs` over SSH tunnel. Small attack surface.
 - **v1.1:** **Tailscale** the main box → `tp` over the tailnet, drop public SSH. (You have it.)
-- Firewall is declarative (OpenTofu).
+- Firewall is declarative (Pulumi).
 
 ---
 
@@ -319,6 +321,6 @@ self-bootstrap flip · cost analytics UI · Temporal (only if reconciler hurts) 
 
 ## 6. Open items (pending research workflow → RESEARCH.md)
 
-Crabbox brokered-Hetzner programmatic fit · Hetzner Object Storage as tofu backend · opencode
+Crabbox brokered-Hetzner programmatic fit · Hetzner Object Storage as Pulumi state backend · opencode
 usage/cost field names + refresh-after-copy fix version · GitHub auto-merge mechanics · AXI 10
 principles · exact pinned versions.
