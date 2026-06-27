@@ -1,0 +1,5 @@
+# Pin the toolchain identically across local dev, CI, and the worker/main boxes (env parity).
+# Next session: confirm/pin pulumi + node versions.
+[tools]
+bun = "1.2.19"
+opencode = "1.17.11"

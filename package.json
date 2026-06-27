@@ -1,0 +1,41 @@
+{
+  "name": "tidepool",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "bun": ">=1.2" },
+  "bin": { "tp": "./src/cli.ts" },
+  "scripts": {
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "commitlint": "commitlint --last --verbose",
+    "check": "biome check . && bun run typecheck && bun run test",
+    "prepare": "lefthook install"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "1.17.11",
+    "effect": "latest",
+    "@effect/platform": "latest",
+    "@effect/platform-bun": "latest",
+    "@effect/cli": "latest",
+    "@effect/sql": "latest",
+    "@effect/sql-sqlite-bun": "latest",
+    "drizzle-orm": "latest",
+    "@octokit/rest": "latest",
+    "nanoid": "latest"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "latest",
+    "@commitlint/cli": "latest",
+    "@commitlint/config-conventional": "latest",
+    "@effect/vitest": "latest",
+    "@types/bun": "latest",
+    "drizzle-kit": "latest",
+    "fast-check": "latest",
+    "lefthook": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}

@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# local state — never committed (runtime store lives on the main box volume)
+*.sqlite
+*.sqlite-*
+.tidepool/
+transcripts/
+
+# decrypted secrets / bootstrap plaintext — never committed
+secrets/*.dec.*
+*.plaintext
+.bootstrap/
+
+# OpenTofu
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/.terraform.lock.hcl
