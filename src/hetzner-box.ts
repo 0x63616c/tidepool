@@ -191,8 +191,10 @@ export const makeHetznerBoxMaker = (params: {
             for (const location of spec.locations) {
               try {
                 const boxId = newBoxId();
+                // Hetzner names: [a-z0-9-], max 63 chars, no underscores.
+                const serverName = `tp-worker-${boxId.replace('box_', '')}`;
                 const { serverId, ip } = await createServer(params.token, {
-                  name: `tidepool-worker-${boxId}`,
+                  name: serverName,
                   serverType,
                   location,
                   sshKeyId: params.sshKeyId,
