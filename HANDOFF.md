@@ -35,12 +35,14 @@ locally to drive the Phase C cloud-worker run.
 
 ## Current repo state (2026-06-27)
 
-Done — Phase A + Phase B complete:
+Done — Phase A, Phase B, and Phase C implementation complete:
 - Docs: `DESIGN.md`, `RESEARCH.md`, `AGENTS.md`+`CLAUDE.md`, `GOALS.md`, `SKILLS.md`, `HANDOFF.md`.
 - Stack configs: `package.json` (Effect + Biome + opencode SDK `1.17.11`), `tsconfig.json`,
   `biome.json`, `lefthook.yml`, `commitlint.config.mjs`, `.mise.toml` (bun+opencode pinned).
 - `tidepool-testbed` repo exists (`0x63616c/tidepool-testbed`): pure-fn TS lib + vitest + identical
   rails (biome, commitlint, CI, `main` protected). `tp doctor` passes against it.
+- `secrets/tidepool.enc.yaml` — sops-encrypted (3 age recipients: mainbox/ci/breakglass).
+  Contains: `hcloud_token`, `github_token`, `opencode_auth_json`, `ssh_worker_private_key`.
 - `src/` — full implementation:
   - `domain.ts` — branded ids, typed errors, Ticket/Run schemas (Effect Schema)
   - `config.ts` — Effect Schema Config + `AppConfig` Tag + `loadConfig`
@@ -50,20 +52,20 @@ Done — Phase A + Phase B complete:
   - `fakes.ts` — `FakeTicketStore`, `FakeForge`, `FakeBoxMaker`, `FakeAgentRunner`
   - `sqlite-store.ts` — `@effect/sql-sqlite-bun` backed `TicketStore` (real)
   - `forge.ts` — GitHub `Forge` via Octokit port + `GithubForgeLive` Layer
-  - `agent-runner.ts` — opencode `AgentRunner` (`@opencode-ai/sdk`) + `OpencodeAgentRunnerLive`
-  - `local-box.ts` — `LocalBoxMaker` (degenerate localhost lease, Phase B)
-  - `doctor.ts` — `runDoctor` / `renderDoctor` / `gatherDoctorFacts`
-  - `runtime.ts` — `LiveStack` Layer (sqlite + config + GitHub + opencode + local box)
+  - `agent-runner.ts` — opencode `AgentRunner` (`@opencode-ai/sdk`) + SSH remote runner for
+    Hetzner workers + `OpencodeAgentRunnerLive`. Routes on `box.ip !== '127.0.0.1'`.
+  - `hetzner-box.ts` — `HetznerBoxMaker`: Hetzner API, `acquireRelease`, reaper, type/location
+    fallback, cloud-init (bun + opencode binary + sentinel `/tmp/.tp-ready`), `HetznerBoxMakerLive`
+  - `local-box.ts` — `LocalBoxMaker` (degenerate localhost lease, kept for Phase B fallback)
+  - `doctor.ts` — `runDoctor` / `renderDoctor` / `gatherDoctorFacts` (4 facts: slugify +
+    fresh-clone test + non-zero tokens + non-null `box_id`)
+  - `runtime.ts` — `LiveStack` Layer (sqlite + config + GitHub + opencode + **HetznerBoxMaker**)
   - `cli.ts` — `tp ls / ticket add / run / doctor`
-- `tp doctor` exits 0: slugify on `tidepool-testbed@main`, fresh-clone test passes, non-zero tokens.
-- `infra/bootstrap/collect.sh` — ran; creds/keys collected.
-- Hetzner **e2e smoke-tested**: token + private-network + cpx box create/teardown all proven live.
+- All 101 unit tests passing (`bun run check` exits 0).
 
-Next (Phase C — THE MISSION):
-- Real `HetznerBoxMaker` with Effect Scope teardown, reaper, max-TTL, location fallback.
-- Secrets in sops (`secrets/tidepool.enc.yaml`); worker gets auth.json over SSH JIT.
-- Drive tckt_001 (or a new ticket) on a REAL Hetzner worker: box created → agent runs → PR merged → box deleted.
-- `tp doctor` exits 0 AND the run record shows the `box_id` (proves Hetzner-generated).
+**Phase C e2e still pending** (the actual cloud run):
+- Run `tp run` → provisions real Hetzner cpx22 worker → agent runs ON box → PR merged → box deleted.
+- `tp doctor` exits 0 AND shows non-null `box_id` in run record.
 
 ## Secrets / inputs in place
 

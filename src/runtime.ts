@@ -3,7 +3,7 @@ import { Effect, Layer } from 'effect';
 import { OpencodeAgentRunnerLive } from './agent-runner.ts';
 import { AppConfig, loadConfig } from './config.ts';
 import { GithubForgeLive } from './forge.ts';
-import { LocalBoxMaker } from './local-box.ts';
+import { HetznerBoxMakerLive } from './hetzner-box.ts';
 import { TicketStore } from './services.ts';
 import { makeSqliteStore } from './sqlite-store.ts';
 
@@ -30,11 +30,11 @@ export const AppConfigLive = Layer.effect(
   loadConfig(() => import('../tidepool.config.ts')),
 );
 
-/** The full real stack: durable store + GitHub + opencode + local compute. */
+/** The full real stack: durable store + GitHub + opencode + real Hetzner workers. */
 export const LiveStack = Layer.mergeAll(
   SqliteTicketStore,
   AppConfigLive,
   GithubForgeLive,
   OpencodeAgentRunnerLive,
-  LocalBoxMaker,
+  HetznerBoxMakerLive,
 );
