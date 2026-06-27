@@ -3,8 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "bun": ">=1.2" },
-  "bin": { "tp": "./src/cli.ts" },
+  "engines": {
+    "bun": ">=1.2"
+  },
+  "bin": {
+    "tp": "./src/cli.ts"
+  },
   "scripts": {
     "format": "biome format --write .",
     "lint": "biome check .",
@@ -16,26 +20,26 @@
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.17.11",
-    "effect": "latest",
-    "@effect/platform": "latest",
-    "@effect/platform-bun": "latest",
-    "@effect/cli": "latest",
-    "@effect/sql": "latest",
-    "@effect/sql-sqlite-bun": "latest",
-    "drizzle-orm": "latest",
-    "@octokit/rest": "latest",
-    "nanoid": "latest"
+    "effect": "3.21.4",
+    "@effect/platform": "0.96.2",
+    "@effect/platform-bun": "0.90.0",
+    "@effect/cli": "0.75.2",
+    "@effect/sql": "0.51.1",
+    "@effect/sql-sqlite-bun": "0.52.0",
+    "drizzle-orm": "0.45.2",
+    "@octokit/rest": "22.0.1",
+    "nanoid": "5.1.16"
   },
   "devDependencies": {
-    "@biomejs/biome": "latest",
-    "@commitlint/cli": "latest",
-    "@commitlint/config-conventional": "latest",
-    "@effect/vitest": "latest",
-    "@types/bun": "latest",
-    "drizzle-kit": "latest",
-    "fast-check": "latest",
-    "lefthook": "latest",
-    "typescript": "latest",
-    "vitest": "latest"
+    "@biomejs/biome": "2.5.1",
+    "@commitlint/cli": "21.1.0",
+    "@commitlint/config-conventional": "21.1.0",
+    "@effect/vitest": "0.29.0",
+    "@types/bun": "1.3.14",
+    "drizzle-kit": "0.31.10",
+    "fast-check": "4.8.0",
+    "lefthook": "2.1.9",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
   }
 }
