@@ -15,5 +15,5 @@
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "tidepool.config.ts"]
+  "include": ["src", "tidepool.config.ts", "vitest.config.ts"]
 }
