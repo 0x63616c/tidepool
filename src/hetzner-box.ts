@@ -51,14 +51,40 @@ class ResourceUnavailable extends Error {
   }
 }
 
+// ── Worker install recipe (single source of truth) ───────────────────────────
+
+/** Repo path to the worker install recipe — what is baked into a worker. */
+const BAKE_SCRIPT_PATH = new URL('../infra/worker/bake.sh', import.meta.url);
+
+/**
+ * The install recipe as a list of shell command lines, read from
+ * `infra/worker/bake.sh`. Both consumers — the cloud-init runcmd below and the
+ * prebaked image (`infra/worker/Dockerfile`) — derive from this one file, so the
+ * stock-boot path and the snapshot path can never drift. Shebang, comments and
+ * blank lines are dropped; only the commands are inlined.
+ */
+export const bakeRecipeCommands = (): ReadonlyArray<string> =>
+  readFileSync(BAKE_SCRIPT_PATH, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
+
 // ── Pure cloud-init generator ────────────────────────────────────────────────
 
 /**
- * Minimal cloud-init for a worker node: installs bun, adds the opencode SDK
- * globally. The reconciler delivers openai credentials separately over SSH.
+ * Minimal cloud-init for a worker node: installs bun + the opencode SDK/binary
+ * by inlining the bake.sh recipe verbatim. The reconciler delivers openai
+ * credentials separately over SSH.
  */
-export const workerCloudInit = (sshPubKey: string): string =>
-  [
+export const workerCloudInit = (sshPubKey: string): string => {
+  // Inline the SAME recipe bake.sh defines, then append the per-boot sentinel.
+  // One fail-fast `bash -c` (bake.sh begins `set -ex`); .tp-ready is touched
+  // ONLY if every step succeeds, and all output is captured to
+  // /var/log/tp-cloudinit.log. The sentinel is appended here (not baked) because
+  // the runner must observe it on every boot, even once a prebaked image already
+  // has everything installed.
+  const recipe = [...bakeRecipeCommands(), 'touch /tmp/.tp-ready'].join('; ');
+  return [
     '#cloud-config',
     'users:',
     '  - name: root',
@@ -72,25 +98,9 @@ export const workerCloudInit = (sshPubKey: string): string =>
     '  - systemctl disable --now apt-daily.timer apt-daily-upgrade.timer || true',
     'packages: [git, curl, unzip]',
     'runcmd:',
-    // Single fail-fast shell: .tp-ready is touched ONLY if every install succeeds
-    // (set -e). All output captured to /var/log/tp-cloudinit.log for diagnosis.
-    // HOME is unset in cloud-init's runcmd context; the bun installer needs it
-    // (and bun lands in $HOME/.bun). `set -e` fails fast; `-u` is omitted as the
-    // third-party install scripts legitimately reference optional vars.
-    "  - bash -c 'set -ex; export HOME=/root; " +
-      'curl -fsSL https://bun.sh/install | bash; ' +
-      // bun install (also populates the global package cache used by the runner)
-      '/root/.bun/bin/bun add -g @opencode-ai/sdk@1.17.11; ' +
-      // opencode binary (spawned by createOpencodeServer via cross-spawn). The
-      // curl installer's -b flag is broken ("Binary not found"); the npm package
-      // ships the binary and lands it on the bun global bin (already on the
-      // runner's PATH), so install it the same way as the SDK.
-      '/root/.bun/bin/bun add -g opencode-ai@1.17.11; ' +
-      // ensure opencode auth dir exists; JIT auth.json is delivered over SSH
-      'mkdir -p /root/.local/share/opencode; ' +
-      // sentinel: the runner polls this before delivering auth + executing work
-      "touch /tmp/.tp-ready' > /var/log/tp-cloudinit.log 2>&1",
+    `  - bash -c '${recipe}' > /var/log/tp-cloudinit.log 2>&1`,
   ].join('\n');
+};
 
 // ── Hetzner API helpers ──────────────────────────────────────────────────────
 
@@ -119,6 +129,8 @@ export const createServer = async (
     readonly sshKeyId: number;
     readonly networkId: number;
     readonly userData: string;
+    /** Boot image: a Hetzner image name or a snapshot id. Defaults to ubuntu-24.04. */
+    readonly image?: string | number;
     readonly labels?: Record<string, string>;
   },
 ): Promise<{ readonly serverId: number; readonly ip: string }> => {
@@ -128,7 +140,7 @@ export const createServer = async (
     body: JSON.stringify({
       name: params.name,
       server_type: params.serverType,
-      image: 'ubuntu-24.04',
+      image: params.image ?? 'ubuntu-24.04',
       location: params.location,
       ssh_keys: [params.sshKeyId],
       networks: [params.networkId],
@@ -205,6 +217,8 @@ export const makeHetznerBoxMaker = (params: {
   readonly sshKeyId: number;
   readonly networkId: number;
   readonly sshPubKey: string;
+  /** Optional prebaked image (name or snapshot id); undefined → ubuntu-24.04. */
+  readonly imageId?: string | number;
 }): BoxMakerApi => ({
   lease: (spec: BoxSpec) => {
     // Track the provisioned server id so the release can delete it.
@@ -226,6 +240,7 @@ export const makeHetznerBoxMaker = (params: {
                   sshKeyId: params.sshKeyId,
                   networkId: params.networkId,
                   userData,
+                  image: params.imageId,
                   labels: spec.labels,
                 });
                 provisionedServerId = serverId;

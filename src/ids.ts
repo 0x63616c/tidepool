@@ -2,7 +2,7 @@ import { Schema } from 'effect';
 import { customAlphabet } from 'nanoid';
 
 /**
- * Stripe-style prefixed identifiers: `<prefix>_<base62 suffix>`.
+ * Stripe-style prefixed identifiers: `<prefix>_<lowercase base36 suffix>`.
  * The same id is the sqlite PK, the CLI display value, and threads through
  * branch / PR / commit. Generation is centralised here; callers never build ids.
  */

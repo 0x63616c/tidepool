@@ -128,10 +128,14 @@ everything upstream). Two levels:
 - **Loop-logic (free, today, fakes):** terminal check = **reconciler vitest suite green** — a ticket
   driven `backlog → … → done` against `Fake*` adapters, plus reattach-after-restart. Proves the state
   machine + resumability with no infra.
-- **Real end-to-end (needs provisioning + spend):** terminal check via **`tp doctor`** = `slugify`
-  exists on `tidepool-testbed@main` + its test passes + the run's sqlite `usage` row is **non-zero**.
-  That single assertion implies: reconciler picked it → worker booted → opencode ran on the *real
-  subscription* (non-zero tokens ⇒ not faked) → branch → PR → CI green → review approved → auto-merged.
+- **Real end-to-end (needs provisioning + spend):** terminal check via **`tp doctor`** = FOUR facts:
+  `slugify` exists on `tidepool-testbed@main` + its test passes + the run's sqlite `usage` row is
+  **non-zero** + the latest work run's box provider is **`hetzner`** (proves a real cloud worker, not
+  `LocalBoxMaker`). That single assertion implies: reconciler picked it → worker booted → opencode ran
+  on the *real subscription* (non-zero tokens ⇒ not faked) → branch → PR → CI green → review approved →
+  auto-merged.
+  - **Phase C PROVEN (2026-06-28):** real Hetzner box → opencode → merged testbed PR → `tp doctor`
+    exit 0.
 
 ### Forge
 - **GitHub** (PRs, Actions, Octokit, zero extra infra), behind a `Forge` interface (GitLab later).
@@ -163,7 +167,8 @@ everything upstream). Two levels:
 - **Auto-merge in v1.** No human gate. Escalates to a human only on repeated failure.
 
 ### Standards (the spec the review agent grades against — mechanical, not vibes)
-- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `lease_`, `pr_` + short base62.
+- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `lease_`, `pr_` + short lowercase base36
+  (`[0-9a-z]`, matches the `tckt_[0-9a-z]+` gate).
   Same id is the sqlite PK, the CLI display, and threads through branch/PR/commit.
 - **Branch:** `tp/tckt_xxx-short-slug`.
 - **Commit subject leads with the ticket:** `#tckt_xxx feat(scope): subject` (we own commitlint).
@@ -254,6 +259,10 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   endless easy tickets, identical rails). **Owns no infrastructure.**
 - **Self-bootstrap later** = one config line: add `tidepool` to `targets`. Testbed stays forever
   as a safe integration-test target.
+- **Both repos are now PUBLIC + hardened (2026-06-28).** `tidepool` and `tidepool-testbed` are both
+  public, with branch protection on `main`: required status check `check`, linear history, no
+  force-push, no branch deletions, enforce-admins on. Actions `GITHUB_TOKEN` is read-only by default,
+  and both repos carry **0 repo secrets**.
 
 ## 4. Hetzner (one project: `tidepool`; testbed owns no infra)
 
@@ -273,6 +282,19 @@ every datacenter** (capacity), and gen-1 `cpx11/21` are US-only. EU offers `cpx1
   not the public internet. Fits least-privilege tenet; no egress cost.
 - **E2E smoke-tested 2026-06-27:** token + network create + server-on-network create + teardown all
   proven against the real API (created cpx22 w/ private IP 10.0.0.2, deleted cleanly).
+
+**Worker first-boot (proven 2026-06-28).** Lessons baked into the worker boot path:
+- **Recycled-IP ephemeral boxes → host-key verification disabled.** Workers come and go on recycled
+  public IPs, so SSH uses `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` (a stale
+  known-hosts entry for a reused IP would otherwise abort the connection).
+- **cloud-init** installs `unzip`, sets `HOME=/root`, and installs opencode via `bun add -g
+  opencode-ai`; **bootcmd disables `apt-daily`/`unattended-upgrades`** before anything else (avoids a
+  ~12-minute apt-lock stall while the boot scripts fight the background updater).
+- **`sshRun` passes the remote command as a single arg** (not split across argv) so quoting survives.
+- Worker boxes are named **`tp-worker-<ticket>-<id>`** and carry a **ticket label**.
+- **TEMPORARY hotfix:** the worker runner currently **force-exits (`process.exit(0)`) after push**
+  because the embedded opencode server keeps Bun's event loop alive (the process would otherwise hang
+  open). This is a stop-gap pending the Effect runner rewrite — **not** the intended shape.
 
 Cost reality: the model is the already-paid Codex sub. Hetzner ≈ €10–20/mo (main flat + workers
 hourly-only-when-up). State backend = Pulumi Cloud (free), no object-storage bill.

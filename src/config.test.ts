@@ -34,6 +34,15 @@ describe('defineConfig', () => {
   it('throws when box.locations is empty', () => {
     assert.throws(() => defineConfig({ ...valid, box: { type: 'cpx11', locations: [] } }));
   });
+
+  it('defaults box.imageId to undefined (stock ubuntu)', () => {
+    assert.strictEqual(defineConfig(valid).box.imageId, undefined);
+  });
+
+  it('accepts a box.imageId snapshot id', () => {
+    const cfg = defineConfig({ ...valid, box: { ...valid.box, imageId: 234_567_890 } });
+    assert.strictEqual(cfg.box.imageId, 234_567_890);
+  });
 });
 
 describe('modelsFor', () => {
