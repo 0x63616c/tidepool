@@ -32,6 +32,12 @@ export const BoxConfig = Schema.Struct({
   type: Schema.String,
   /** Fallback order on `resource_unavailable` (capacity will bite if hardcoded). */
   locations: Schema.NonEmptyArray(Schema.String),
+  /**
+   * Optional prebaked worker image — a Hetzner image name or snapshot id. When
+   * omitted, workers boot stock `ubuntu-24.04` and run the full bake.sh recipe
+   * via cloud-init (today's behavior). A later PR sets this to the snapshot id.
+   */
+  imageId: Schema.optional(Schema.Union(Schema.String, Schema.Number)),
 });
 export type BoxConfig = typeof BoxConfig.Type;
 

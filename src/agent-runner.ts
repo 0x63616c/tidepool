@@ -184,12 +184,23 @@ const SSH_OPTS = [
   'ConnectTimeout=15',
 ] as const;
 
+/**
+ * Build the exact `ssh` argv for running `cmd` on `root@ip`. The command is the
+ * SINGLE trailing arg — ssh re-joins trailing argv with spaces, so wrapping it in
+ * `sh -c` would mangle quoting (`test -f x` → bare `test`). sshd already runs the
+ * string via the remote login shell. Pure so both helpers share one source of
+ * truth and the host-key + single-arg invariants stay regression-locked.
+ */
+export const sshArgv = (ip: string, cmd: string): readonly string[] => [
+  'ssh',
+  ...SSH_OPTS,
+  `root@${ip}`,
+  cmd,
+];
+
 /** Run a shell command on the worker. Returns stdout. Throws on non-zero exit. */
 const sshRun = async (ip: string, cmd: string): Promise<string> => {
-  // Pass the command as a SINGLE arg — ssh re-joins trailing argv with spaces,
-  // so an extra `sh -c` here would mangle quoting (`test -f x` → bare `test`).
-  // sshd already runs the string via the remote login shell.
-  const proc = Bun.spawn(['ssh', ...SSH_OPTS, `root@${ip}`, cmd], {
+  const proc = Bun.spawn([...sshArgv(ip, cmd)], {
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -204,8 +215,7 @@ const sshRun = async (ip: string, cmd: string): Promise<string> => {
 
 /** Pipe a string into stdin of a remote command. */
 const sshPipe = async (ip: string, cmd: string, stdin: string): Promise<void> => {
-  // Single-arg command — see sshRun: an extra `sh -c` would mangle quoting.
-  const proc = Bun.spawn(['ssh', ...SSH_OPTS, `root@${ip}`, cmd], {
+  const proc = Bun.spawn([...sshArgv(ip, cmd)], {
     stdin: new TextEncoder().encode(stdin),
     stderr: 'pipe',
   });
