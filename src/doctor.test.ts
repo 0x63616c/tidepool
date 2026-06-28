@@ -11,7 +11,7 @@ const pass: DoctorFacts = {
   slugifyPresent: true,
   freshCloneTestPassed: true,
   latestRunTokens: 150,
-  latestWorkRunBoxId: 'box_abc123',
+  latestWorkRunBoxProvider: 'hetzner',
 };
 
 describe('doctorVerdict', () => {
@@ -37,9 +37,15 @@ describe('doctorVerdict', () => {
     assert.match(v.reason ?? '', /token/i);
   });
 
-  it('null box_id → fail naming box_id (Phase C proof)', () => {
-    const v = doctorVerdict({ ...pass, latestWorkRunBoxId: null });
+  it('null box provider → fail naming hetzner (Phase C proof)', () => {
+    const v = doctorVerdict({ ...pass, latestWorkRunBoxProvider: null });
     assert.isFalse(v.ok);
-    assert.match(v.reason ?? '', /box_id/i);
+    assert.match(v.reason ?? '', /hetzner/i);
+  });
+
+  it('local box provider → fail naming hetzner (LocalBoxMaker not a real proof)', () => {
+    const v = doctorVerdict({ ...pass, latestWorkRunBoxProvider: 'local' });
+    assert.isFalse(v.ok);
+    assert.match(v.reason ?? '', /hetzner/i);
   });
 });

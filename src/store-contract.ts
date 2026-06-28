@@ -94,6 +94,7 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
             ticketId: a.id,
             kind: 'work',
             boxId: newBoxId(),
+            boxProvider: 'hetzner',
             usage: { model: 'm', tokensIn: 100, tokensOut: 50, wallTimeSec: 1 },
           } satisfies Run;
           yield* store.addRun(run);

@@ -171,8 +171,13 @@ const SSH_KEY = join(homedir(), '.tidepool/bootstrap/ssh-tidepool');
 const SSH_OPTS = [
   '-i',
   SSH_KEY,
+  // Workers are ephemeral cattle and Hetzner recycles public IPs, so a pinned
+  // host key for a recycled IP trips "HOST IDENTIFICATION CHANGED" and fails
+  // every connect. Don't persist or verify host keys for these throwaway boxes.
   '-o',
-  'StrictHostKeyChecking=accept-new',
+  'StrictHostKeyChecking=no',
+  '-o',
+  'UserKnownHostsFile=/dev/null',
   '-o',
   'BatchMode=yes',
   '-o',
@@ -181,7 +186,10 @@ const SSH_OPTS = [
 
 /** Run a shell command on the worker. Returns stdout. Throws on non-zero exit. */
 const sshRun = async (ip: string, cmd: string): Promise<string> => {
-  const proc = Bun.spawn(['ssh', ...SSH_OPTS, `root@${ip}`, 'sh', '-c', cmd], {
+  // Pass the command as a SINGLE arg — ssh re-joins trailing argv with spaces,
+  // so an extra `sh -c` here would mangle quoting (`test -f x` → bare `test`).
+  // sshd already runs the string via the remote login shell.
+  const proc = Bun.spawn(['ssh', ...SSH_OPTS, `root@${ip}`, cmd], {
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -196,7 +204,8 @@ const sshRun = async (ip: string, cmd: string): Promise<string> => {
 
 /** Pipe a string into stdin of a remote command. */
 const sshPipe = async (ip: string, cmd: string, stdin: string): Promise<void> => {
-  const proc = Bun.spawn(['ssh', ...SSH_OPTS, `root@${ip}`, 'sh', '-c', cmd], {
+  // Single-arg command — see sshRun: an extra `sh -c` would mangle quoting.
+  const proc = Bun.spawn(['ssh', ...SSH_OPTS, `root@${ip}`, cmd], {
     stdin: new TextEncoder().encode(stdin),
     stderr: 'pipe',
   });
@@ -239,6 +248,15 @@ import { $ } from 'bun';
 import { readFile } from 'node:fs/promises';
 
 const log = (msg) => process.stderr.write('[runner] ' + msg + '\\n');
+
+// Ensure opencode binary is findable by createOpencodeServer (cross-spawn uses PATH).
+// The installer puts it in /usr/local/bin (-b flag) as primary; fall back to ~/.opencode/bin.
+process.env.PATH = [
+  '/usr/local/bin',
+  '/root/.opencode/bin',
+  '/root/.bun/bin',
+  process.env.PATH ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+].join(':');
 
 const cfg = JSON.parse(await readFile('./config.json', 'utf8'));
 const { cloneUrl, base, branch, dir, model, prompt, commitMsg } = cfg;
@@ -327,10 +345,16 @@ try {
   await $\`git -C \${dir} push -u origin \${branch}\`.quiet();
   log('pushed ' + commitSha);
 
-  process.stdout.write(JSON.stringify({ commitSha, usage: parseUsage(events) }) + '\\n');
+  await new Promise((resolve) =>
+    process.stdout.write(JSON.stringify({ commitSha, usage: parseUsage(events) }) + '\\n', resolve),
+  );
 } finally {
   server.close();
 }
+// The embedded opencode server + open event-subscription stream keep Bun's event
+// loop alive, so the runner would hang after pushing. Flush the result (above),
+// then force a clean exit so the reconciler's sshRun returns and can open the PR.
+process.exit(0);
 `;
 
 type RemoteWorkInput = {

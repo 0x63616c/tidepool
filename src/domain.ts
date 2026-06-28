@@ -32,12 +32,20 @@ export type Usage = typeof Usage.Type;
 export const AgentKind = Schema.Literal('work', 'review');
 export type AgentKind = typeof AgentKind.Type;
 
-/** One agent invocation. `boxId` set ⇒ ran on a Hetzner worker (Phase C proof). */
+export const BoxProvider = Schema.Literal('hetzner', 'local');
+export type BoxProvider = typeof BoxProvider.Type;
+
+/**
+ * One agent invocation. `boxProvider === 'hetzner'` ⇒ ran on a REAL cloud worker
+ * (Phase C proof). `'local'` means LocalBoxMaker (Phase B); null means review run
+ * (no box involved).
+ */
 export const Run = Schema.Struct({
   id: RunId,
   ticketId: TicketId,
   kind: AgentKind,
   boxId: Schema.NullOr(BoxId),
+  boxProvider: Schema.NullOr(BoxProvider),
   usage: Usage,
 });
 export type Run = typeof Run.Type;

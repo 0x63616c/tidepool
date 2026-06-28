@@ -1,7 +1,12 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { BoxFailed } from './domain.ts';
-import { makeHetznerBoxMaker, workerCloudInit } from './hetzner-box.ts';
+import {
+  createServer,
+  makeHetznerBoxMaker,
+  workerCloudInit,
+  workerServerName,
+} from './hetzner-box.ts';
 
 /**
  * Hetzner box maker — unit tests over pure functions and the factory.
@@ -26,6 +31,52 @@ describe('workerCloudInit', () => {
 
   it('includes opencode sdk install', () => {
     assert.include(workerCloudInit(FAKE_KEY), '@opencode-ai/sdk');
+  });
+});
+
+describe('workerServerName', () => {
+  it('includes the sanitized ticket id when provided', () => {
+    const n = workerServerName('box_abc123', { ticket: 'tckt_qt6tbzn900' });
+    assert.include(n, 'tckt-qt6tbzn900', 'ticket id should appear in the name');
+    assert.notInclude(n, '_', 'Hetzner names may not contain underscores');
+    assert.isTrue(n.startsWith('tp-worker-'));
+  });
+
+  it('falls back to the box id when no ticket label is present', () => {
+    assert.equal(workerServerName('box_abc123', {}), 'tp-worker-abc123');
+  });
+});
+
+describe('createServer labels', () => {
+  it('applies caller labels alongside the non-overridable reaper labels', async () => {
+    let captured: { labels?: Record<string, string> } = {};
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = Object.assign(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({ server: { id: 1, public_net: { ipv4: { ip: '1.2.3.4' } } } }),
+          { status: 201 },
+        );
+      },
+      { preconnect: () => {} },
+    ) as typeof fetch;
+
+    await createServer('tok', {
+      name: 'tp-worker-x',
+      serverType: 'cpx22',
+      location: 'nbg1',
+      sshKeyId: 1,
+      networkId: 2,
+      userData: 'x',
+      labels: { ticket: 'tckt_qt6tbzn900' },
+    });
+
+    globalThis.fetch = origFetch;
+
+    assert.equal(captured.labels?.ticket, 'tckt_qt6tbzn900', 'caller ticket label applied');
+    assert.equal(captured.labels?.managed_by, 'tidepool');
+    assert.equal(captured.labels?.role, 'worker');
   });
 });
 

@@ -78,12 +78,20 @@ export interface Box {
   readonly id: BoxId;
   readonly ip: string;
   readonly role: BoxRole;
+  /** Identifies the provisioner — 'hetzner' for real cloud, 'local' for LocalBoxMaker. */
+  readonly provider: 'hetzner' | 'local';
 }
 
 export interface BoxSpec {
   readonly type: string;
   readonly locations: ReadonlyArray<string>;
   readonly ttlSec: number;
+  /**
+   * Opaque key/value tags applied to the provisioned box (e.g. `{ ticket }`) so
+   * a live box is traceable to its work. The `BoxMaker` treats them as strings —
+   * it never interprets them, keeping the seam provider-agnostic.
+   */
+  readonly labels?: Record<string, string>;
 }
 
 export interface BoxMakerApi {
