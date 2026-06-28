@@ -236,12 +236,17 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   machinery, no manual SSH-fiddle, resumable across restarts.
 
 ### Surface & cost visibility
-- **CLI-first, AXI-compliant; no TUI in v1.** `tp add | ls | logs`. AXI skill installed at
-  `.agents/skills/axi/` (shared across opencode + claude). TUI is a later skin.
+- **CLI-first, AXI-compliant; no TUI in v1.** `tp add | ls | logs | transcript | trace | cost`. AXI
+  skill installed at `.agents/skills/axi/` (shared across opencode + claude). TUI is a later skin.
+- **`tp trace <ticket>`** reconstructs a ticket's lifecycle from `run_events` (+ `runs`): a
+  ts-ordered timeline with phase labels (`in_progress`/`review`/`failed`), the work/review runs with
+  `box_id`/provider, and inter-event durations. **A browser/web view over the same data is a
+  follow-up** (out of scope for the trace+cost PR).
 - **Cost tracking: capture now, surface later.** Store the full lossless opencode event stream
   (has per-message token usage + timing). sqlite `runs` gets `usage` columns (tokens in/out, model,
   wall_time_sec, lease_sec). **Two cost axes per ticket:** token (opencode) + infra (lease-seconds
-  × Hetzner rate). `tp cost` analytics later, no data lost. *(Pending: confirm opencode usage fields.)*
+  × Hetzner rate). **`tp cost [<ticket>]`** now sums tokens + wall-time per run / ticket / model
+  (tokens-only — no dollar cost until a price map exists; infra-seconds axis is a follow-up).
 
 ### Connectivity & security
 - **v1 floor:** deny-all-inbound firewall except key-only SSH (ideally IP-pinned); reconciler is
