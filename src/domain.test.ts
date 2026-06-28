@@ -92,6 +92,7 @@ describe('Run schema', () => {
     ticketId: 'tckt_abcdefghij',
     kind: 'work',
     boxId: null,
+    boxProvider: null,
     usage: { model: 'm', tokensIn: 10, tokensOut: 5, wallTimeSec: 1 },
   };
 

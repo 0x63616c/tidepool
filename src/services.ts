@@ -78,6 +78,8 @@ export interface Box {
   readonly id: BoxId;
   readonly ip: string;
   readonly role: BoxRole;
+  /** Identifies the provisioner — 'hetzner' for real cloud, 'local' for LocalBoxMaker. */
+  readonly provider: 'hetzner' | 'local';
 }
 
 export interface BoxSpec {

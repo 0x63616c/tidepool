@@ -121,7 +121,12 @@ export const fakeBoxMaker = (opts: FakeBoxMakerOptions = {}): Layer.Layer<BoxMak
       Effect.acquireRelease(
         Effect.gen(function* () {
           if (opts.live) yield* Ref.update(opts.live, (n) => n + 1);
-          return { id: newBoxId(), ip: '10.0.0.2', role: 'worker' as const };
+          return {
+            id: newBoxId(),
+            ip: '10.0.0.2',
+            role: 'worker' as const,
+            provider: 'local' as const,
+          };
         }),
         () => (opts.live ? Ref.update(opts.live, (n) => n - 1) : Effect.void),
       ),

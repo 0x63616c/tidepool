@@ -11,7 +11,12 @@ import { BoxMaker } from './services.ts';
 export const LocalBoxMaker = Layer.succeed(BoxMaker, {
   lease: () =>
     Effect.acquireRelease(
-      Effect.sync(() => ({ id: newBoxId(), ip: '127.0.0.1', role: 'worker' as const })),
+      Effect.sync(() => ({
+        id: newBoxId(),
+        ip: '127.0.0.1',
+        role: 'worker' as const,
+        provider: 'local' as const,
+      })),
       () => Effect.void,
     ),
   reap: () => Effect.succeed({ deleted: [] }),

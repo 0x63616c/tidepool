@@ -103,6 +103,7 @@ const stepTicket = (
               ticketId: ticket.id,
               kind: 'work',
               boxId: box.id,
+              boxProvider: box.provider,
               usage: result.usage,
             });
             return result;
@@ -161,6 +162,7 @@ const stepTicket = (
           ticketId: ticket.id,
           kind: 'review',
           boxId: null,
+          boxProvider: null,
           usage: review.usage,
         });
 

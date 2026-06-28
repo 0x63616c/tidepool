@@ -26,6 +26,7 @@ interface RunRow {
   readonly ticketId: string;
   readonly kind: string;
   readonly boxId: string | null;
+  readonly boxProvider: string | null;
   readonly model: string;
   readonly tokensIn: number;
   readonly tokensOut: number;
@@ -39,6 +40,7 @@ const runFromRow = (r: RunRow): Run =>
     ticketId: r.ticketId,
     kind: r.kind,
     boxId: r.boxId,
+    boxProvider: r.boxProvider,
     usage: {
       model: r.model,
       tokensIn: r.tokensIn,
@@ -75,12 +77,16 @@ export const makeSqliteStore = (
         ticket_id TEXT NOT NULL,
         kind TEXT NOT NULL,
         box_id TEXT,
+        box_provider TEXT,
         usage_model TEXT NOT NULL,
         usage_tokens_in INTEGER NOT NULL,
         usage_tokens_out INTEGER NOT NULL,
         usage_wall_time_sec REAL NOT NULL
       )
     `.pipe(Effect.orDie);
+
+    // Migration: add box_provider column to existing databases (no-op if already present).
+    yield* sql`ALTER TABLE runs ADD COLUMN box_provider TEXT`.pipe(Effect.ignore);
 
     const insertTicket = (t: Ticket) =>
       sql`
@@ -143,12 +149,13 @@ export const makeSqliteStore = (
         }),
       addRun: (run) =>
         sql`
-          INSERT INTO runs (id, ticket_id, kind, box_id, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
-          VALUES (${run.id}, ${run.ticketId}, ${run.kind}, ${run.boxId}, ${run.usage.model}, ${run.usage.tokensIn}, ${run.usage.tokensOut}, ${run.usage.wallTimeSec})
+          INSERT INTO runs (id, ticket_id, kind, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
+          VALUES (${run.id}, ${run.ticketId}, ${run.kind}, ${run.boxId}, ${run.boxProvider}, ${run.usage.model}, ${run.usage.tokensIn}, ${run.usage.tokensOut}, ${run.usage.wallTimeSec})
         `.pipe(Effect.orDie, Effect.asVoid),
       runsFor: (id) =>
         sql<RunRow>`
           SELECT id, ticket_id AS "ticketId", kind, box_id AS "boxId",
+                 box_provider AS "boxProvider",
                  usage_model AS "model", usage_tokens_in AS "tokensIn",
                  usage_tokens_out AS "tokensOut", usage_wall_time_sec AS "wallTimeSec"
           FROM runs WHERE ticket_id = ${id} ORDER BY rowid

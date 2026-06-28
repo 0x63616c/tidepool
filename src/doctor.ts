@@ -12,7 +12,7 @@ import { TicketStore } from './services.ts';
  *  - slugify exists on the testbed's main branch (the work landed + merged),
  *  - a fresh clone's `bun run test` passes (CI's gate reproduces locally),
  *  - the latest recorded work run has non-zero tokens (a REAL agent ran, not a fake),
- *  - the latest work run has a non-null box_id (proves BoxMaker was invoked — Phase C proof).
+ *  - the latest work run has boxProvider === 'hetzner' (proves a REAL cloud worker, not LocalBoxMaker).
  * Any single failure ⇒ FAIL with a specific reason + a non-zero exit.
  */
 
@@ -20,8 +20,12 @@ export interface DoctorFacts {
   readonly slugifyPresent: boolean;
   readonly freshCloneTestPassed: boolean;
   readonly latestRunTokens: number;
-  /** box_id from the latest work run — non-null proves a real BoxMaker was invoked. */
-  readonly latestWorkRunBoxId: string | null;
+  /**
+   * Provider from the latest work run — must be `'hetzner'` to prove a REAL cloud
+   * worker was provisioned (LocalBoxMaker runs locally and sets `'local'`; null means
+   * no work run has been recorded yet).
+   */
+  readonly latestWorkRunBoxProvider: 'hetzner' | 'local' | null;
 }
 
 export interface DoctorVerdict {
@@ -40,8 +44,11 @@ export const doctorVerdict = (facts: DoctorFacts): DoctorVerdict => {
   if (facts.latestRunTokens <= 0) {
     return { ok: false, reason: 'latest run recorded zero tokens (no real agent run)' };
   }
-  if (facts.latestWorkRunBoxId === null) {
-    return { ok: false, reason: 'latest work run has no box_id (Hetzner worker not yet proven)' };
+  if (facts.latestWorkRunBoxProvider !== 'hetzner') {
+    return {
+      ok: false,
+      reason: `latest work run provider is not hetzner (got: ${facts.latestWorkRunBoxProvider ?? 'null'})`,
+    };
   }
   return { ok: true, reason: null };
 };
@@ -80,25 +87,25 @@ export const gatherDoctorFacts: Effect.Effect<DoctorFacts, never, TicketStore | 
       return { slugifyPresent, freshCloneTestPassed };
     });
 
-    // Proof of real runs: max tokens + box_id from the latest work run.
+    // Proof of real runs: max tokens + provider from the latest work run.
     const tickets = yield* store.list();
     let latestRunTokens = 0;
-    let latestWorkRunBoxId: string | null = null;
+    let latestWorkRunBoxProvider: 'hetzner' | 'local' | null = null;
     let latestWorkRunTime = 0;
     for (const ticket of tickets) {
       const runs = yield* store.runsFor(ticket.id);
       for (const run of runs) {
         latestRunTokens = Math.max(latestRunTokens, run.usage.tokensIn + run.usage.tokensOut);
         if (run.kind === 'work') {
-          // Runs are returned oldest-first; keep the last (most recent) work run's box_id.
-          latestWorkRunBoxId = run.boxId;
+          // Runs are returned oldest-first; keep the last (most recent) work run's provider.
+          latestWorkRunBoxProvider = run.boxProvider;
           latestWorkRunTime++;
         }
       }
     }
     void latestWorkRunTime; // used only to pick the last entry (loop overwrites)
 
-    return { ...clone, latestRunTokens, latestWorkRunBoxId };
+    return { ...clone, latestRunTokens, latestWorkRunBoxProvider };
   });
 
 /** The full doctor check: gather facts, then decide. Returns verdict + facts for rendering. */
@@ -116,6 +123,6 @@ export const renderDoctor = (v: DoctorVerdict & { readonly facts?: DoctorFacts }
         '  slugify on testbed@main ✓',
         '  fresh-clone bun run test ✓',
         '  non-zero run tokens ✓',
-        `  box_id in latest work run: ${v.facts?.latestWorkRunBoxId ?? '(see store)'}`,
+        `  hetzner provider in latest work run: ${v.facts?.latestWorkRunBoxProvider ?? '(none)'}`,
       ].join('\n')
     : `doctor: FAIL\n  reason: ${v.reason}`;

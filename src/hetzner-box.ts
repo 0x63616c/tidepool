@@ -202,7 +202,7 @@ export const makeHetznerBoxMaker = (params: {
                 });
                 provisionedServerId = serverId;
                 await waitForSsh(ip);
-                return { id: boxId, ip, role: 'worker' as const };
+                return { id: boxId, ip, role: 'worker' as const, provider: 'hetzner' as const };
               } catch (e) {
                 if (e instanceof ResourceUnavailable) continue;
                 throw e;
