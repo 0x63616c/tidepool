@@ -6,6 +6,7 @@ import {
   createServer,
   makeHetznerBoxMaker,
   workerCloudInit,
+  workerInstallScript,
   workerServerName,
 } from './hetzner-box.ts';
 
@@ -76,6 +77,25 @@ describe('workerCloudInit baked mode', () => {
     // The full-mode `bash -c '...'` wrapper is the nested-quote hazard. The baked
     // runcmd is a bare command with no embedded quoting, so it can never mangle.
     assert.notInclude(baked(), "bash -c '");
+  });
+});
+
+describe('workerInstallScript', () => {
+  it('is the bake.sh recipe body verbatim (the harness runs identical steps)', () => {
+    const script = workerInstallScript();
+    // Every inlined command must appear in the byte-for-byte script the local
+    // container harness executes, so "works in the harness" == "works on the box".
+    for (const cmd of bakeRecipeCommands()) {
+      assert.include(script, cmd);
+    }
+  });
+
+  it('keeps the fail-fast shell header', () => {
+    assert.include(workerInstallScript(), 'set -ex');
+  });
+
+  it('runs no command that touches the per-boot sentinel (boot appends it, not bake)', () => {
+    assert.notInclude(bakeRecipeCommands().join('\n'), '.tp-ready');
   });
 });
 

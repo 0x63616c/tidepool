@@ -70,6 +70,16 @@ export const bakeRecipeCommands = (): ReadonlyArray<string> =>
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'));
 
+/**
+ * The worker install recipe as the verbatim bake.sh script body. The local
+ * container harness (CI job `container-harness`) runs THIS exact text in a stock
+ * `ubuntu:24.04` container, so the harness install is byte-identical to what the
+ * cloud snapshot bakes and what cloud-init inlines — one source, no drift. The
+ * per-boot `.tp-ready` sentinel is deliberately absent (it is appended at boot,
+ * not baked); the harness touches it after this script succeeds.
+ */
+export const workerInstallScript = (): string => readFileSync(BAKE_SCRIPT_PATH, 'utf8');
+
 // ── Pure cloud-init generator ────────────────────────────────────────────────
 
 /** Per-boot readiness sentinel the runner polls before delivering JIT auth. */
