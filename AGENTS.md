@@ -55,7 +55,8 @@ a secret outside sops.
 ## Standards (enforced)
 
 - **Language/runtime:** TypeScript + Bun. One language across cli, reconciler, runner.
-- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `lease_`, `pr_` + short base62 suffix.
+- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `lease_`, `pr_` + short lowercase base36
+  suffix (`[0-9a-z]`), so ids satisfy their own commitlint/branch gate `tckt_[0-9a-z]+`.
 - **Branches:** `tp/<tckt_id>-<short-slug>` (e.g. `tp/tckt_a1b2c3-add-slugify`).
 - **Commits:** subject **leads with the ticket**, then Conventional Commits:
   `#tckt_a1b2c3 feat(scope): subject`. Body optional. Footer: `Ticket: tckt_a1b2c3`.
