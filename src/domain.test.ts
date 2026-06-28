@@ -8,6 +8,7 @@ import {
   MergeConflict,
   RateCapped,
   Run,
+  RunEvent,
   Ticket,
   TicketNotFound,
   type TicketState,
@@ -60,6 +61,7 @@ const validTicket = {
   mergeSha: null,
   attempts: 0,
   workedAttempt: null,
+  reason: null,
 };
 
 describe('Ticket schema', () => {
@@ -82,6 +84,51 @@ describe('Ticket schema', () => {
   it('rejects negative attempts', () => {
     assert.isTrue(
       Either.isLeft(Schema.decodeUnknownEither(Ticket)({ ...validTicket, attempts: -1 })),
+    );
+  });
+
+  it('accepts a non-null reason', () => {
+    assert.isTrue(
+      Either.isRight(Schema.decodeUnknownEither(Ticket)({ ...validTicket, reason: 'rate-capped' })),
+    );
+  });
+});
+
+describe('RunEvent schema', () => {
+  const validEvent = {
+    ticketId: 'tckt_abcdefghij',
+    runId: 'run_abcdefghij',
+    boxId: 'box_abcdefghij',
+    source: 'opencode',
+    ts: 1700000000000,
+    level: null,
+    line: '{"type":"message"}',
+  };
+
+  it('decodes a valid event (null run/box/level allowed)', () => {
+    assert.isTrue(Either.isRight(Schema.decodeUnknownEither(RunEvent)(validEvent)));
+    assert.isTrue(
+      Either.isRight(
+        Schema.decodeUnknownEither(RunEvent)({
+          ...validEvent,
+          runId: null,
+          boxId: null,
+          source: 'control-plane',
+          level: 'error',
+        }),
+      ),
+    );
+  });
+
+  it('rejects an unknown source', () => {
+    assert.isTrue(
+      Either.isLeft(Schema.decodeUnknownEither(RunEvent)({ ...validEvent, source: 'syslog' })),
+    );
+  });
+
+  it('rejects an unknown level', () => {
+    assert.isTrue(
+      Either.isLeft(Schema.decodeUnknownEither(RunEvent)({ ...validEvent, level: 'fatal' })),
     );
   });
 });

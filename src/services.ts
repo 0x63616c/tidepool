@@ -9,10 +9,12 @@ import type {
   RateCapped,
   ReviewVerdict,
   Run,
+  RunEvent,
+  RunSource,
   Ticket,
   Usage,
 } from './domain.ts';
-import type { BoxId, PrId, TicketId } from './ids.ts';
+import type { BoxId, PrId, RunId, TicketId } from './ids.ts';
 
 /**
  * The four deep modules. Each is a single `Context.Tag` (narrow front); real
@@ -23,8 +25,18 @@ import type { BoxId, PrId, TicketId } from './ids.ts';
 // ── TicketStore: the durable single source of truth (tickets + runs) ─────────
 
 export type TicketPatch = Partial<
-  Pick<Ticket, 'state' | 'branch' | 'prNumber' | 'prId' | 'mergeSha' | 'attempts' | 'workedAttempt'>
+  Pick<
+    Ticket,
+    'state' | 'branch' | 'prNumber' | 'prId' | 'mergeSha' | 'attempts' | 'workedAttempt' | 'reason'
+  >
 >;
+
+/** Filter for `eventsFor`. All optional; omitted fields don't constrain the query. */
+export interface EventQuery {
+  readonly ticketId?: TicketId;
+  readonly runId?: RunId;
+  readonly source?: RunSource;
+}
 
 export interface TicketStoreApi {
   readonly add: (input: NewTicket) => Effect.Effect<Ticket>;
@@ -36,6 +48,10 @@ export interface TicketStoreApi {
   ) => Effect.Effect<Ticket, import('./domain.ts').TicketNotFound>;
   readonly addRun: (run: Run) => Effect.Effect<void>;
   readonly runsFor: (id: TicketId) => Effect.Effect<ReadonlyArray<Run>>;
+  /** Append observability events (batch). Insertion order is preserved on read. */
+  readonly appendEvents: (events: ReadonlyArray<RunEvent>) => Effect.Effect<void>;
+  /** Read events oldest-first, narrowed by ticket / run / source. */
+  readonly eventsFor: (q: EventQuery) => Effect.Effect<ReadonlyArray<RunEvent>>;
 }
 
 export class TicketStore extends Context.Tag('TicketStore')<TicketStore, TicketStoreApi>() {}
@@ -108,17 +124,26 @@ export class BoxMaker extends Context.Tag('BoxMaker')<BoxMaker, BoxMakerApi>() {
 
 // ── AgentRunner: drives opencode (real) / scripted results (fake) ────────────
 
-/** Title/body are owned by the agent; the branch name is owned by the reconciler. */
+/**
+ * Title/body are owned by the agent; the branch name is owned by the reconciler.
+ * The optional capture fields carry the observability payload back from the box
+ * (opaque to this seam — `transcript` stays `unknown[]` so no opencode type leaks,
+ * tenet 4); the reconciler persists them as `RunEvent`s.
+ */
 export interface WorkResult {
   readonly title: string;
   readonly body: string;
   readonly commitSha: string | null;
   readonly usage: Usage;
+  readonly transcript?: ReadonlyArray<unknown>;
+  readonly workerStderr?: string;
+  readonly cloudInitLog?: string;
 }
 
 export interface ReviewResult {
   readonly verdict: ReviewVerdict;
   readonly usage: Usage;
+  readonly transcript?: ReadonlyArray<unknown>;
 }
 
 export interface AgentRunnerApi {
