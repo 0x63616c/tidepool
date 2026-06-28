@@ -1,4 +1,5 @@
 import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { OpencodeAgentRunnerLive } from './agent-runner.ts';
 import { AppConfig, loadConfig } from './config.ts';
@@ -13,14 +14,29 @@ import { makeSqliteStore } from './sqlite-store.ts';
  * Runtime state lives in `.tidepool/` (gitignored), never git (tenet 1).
  */
 
-export const DB_PATH = '.tidepool/tidepool.sqlite';
+/** Default control-plane sqlite path for local dev (gitignored, never git). */
+export const DEFAULT_DB_PATH = '.tidepool/tidepool.sqlite';
+
+/**
+ * Resolve the control-plane sqlite path. The seam: `TIDEPOOL_DB_PATH` lets the
+ * management box point its db at a Hetzner Volume mount (e.g.
+ * `/mnt/tidepool/tidepool.sqlite`) so runtime state survives a box rebuild,
+ * while local dev keeps the unchanged default (tenet 7: design for N, run
+ * minimal). An empty override is treated as unset, mirroring `hcloudToken`.
+ */
+export const dbPath = (): string => {
+  const fromEnv = process.env.TIDEPOOL_DB_PATH;
+  return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : DEFAULT_DB_PATH;
+};
 
 /** sqlite store, scoped so its connection closes (flushes) at the end of a run. */
 export const SqliteTicketStore = Layer.scoped(
   TicketStore,
   Effect.flatMap(
-    Effect.promise(() => mkdir('.tidepool', { recursive: true })),
-    () => makeSqliteStore(DB_PATH),
+    Effect.sync(dbPath).pipe(
+      Effect.tap((path) => Effect.promise(() => mkdir(dirname(path), { recursive: true }))),
+    ),
+    (path) => makeSqliteStore(path),
   ),
 );
 
