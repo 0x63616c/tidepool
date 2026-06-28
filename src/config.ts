@@ -41,11 +41,24 @@ export const BoxConfig = Schema.Struct({
 });
 export type BoxConfig = typeof BoxConfig.Type;
 
+export const StateConfig = Schema.Struct({
+  /**
+   * Hetzner Volume id holding the control-plane sqlite (management state). It is
+   * declarative infra identity (PR-reviewed, GitOps), NOT runtime state — like
+   * the SSH-key/network ids. Bound by a later PR once the management box exists;
+   * the volume is what makes the db survive a box rebuild.
+   */
+  volumeId: Schema.optional(Schema.Union(Schema.String, Schema.Number)),
+});
+export type StateConfig = typeof StateConfig.Type;
+
 export const Config = Schema.Struct({
   targets: Schema.NonEmptyArray(Target),
   models: ModelTier,
   workers: Workers,
   box: BoxConfig,
+  /** Optional management-state binding; undefined until the management box exists. */
+  state: Schema.optional(StateConfig),
   /** Max work attempts before a ticket goes `failed`. */
   retries: Schema.Int.pipe(Schema.greaterThanOrEqualTo(1)),
 });

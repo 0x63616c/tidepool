@@ -43,6 +43,15 @@ describe('defineConfig', () => {
     const cfg = defineConfig({ ...valid, box: { ...valid.box, imageId: 234_567_890 } });
     assert.strictEqual(cfg.box.imageId, 234_567_890);
   });
+
+  it('defaults state to undefined (no management volume bound yet)', () => {
+    assert.strictEqual(defineConfig(valid).state, undefined);
+  });
+
+  it('accepts a state.volumeId binding the management-state volume', () => {
+    const cfg = defineConfig({ ...valid, state: { volumeId: 4711 } });
+    assert.strictEqual(cfg.state?.volumeId, 4711);
+  });
 });
 
 describe('modelsFor', () => {
