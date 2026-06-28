@@ -90,7 +90,10 @@ const stepTicket = (
         const branch = branchFor(ticket);
         const work = yield* Effect.scoped(
           Effect.gen(function* () {
-            const box = yield* boxes.lease(boxSpec(config));
+            const box = yield* boxes.lease({
+              ...boxSpec(config),
+              labels: { ticket: ticket.id },
+            });
             const result = yield* agents.work({
               box,
               ticket,

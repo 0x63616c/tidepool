@@ -64,17 +64,32 @@ export const workerCloudInit = (sshPubKey: string): string =>
     '  - name: root',
     '    ssh_authorized_keys:',
     `      - ${sshPubKey}`,
-    'packages: [git, curl]',
+    // Ubuntu fires apt-daily + unattended-upgrades on first boot, which grab the
+    // apt lock and stall `packages:` for many minutes (the whole cold-boot was
+    // ~12 min). bootcmd runs before packages, so kill them here to free the lock.
+    'bootcmd:',
+    '  - systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service || true',
+    '  - systemctl disable --now apt-daily.timer apt-daily-upgrade.timer || true',
+    'packages: [git, curl, unzip]',
     'runcmd:',
-    // bun install (also populates the global package cache used by the runner)
-    '  - curl -fsSL https://bun.sh/install | bash',
-    '  - /root/.bun/bin/bun add -g @opencode-ai/sdk@1.17.11',
-    // opencode binary (spawned by createOpencodeServer via cross-spawn); -b puts it in PATH
-    "  - curl -fsSL 'https://opencode.ai/install' | bash -s -- -v 1.17.11 -b /usr/local/bin",
-    // ensure opencode auth dir exists; JIT auth.json is delivered over SSH
-    '  - mkdir -p /root/.local/share/opencode',
-    // sentinel: the runner polls this before delivering auth + executing work
-    '  - touch /tmp/.tp-ready',
+    // Single fail-fast shell: .tp-ready is touched ONLY if every install succeeds
+    // (set -e). All output captured to /var/log/tp-cloudinit.log for diagnosis.
+    // HOME is unset in cloud-init's runcmd context; the bun installer needs it
+    // (and bun lands in $HOME/.bun). `set -e` fails fast; `-u` is omitted as the
+    // third-party install scripts legitimately reference optional vars.
+    "  - bash -c 'set -ex; export HOME=/root; " +
+      'curl -fsSL https://bun.sh/install | bash; ' +
+      // bun install (also populates the global package cache used by the runner)
+      '/root/.bun/bin/bun add -g @opencode-ai/sdk@1.17.11; ' +
+      // opencode binary (spawned by createOpencodeServer via cross-spawn). The
+      // curl installer's -b flag is broken ("Binary not found"); the npm package
+      // ships the binary and lands it on the bun global bin (already on the
+      // runner's PATH), so install it the same way as the SDK.
+      '/root/.bun/bin/bun add -g opencode-ai@1.17.11; ' +
+      // ensure opencode auth dir exists; JIT auth.json is delivered over SSH
+      'mkdir -p /root/.local/share/opencode; ' +
+      // sentinel: the runner polls this before delivering auth + executing work
+      "touch /tmp/.tp-ready' > /var/log/tp-cloudinit.log 2>&1",
   ].join('\n');
 
 // ── Hetzner API helpers ──────────────────────────────────────────────────────
@@ -83,6 +98,17 @@ const hcloudHeaders = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
   'Content-Type': 'application/json',
 });
+
+/**
+ * Hetzner server name for a worker box. Encodes the ticket id (when known) so a
+ * live box is traceable to its work from the name alone. Hetzner names allow
+ * only `[a-zA-Z0-9-]` (max 63), so underscores in the ticket id are hyphenated.
+ */
+export const workerServerName = (boxId: string, labels: Record<string, string>): string => {
+  const suffix = boxId.replace('box_', '');
+  const ticket = labels.ticket?.replace(/_/g, '-');
+  return (ticket ? `tp-worker-${ticket}-${suffix}` : `tp-worker-${suffix}`).slice(0, 63);
+};
 
 export const createServer = async (
   token: string,
@@ -93,6 +119,7 @@ export const createServer = async (
     readonly sshKeyId: number;
     readonly networkId: number;
     readonly userData: string;
+    readonly labels?: Record<string, string>;
   },
 ): Promise<{ readonly serverId: number; readonly ip: string }> => {
   const res = await fetch(`${HCLOUD_API}/servers`, {
@@ -105,7 +132,8 @@ export const createServer = async (
       location: params.location,
       ssh_keys: [params.sshKeyId],
       networks: [params.networkId],
-      labels: { managed_by: 'tidepool', role: 'worker' },
+      // Caller labels first, then the reaper-critical labels (never overridable).
+      labels: { ...params.labels, managed_by: 'tidepool', role: 'worker' },
       user_data: params.userData,
     }),
   });
@@ -190,8 +218,7 @@ export const makeHetznerBoxMaker = (params: {
             for (const location of spec.locations) {
               try {
                 const boxId = newBoxId();
-                // Hetzner names: [a-z0-9-], max 63 chars, no underscores.
-                const serverName = `tp-worker-${boxId.replace('box_', '')}`;
+                const serverName = workerServerName(boxId, spec.labels ?? {});
                 const { serverId, ip } = await createServer(params.token, {
                   name: serverName,
                   serverType,
@@ -199,6 +226,7 @@ export const makeHetznerBoxMaker = (params: {
                   sshKeyId: params.sshKeyId,
                   networkId: params.networkId,
                   userData,
+                  labels: spec.labels,
                 });
                 provisionedServerId = serverId;
                 await waitForSsh(ip);
