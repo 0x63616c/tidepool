@@ -81,7 +81,9 @@ const server = new hcloud.Server(
   'tp-main',
   {
     name: 'tp-main',
-    serverType: 'cpx22',
+    // cx23 = 2 vCPU Intel / 4GB (nbg1) — the cheap control-plane pick. Workers
+    // are a separate, larger fleet sized in config (src/hetzner-box.ts).
+    serverType: 'cx23',
     image: 'ubuntu-24.04',
     location: LOCATION,
     sshKeys: [`${SSH_KEY_ID}`],
