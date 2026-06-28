@@ -2,6 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { BoxFailed } from './domain.ts';
 import {
+  bakeRecipeCommands,
   createServer,
   makeHetznerBoxMaker,
   workerCloudInit,
@@ -31,6 +32,20 @@ describe('workerCloudInit', () => {
 
   it('includes opencode sdk install', () => {
     assert.include(workerCloudInit(FAKE_KEY), '@opencode-ai/sdk');
+  });
+
+  it('inlines every command from the bake.sh recipe (no drift)', () => {
+    const init = workerCloudInit(FAKE_KEY);
+    const recipe = bakeRecipeCommands();
+    assert.isAtLeast(recipe.length, 1, 'recipe should be non-empty');
+    for (const cmd of recipe) {
+      assert.include(init, cmd);
+    }
+  });
+
+  it('appends the per-boot sentinel but keeps it OUT of the baked recipe', () => {
+    assert.include(workerCloudInit(FAKE_KEY), 'touch /tmp/.tp-ready');
+    assert.notInclude(bakeRecipeCommands().join('\n'), '.tp-ready');
   });
 });
 
@@ -77,6 +92,47 @@ describe('createServer labels', () => {
     assert.equal(captured.labels?.ticket, 'tckt_qt6tbzn900', 'caller ticket label applied');
     assert.equal(captured.labels?.managed_by, 'tidepool');
     assert.equal(captured.labels?.role, 'worker');
+  });
+});
+
+describe('createServer image', () => {
+  const fakeCreate = (capture: { value?: string | number }) =>
+    Object.assign(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        capture.value = (JSON.parse(String(init?.body)) as { image: string | number }).image;
+        return new Response(
+          JSON.stringify({ server: { id: 1, public_net: { ipv4: { ip: '1.2.3.4' } } } }),
+          { status: 201 },
+        );
+      },
+      { preconnect: () => {} },
+    ) as typeof fetch;
+
+  const baseParams = {
+    name: 'tp-worker-x',
+    serverType: 'cpx22',
+    location: 'nbg1',
+    sshKeyId: 1,
+    networkId: 2,
+    userData: 'x',
+  };
+
+  it('defaults to ubuntu-24.04 when no image is given', async () => {
+    const capture: { value?: string | number } = {};
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fakeCreate(capture);
+    await createServer('tok', baseParams);
+    globalThis.fetch = origFetch;
+    assert.equal(capture.value, 'ubuntu-24.04');
+  });
+
+  it('uses the provided image (snapshot id or name)', async () => {
+    const capture: { value?: string | number } = {};
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fakeCreate(capture);
+    await createServer('tok', { ...baseParams, image: 234_567_890 });
+    globalThis.fetch = origFetch;
+    assert.equal(capture.value, 234_567_890);
   });
 });
 
