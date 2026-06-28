@@ -15,5 +15,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "tidepool.config.ts", "vitest.config.ts"]
+  "include": ["src", "tidepool.config.ts", "vitest.config.ts"],
+  "//exclude": "infra/pulumi is a standalone Node/Pulumi package with its own tsconfig + deps (@pulumi/*); keep it out of the Bun root typecheck.",
+  "exclude": ["infra/pulumi"]
 }

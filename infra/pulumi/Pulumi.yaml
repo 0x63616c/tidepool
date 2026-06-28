@@ -1,0 +1,10 @@
+name: tidepool-infra
+runtime: nodejs
+description: >-
+  Tidepool control-plane infrastructure. Declares the long-lived main box, its
+  durable state volume, network membership, and firewall. Workers are imperative
+  API cattle (src/hetzner-box.ts), NOT managed here. State backend is the
+  self-managed S3 bucket `tidepool-pulumi-state` (nbg1); the secrets provider is
+  the PULUMI_CONFIG_PASSPHRASE. Both are supplied via the environment at
+  `pulumi login` / `pulumi up` time, never committed.
+main: index.ts
