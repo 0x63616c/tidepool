@@ -1,9 +1,9 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Layer, Ref } from 'effect';
+import { Duration, Effect, Fiber, Layer, Ref, TestClock } from 'effect';
 import { AppConfig, type Config, defineConfig } from './config.ts';
 import { fakeAgentRunner, fakeBoxMaker, fakeForge, makeInMemoryStore } from './fakes.ts';
 import { newPrId } from './ids.ts';
-import { settle, step } from './reconciler.ts';
+import { reconcileForever, settle, step } from './reconciler.ts';
 import { TicketStore, type TicketStoreApi } from './services.ts';
 
 /**
@@ -118,6 +118,51 @@ describe('reconciler', () => {
         const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
         assert.strictEqual(work.length, 0);
       }),
+  );
+});
+
+/**
+ * `reconcileForever` is the always-on loop behind `tp run --watch`: it just
+ * re-invokes `settle` on a cadence. The invariant under test is resilience — a
+ * round that *dies* (defect) must not crash the loop; the next tick re-reads the
+ * durable store and resumes. `settle` stays the only mover.
+ */
+describe('reconcileForever', () => {
+  /** A store whose first `list()` dies (defect), then behaves like the real one. */
+  const flakyOnceStore = Effect.gen(function* () {
+    const real = yield* makeInMemoryStore;
+    const calls = yield* Ref.make(0);
+    const store: TicketStoreApi = {
+      ...real,
+      list: () =>
+        Effect.flatMap(
+          Ref.updateAndGet(calls, (n) => n + 1),
+          (n) => (n === 1 ? Effect.die(new Error('boom: round 1 store read failed')) : real.list()),
+        ),
+    };
+    return { store, calls };
+  });
+
+  it.effect('survives a thrown round and re-reads the store next tick', () =>
+    Effect.gen(function* () {
+      const { calls, store } = yield* flakyOnceStore;
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentRunner({ verdict: 'approve' }),
+        fakeBoxMaker(),
+      );
+
+      // Fork the forever-loop; round 1 (t=0) dies and is swallowed, then it
+      // sleeps for the interval. Advancing the test clock wakes the next round.
+      const fiber = yield* reconcileForever(30).pipe(Effect.provide(env), Effect.fork);
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* Fiber.interrupt(fiber);
+
+      // >1 read proves: the first read threw AND a later tick re-read the store —
+      // the loop neither crashed nor got stuck on the failed round.
+      assert.isAtLeast(yield* Ref.get(calls), 2);
+    }),
   );
 });
 

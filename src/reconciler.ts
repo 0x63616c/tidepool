@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import { Duration, Effect, Schedule } from 'effect';
 import { AppConfig, baseFor, type Config, modelsFor } from './config.ts';
 import type {
   AgentFailed,
@@ -327,3 +327,25 @@ export const settle = (
       if (JSON.stringify(before) === JSON.stringify(after)) return;
     }
   });
+
+/**
+ * The always-on control-plane loop: re-run `settle` every `intervalSec`. This is
+ * what `tp run --watch` (and the systemd unit) runs; `settle` stays the only
+ * mover (tenet 3) — this adds cadence, nothing else.
+ *
+ * Resilience is the whole point: a single round that *dies* (an unforeseen
+ * defect, not a typed failure — those already map to ticket state inside `step`)
+ * is logged via `catchAllCause` and swallowed PER ROUND, so the loop never
+ * crashes. The next tick re-reads the durable store and resumes — resumable by
+ * construction, exactly like a fresh process would be. The catch sits inside the
+ * `repeat` so recovery yields a successful round and the schedule continues;
+ * wrapping the repeat instead would log once and stop.
+ */
+export const reconcileForever = (
+  intervalSec = 30,
+): Effect.Effect<void, never, TicketStore | Forge | BoxMaker | AgentRunner | AppConfig> =>
+  settle().pipe(
+    Effect.catchAllCause((cause) => Effect.logError('settle round failed; continuing', cause)),
+    Effect.repeat(Schedule.spaced(Duration.seconds(intervalSec))),
+    Effect.asVoid,
+  );
