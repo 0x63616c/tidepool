@@ -26,7 +26,13 @@ if (!token) {
 }
 const provider = new hcloud.Provider('hcloud', { token });
 
-const LOCATION = 'nbg1';
+// Control-box shape is stack config, not a code literal, so `tp up` can walk a
+// capacity fallback chain (`pulumi config set tp:controlBoxType …`) when Hetzner
+// has no stock of a given type/region — without editing this program. Defaults
+// keep the cheap Intel primary (cx23, 2c/4GB) in nbg1.
+const stackConfig = new pulumi.Config('tp');
+const CONTROL_BOX_TYPE = stackConfig.get('controlBoxType') ?? 'cx23';
+const LOCATION = stackConfig.get('controlBoxLocation') ?? 'nbg1';
 const MOUNT_POINT = '/mnt/tidepool';
 
 // R1 ids — the pre-existing network + ssh key workers hardcode (src/hetzner-box.ts).
@@ -81,9 +87,10 @@ const server = new hcloud.Server(
   'tp-main',
   {
     name: 'tp-main',
-    // cx23 = 2 vCPU Intel / 4GB (nbg1) — the cheap control-plane pick. Workers
-    // are a separate, larger fleet sized in config (src/hetzner-box.ts).
-    serverType: 'cx23',
+    // Default cx23 = 2 vCPU Intel / 4GB (nbg1) — the cheap control-plane pick;
+    // overridable via `tp:controlBoxType` for the capacity fallback chain.
+    // Workers are a separate, larger fleet sized in config (src/hetzner-box.ts).
+    serverType: CONTROL_BOX_TYPE,
     image: 'ubuntu-24.04',
     location: LOCATION,
     sshKeys: [`${SSH_KEY_ID}`],

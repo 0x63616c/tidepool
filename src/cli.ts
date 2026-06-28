@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Args, Command, Options } from '@effect/cli';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
 import { Console, Effect, Either, Layer, Option, Schema } from 'effect';
@@ -7,10 +9,15 @@ import { AppConfig } from './config.ts';
 import { renderDoctor, runDoctor } from './doctor.ts';
 import type { RunEvent, Ticket } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
-import { settle } from './reconciler.ts';
+import { initStateBucket } from './object-storage.ts';
+import { reconcileForever, settle } from './reconciler.ts';
 import { AppConfigLive, LiveStack, SqliteTicketStore } from './runtime.ts';
-import { TicketStore } from './services.ts';
+import { type AgentRunner, type BoxMaker, type Forge, TicketStore } from './services.ts';
 import { costReport, traceReport } from './trace.ts';
+import { BunCommandRunner, DEFAULT_BOOTSTRAP_DIR, up } from './up.ts';
+
+/** The pulumi program lives in the standalone node package next to `src/`. */
+const PULUMI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'infra', 'pulumi');
 
 /**
  * `tp` — the control-plane CLI. Agent-facing (AXI): TOON output, content-first
@@ -99,29 +106,86 @@ const ticketCommand = Command.make('ticket', {}, () =>
 ).pipe(Command.withSubcommands([addCommand]));
 
 /**
- * `tp run` — seed the slugify ticket (idempotent) and drive the reconciler to a
- * fixpoint against the live adapters. Prints the resulting backlog.
+ * The body of `tp run`, parameterised by `--watch` so the wiring is unit-testable
+ * without the live stack:
+ *   - watch:  run the always-on `reconcileForever` loop (the systemd daemon path).
+ *             No demo seed — the box drives whatever real backlog the store holds.
+ *   - oneshot: seed the slugify demo ticket (idempotent) and `settle` once, then
+ *             print the backlog. The original local-dev behaviour, unchanged.
  */
-const runCommand = Command.make('run', {}, () =>
+export const runProgram = (
+  watch: boolean,
+): Effect.Effect<void, never, TicketStore | Forge | BoxMaker | AgentRunner | AppConfig> =>
+  Effect.gen(function* () {
+    const store = yield* TicketStore;
+    if (watch) {
+      yield* reconcileForever();
+      return;
+    }
+    const config = yield* AppConfig;
+    const repo = config.targets[0].repo;
+    const existing = yield* store.list();
+    if (!existing.some((t) => t.title === 'add slugify')) {
+      yield* store.add({ title: 'add slugify', goal: SEED_GOAL, target: repo });
+    }
+    yield* settle();
+    const after = yield* store.list();
+    yield* Console.log(renderTickets(after));
+  });
+
+/**
+ * `tp run` — drive the reconciler against the live adapters. One-shot by default
+ * (seed + settle to a fixpoint); `--watch` runs the forever loop for the daemon.
+ */
+const runCommand = Command.make('run', { watch: Options.boolean('watch') }, ({ watch }) =>
   Effect.scoped(
-    Effect.gen(function* () {
-      const config = yield* AppConfig;
-      const store = yield* TicketStore;
-      const repo = config.targets[0].repo;
-      const existing = yield* store.list();
-      if (!existing.some((t) => t.title === 'add slugify')) {
-        yield* store.add({ title: 'add slugify', goal: SEED_GOAL, target: repo });
-      }
-      yield* settle();
-      const after = yield* store.list();
-      yield* Console.log(renderTickets(after));
-    }).pipe(
+    runProgram(watch).pipe(
       Effect.provide(LiveStack),
       Effect.catchAll((e) =>
         Console.log(`error: tp run failed\n  reason: ${String(e)}`).pipe(
           Effect.zipRight(Effect.sync(() => process.exit(1))),
         ),
       ),
+    ),
+  ),
+);
+
+/**
+ * `tp up` — idempotent control-plane bring-up. Validates the H1 bootstrap inputs,
+ * ensures the Pulumi state bucket, runs `pulumi up` (with a control-box capacity
+ * fallback chain), prints the H2 key-delivery step with the real box IP, then
+ * polls the box to ready. `--skip-pulumi` validates + prints the plan only.
+ */
+const upCommand = Command.make(
+  'up',
+  {
+    skipPulumi: Options.boolean('skip-pulumi'),
+    bootstrapDir: Options.text('bootstrap-dir').pipe(Options.withDefault(DEFAULT_BOOTSTRAP_DIR)),
+    timeout: Options.integer('timeout').pipe(Options.withDefault(600)),
+  },
+  ({ bootstrapDir, skipPulumi, timeout }) =>
+    up({ bootstrapDir, pulumiDir: PULUMI_DIR, skipPulumi, readinessTimeoutSec: timeout }).pipe(
+      Effect.provide(BunCommandRunner),
+      Effect.catchTag('UpError', (e) =>
+        Console.log(e.message).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
+      ),
+    ),
+);
+
+/** `tp bucket-init` — idempotently ensure the Pulumi state bucket (debug helper). */
+const bucketInitCommand = Command.make('bucket-init', {}, () =>
+  initStateBucket().pipe(
+    Effect.flatMap((r) =>
+      Console.log(`bucket: ${r.bucket} ${r.created ? 'created' : 'already present (no-op)'}`),
+    ),
+    Effect.catchTag('ObjectStorageError', (e) =>
+      Console.log(
+        [
+          'error: bucket-init failed',
+          `  reason: ${e.op}: ${e.reason}`,
+          'help: ensure ~/.tidepool/bootstrap/hetzner-s3.env holds valid Hetzner S3 creds',
+        ].join('\n'),
+      ).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
     ),
   ),
 );
@@ -315,6 +379,8 @@ const root = Command.make('tp', {}, () => homeView).pipe(
     lsCommand,
     ticketCommand,
     runCommand,
+    upCommand,
+    bucketInitCommand,
     doctorCommand,
     logsCommand,
     transcriptCommand,
@@ -325,4 +391,8 @@ const root = Command.make('tp', {}, () => homeView).pipe(
 
 const cli = Command.run(root, { name: 'tp', version: '0.0.0' });
 
-cli(process.argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain);
+// Guard the runMain side effect so the module is importable by unit tests
+// (e.g. `runProgram`) without launching the CLI.
+if (import.meta.main) {
+  cli(process.argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain);
+}
