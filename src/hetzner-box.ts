@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Layer } from 'effect';
+import { AppConfig } from './config.ts';
 import { BoxFailed } from './domain.ts';
 import { type BoxId, newBoxId } from './ids.ts';
 import { BoxMaker, type BoxMakerApi, type BoxSpec } from './services.ts';
@@ -20,9 +21,9 @@ const HCLOUD_API = 'https://api.hetzner.cloud/v1';
 const MAX_TTL_MS = 3_600_000; // 1 h hard cap
 
 /** SSH key ID registered in the Hetzner project (created during bootstrap). */
-const SSH_KEY_ID = 114_362_250;
+export const SSH_KEY_ID = 114_362_250;
 /** Private network ID for worker boxes (tidepool-private). */
-const NETWORK_ID = 12_380_644;
+export const NETWORK_ID = 12_380_644;
 
 // ── Hetzner API types ────────────────────────────────────────────────────────
 
@@ -69,27 +70,61 @@ export const bakeRecipeCommands = (): ReadonlyArray<string> =>
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith('#'));
 
+/**
+ * The worker install recipe as the verbatim bake.sh script body. The local
+ * container harness (CI job `container-harness`) runs THIS exact text in a stock
+ * `ubuntu:24.04` container, so the harness install is byte-identical to what the
+ * cloud snapshot bakes and what cloud-init inlines — one source, no drift. The
+ * per-boot `.tp-ready` sentinel is deliberately absent (it is appended at boot,
+ * not baked); the harness touches it after this script succeeds.
+ */
+export const workerInstallScript = (): string => readFileSync(BAKE_SCRIPT_PATH, 'utf8');
+
 // ── Pure cloud-init generator ────────────────────────────────────────────────
 
+/** Per-boot readiness sentinel the runner polls before delivering JIT auth. */
+const TP_READY = 'touch /tmp/.tp-ready';
+
 /**
- * Minimal cloud-init for a worker node: installs bun + the opencode SDK/binary
- * by inlining the bake.sh recipe verbatim. The reconciler delivers openai
- * credentials separately over SSH.
+ * Cloud-init for a worker node. Two shapes from one source of truth:
+ *
+ *   - `baked: false` (default): a stock `ubuntu-24.04` box. cloud-init installs
+ *     bun + the opencode SDK/binary by inlining the bake.sh recipe verbatim,
+ *     then drops the per-boot sentinel. This is the ~minutes cold boot.
+ *   - `baked: true`: a prebaked snapshot already has the whole recipe applied,
+ *     so cloud-init shrinks to the ssh key + the per-boot sentinel ONLY. There
+ *     is nothing to apt-install and no recipe to run, so the box is ready in
+ *     seconds. The sentinel is never baked (it must reappear on every boot), so
+ *     it stays here regardless of mode.
+ *
+ * The reconciler delivers openai credentials separately over SSH in both modes.
  */
-export const workerCloudInit = (sshPubKey: string): string => {
-  // Inline the SAME recipe bake.sh defines, then append the per-boot sentinel.
-  // One fail-fast `bash -c` (bake.sh begins `set -ex`); .tp-ready is touched
-  // ONLY if every step succeeds, and all output is captured to
-  // /var/log/tp-cloudinit.log. The sentinel is appended here (not baked) because
-  // the runner must observe it on every boot, even once a prebaked image already
-  // has everything installed.
-  const recipe = [...bakeRecipeCommands(), 'touch /tmp/.tp-ready'].join('; ');
-  return [
+export const workerCloudInit = (
+  sshPubKey: string,
+  opts: { readonly baked?: boolean } = {},
+): string => {
+  const head = [
     '#cloud-config',
     'users:',
     '  - name: root',
     '    ssh_authorized_keys:',
     `      - ${sshPubKey}`,
+  ];
+
+  if (opts.baked === true) {
+    // Everything is in the image; the only first-boot work is the sentinel. A
+    // bare command (no embedded quoting) sidesteps the nested-single-quote
+    // runcmd mangle that bites the full-mode `bash -c '...'` wrapper.
+    return [...head, 'runcmd:', `  - ${TP_READY}`].join('\n');
+  }
+
+  // Stock boot: inline the SAME recipe bake.sh defines, then append the
+  // sentinel. One fail-fast `bash -c` (bake.sh begins `set -ex`); .tp-ready is
+  // touched ONLY if every step succeeds, and all output is captured to
+  // /var/log/tp-cloudinit.log.
+  const recipe = [...bakeRecipeCommands(), TP_READY].join('; ');
+  return [
+    ...head,
     // Ubuntu fires apt-daily + unattended-upgrades on first boot, which grab the
     // apt lock and stall `packages:` for many minutes (the whole cold-boot was
     // ~12 min). bootcmd runs before packages, so kill them here to free the lock.
@@ -181,6 +216,69 @@ export const listWorkerServers = async (
   return body.servers;
 };
 
+// ── Prebaked worker snapshot (#8) ────────────────────────────────────────────
+// One tidepool-managed snapshot holds the fully-baked worker image; config
+// `box.imageId` points workers at it for a seconds-fast baked boot. These three
+// helpers are the snapshot lifecycle: find the existing one, image a builder
+// box into a new one, and poll it to `available`. The bake orchestration that
+// ties them together lives in `infra/worker/bake-snapshot.ts`.
+
+interface HcloudImage {
+  readonly id: number;
+  readonly status: string;
+}
+
+/** Labels stamped on the worker snapshot, also its find/reuse selector. */
+const SNAPSHOT_LABELS = { managed_by: 'tidepool', role: 'worker' } as const;
+
+/**
+ * The existing tidepool worker snapshot, if one is already baked. Lets the bake
+ * be idempotent — reuse rather than pile up snapshots. Returns the newest by id.
+ */
+export const findWorkerSnapshot = async (token: string): Promise<HcloudImage | undefined> => {
+  const res = await fetch(
+    `${HCLOUD_API}/images?type=snapshot&label_selector=managed_by%3Dtidepool%2Crole%3Dworker`,
+    { headers: hcloudHeaders(token) },
+  );
+  if (!res.ok) throw new Error(`hcloud findWorkerSnapshot → ${res.status}`);
+  const body = (await res.json()) as { images: HcloudImage[] };
+  return [...body.images].sort((a, b) => b.id - a.id)[0];
+};
+
+/**
+ * Snapshot a (fully-baked) builder server into a new image. Returns the image
+ * id; the image starts `creating` and must be polled to `available` before use.
+ */
+export const createServerSnapshot = async (
+  token: string,
+  serverId: number,
+  description: string,
+): Promise<number> => {
+  const res = await fetch(`${HCLOUD_API}/servers/${serverId}/actions/create_image`, {
+    method: 'POST',
+    headers: hcloudHeaders(token),
+    body: JSON.stringify({ type: 'snapshot', description, labels: SNAPSHOT_LABELS }),
+  });
+  const body = (await res.json()) as {
+    image?: HcloudImage;
+    error?: { message: string };
+  };
+  if (!res.ok || body.image === undefined) {
+    throw new Error(
+      `hcloud createServerSnapshot ${serverId} → ${res.status}: ${body.error?.message ?? 'unknown'}`,
+    );
+  }
+  return body.image.id;
+};
+
+/** Current status of an image (`creating` → `available`). */
+export const getImageStatus = async (token: string, imageId: number): Promise<string> => {
+  const res = await fetch(`${HCLOUD_API}/images/${imageId}`, { headers: hcloudHeaders(token) });
+  if (!res.ok) throw new Error(`hcloud getImageStatus ${imageId} → ${res.status}`);
+  const body = (await res.json()) as { image: HcloudImage };
+  return body.image.status;
+};
+
 /**
  * Poll TCP port 22 every 5 s until SSH accepts a connection.
  * Bun.connect rejects immediately on ECONNREFUSED; resolves on handshake.
@@ -227,7 +325,12 @@ export const makeHetznerBoxMaker = (params: {
     return Effect.acquireRelease(
       Effect.tryPromise({
         try: async () => {
-          const userData = workerCloudInit(params.sshPubKey);
+          // A prebaked image already has the recipe applied, so cloud-init
+          // shrinks to the ssh key + the per-boot sentinel (seconds, not
+          // minutes). Stock boots run the full recipe.
+          const userData = workerCloudInit(params.sshPubKey, {
+            baked: params.imageId !== undefined,
+          });
           for (const serverType of typeChain(spec.type)) {
             for (const location of spec.locations) {
               try {
@@ -302,11 +405,19 @@ export const hcloudToken: Effect.Effect<string, BoxFailed> = Effect.try({
 
 // ── Live Layer ───────────────────────────────────────────────────────────────
 
-/** Live `BoxMaker` — real Hetzner workers behind the locked interface. */
-export const HetznerBoxMakerLive: Layer.Layer<BoxMaker, BoxFailed> = Layer.effect(
+/**
+ * Live `BoxMaker` — real Hetzner workers behind the locked interface. Reads the
+ * optional prebaked-image id from `AppConfig` (`box.imageId`): when set, workers
+ * boot the snapshot and get the trimmed baked cloud-init; when absent they boot
+ * stock ubuntu and run the full recipe. `AppConfig` is the only added
+ * requirement — `runtime.ts` provides it.
+ */
+export const HetznerBoxMakerLive: Layer.Layer<BoxMaker, BoxFailed, AppConfig> = Layer.effect(
   BoxMaker,
-  Effect.map(hcloudToken, (token) =>
-    makeHetznerBoxMaker({
+  Effect.gen(function* () {
+    const token = yield* hcloudToken;
+    const config = yield* AppConfig;
+    return makeHetznerBoxMaker({
       token,
       sshKeyId: SSH_KEY_ID,
       networkId: NETWORK_ID,
@@ -314,6 +425,7 @@ export const HetznerBoxMakerLive: Layer.Layer<BoxMaker, BoxFailed> = Layer.effec
         join(homedir(), '.tidepool/bootstrap/ssh-tidepool.pub'),
         'utf8',
       ).trim(),
-    }),
-  ),
+      imageId: config.box.imageId,
+    });
+  }),
 );

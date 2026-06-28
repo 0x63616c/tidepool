@@ -28,6 +28,41 @@ jobs:
       - name: test
         run: bun run test
 
+  # Proves the worker install recipe (bake.sh) actually works on a clean box.
+  # Runs the EXPORTED workerInstallScript() byte-for-byte inside a STOCK
+  # ubuntu:24.04 container (NOT the baked snapshot — that would defeat the test),
+  # then asserts the runner's prerequisites resolve: the .tp-ready sentinel, bun,
+  # and the opencode binary. If bake.sh rots, this job goes red before a real
+  # worker ever boots.
+  container-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - run: bun install --frozen-lockfile
+      - name: materialize the install recipe from workerInstallScript()
+        run: |
+          mkdir -p harness
+          bun -e 'import { workerInstallScript } from "./src/hetzner-box.ts"; await Bun.write("harness/install.sh", workerInstallScript());'
+          test -s harness/install.sh
+      - name: run the recipe in a clean ubuntu:24.04 container
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work ubuntu:24.04 bash -c "
+            set -eux
+            apt-get update
+            apt-get install -y --no-install-recommends git curl unzip ca-certificates
+            bash harness/install.sh
+            touch /tmp/.tp-ready
+            test -f /tmp/.tp-ready
+            export PATH=/root/.bun/bin:\$PATH
+            command -v bun
+            bun --version
+            test -x /root/.bun/bin/opencode
+            command -v opencode
+          "
+
   commitlint:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'

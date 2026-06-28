@@ -4,8 +4,12 @@ import { BoxFailed } from './domain.ts';
 import {
   bakeRecipeCommands,
   createServer,
+  createServerSnapshot,
+  findWorkerSnapshot,
+  getImageStatus,
   makeHetznerBoxMaker,
   workerCloudInit,
+  workerInstallScript,
   workerServerName,
 } from './hetzner-box.ts';
 
@@ -46,6 +50,125 @@ describe('workerCloudInit', () => {
   it('appends the per-boot sentinel but keeps it OUT of the baked recipe', () => {
     assert.include(workerCloudInit(FAKE_KEY), 'touch /tmp/.tp-ready');
     assert.notInclude(bakeRecipeCommands().join('\n'), '.tp-ready');
+  });
+});
+
+describe('workerCloudInit baked mode', () => {
+  const baked = () => workerCloudInit(FAKE_KEY, { baked: true });
+
+  it('starts with #cloud-config marker', () => {
+    assert.isTrue(baked().startsWith('#cloud-config'));
+  });
+
+  it('embeds the ssh public key', () => {
+    assert.include(baked(), FAKE_KEY);
+  });
+
+  it('still touches the per-boot sentinel (the runner polls it every boot)', () => {
+    assert.include(baked(), 'touch /tmp/.tp-ready');
+  });
+
+  it('omits the bake recipe — everything is already in the image', () => {
+    const init = baked();
+    assert.notInclude(init, 'bun.sh/install');
+    assert.notInclude(init, '@opencode-ai/sdk');
+    // No apt install on a baked boot — the packages are already present.
+    assert.notInclude(init, 'packages:');
+  });
+
+  it('keeps the runcmd quote-safe (no nested single quotes)', () => {
+    // The full-mode `bash -c '...'` wrapper is the nested-quote hazard. The baked
+    // runcmd is a bare command with no embedded quoting, so it can never mangle.
+    assert.notInclude(baked(), "bash -c '");
+  });
+});
+
+describe('workerInstallScript', () => {
+  it('is the bake.sh recipe body verbatim (the harness runs identical steps)', () => {
+    const script = workerInstallScript();
+    // Every inlined command must appear in the byte-for-byte script the local
+    // container harness executes, so "works in the harness" == "works on the box".
+    for (const cmd of bakeRecipeCommands()) {
+      assert.include(script, cmd);
+    }
+  });
+
+  it('keeps the fail-fast shell header', () => {
+    assert.include(workerInstallScript(), 'set -ex');
+  });
+
+  it('runs no command that touches the per-boot sentinel (boot appends it, not bake)', () => {
+    assert.notInclude(bakeRecipeCommands().join('\n'), '.tp-ready');
+  });
+});
+
+describe('worker snapshot image API', () => {
+  it('findWorkerSnapshot returns the first managed worker snapshot', async () => {
+    const origFetch = globalThis.fetch;
+    let capturedUrl = '';
+    globalThis.fetch = ((url: string) => {
+      capturedUrl = url;
+      return Promise.resolve(
+        new Response(JSON.stringify({ images: [{ id: 555, status: 'available' }] }), {
+          status: 200,
+        }),
+      );
+    }) as typeof fetch;
+
+    const snap = await findWorkerSnapshot('tok');
+    globalThis.fetch = origFetch;
+
+    assert.deepEqual(snap, { id: 555, status: 'available' });
+    assert.include(capturedUrl, 'type=snapshot');
+    assert.include(capturedUrl, 'managed_by%3Dtidepool');
+    assert.include(capturedUrl, 'role%3Dworker');
+  });
+
+  it('findWorkerSnapshot returns undefined when no snapshot exists', async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = ((_url: string) =>
+      Promise.resolve(
+        new Response(JSON.stringify({ images: [] }), { status: 200 }),
+      )) as typeof fetch;
+
+    const snap = await findWorkerSnapshot('tok');
+    globalThis.fetch = origFetch;
+
+    assert.isUndefined(snap);
+  });
+
+  it('createServerSnapshot posts type=snapshot with managed_by + role labels', async () => {
+    const origFetch = globalThis.fetch;
+    let capturedUrl = '';
+    let capturedBody: Record<string, unknown> = {};
+    globalThis.fetch = ((url: string, init: RequestInit) => {
+      capturedUrl = url;
+      capturedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return Promise.resolve(
+        new Response(JSON.stringify({ image: { id: 777, status: 'creating' } }), { status: 201 }),
+      );
+    }) as typeof fetch;
+
+    const imageId = await createServerSnapshot('tok', 42, 'tidepool worker');
+    globalThis.fetch = origFetch;
+
+    assert.equal(imageId, 777);
+    assert.include(capturedUrl, '/servers/42/actions/create_image');
+    assert.equal(capturedBody.type, 'snapshot');
+    assert.deepEqual(capturedBody.labels, { managed_by: 'tidepool', role: 'worker' });
+  });
+
+  it('getImageStatus returns the image status', async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = ((_url: string) =>
+      Promise.resolve(
+        new Response(JSON.stringify({ image: { id: 777, status: 'available' } }), { status: 200 }),
+      )) as typeof fetch;
+
+    const status = await getImageStatus('tok', 777);
+    globalThis.fetch = origFetch;
+
+    assert.equal(status, 'available');
   });
 });
 
