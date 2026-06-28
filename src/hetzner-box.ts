@@ -21,9 +21,9 @@ const HCLOUD_API = 'https://api.hetzner.cloud/v1';
 const MAX_TTL_MS = 3_600_000; // 1 h hard cap
 
 /** SSH key ID registered in the Hetzner project (created during bootstrap). */
-const SSH_KEY_ID = 114_362_250;
+export const SSH_KEY_ID = 114_362_250;
 /** Private network ID for worker boxes (tidepool-private). */
-const NETWORK_ID = 12_380_644;
+export const NETWORK_ID = 12_380_644;
 
 // ── Hetzner API types ────────────────────────────────────────────────────────
 
@@ -214,6 +214,69 @@ export const listWorkerServers = async (
   if (!res.ok) throw new Error(`hcloud listWorkers → ${res.status}`);
   const body = (await res.json()) as { servers: HcloudServerListed[] };
   return body.servers;
+};
+
+// ── Prebaked worker snapshot (#8) ────────────────────────────────────────────
+// One tidepool-managed snapshot holds the fully-baked worker image; config
+// `box.imageId` points workers at it for a seconds-fast baked boot. These three
+// helpers are the snapshot lifecycle: find the existing one, image a builder
+// box into a new one, and poll it to `available`. The bake orchestration that
+// ties them together lives in `infra/worker/bake-snapshot.ts`.
+
+interface HcloudImage {
+  readonly id: number;
+  readonly status: string;
+}
+
+/** Labels stamped on the worker snapshot, also its find/reuse selector. */
+const SNAPSHOT_LABELS = { managed_by: 'tidepool', role: 'worker' } as const;
+
+/**
+ * The existing tidepool worker snapshot, if one is already baked. Lets the bake
+ * be idempotent — reuse rather than pile up snapshots. Returns the newest by id.
+ */
+export const findWorkerSnapshot = async (token: string): Promise<HcloudImage | undefined> => {
+  const res = await fetch(
+    `${HCLOUD_API}/images?type=snapshot&label_selector=managed_by%3Dtidepool%2Crole%3Dworker`,
+    { headers: hcloudHeaders(token) },
+  );
+  if (!res.ok) throw new Error(`hcloud findWorkerSnapshot → ${res.status}`);
+  const body = (await res.json()) as { images: HcloudImage[] };
+  return [...body.images].sort((a, b) => b.id - a.id)[0];
+};
+
+/**
+ * Snapshot a (fully-baked) builder server into a new image. Returns the image
+ * id; the image starts `creating` and must be polled to `available` before use.
+ */
+export const createServerSnapshot = async (
+  token: string,
+  serverId: number,
+  description: string,
+): Promise<number> => {
+  const res = await fetch(`${HCLOUD_API}/servers/${serverId}/actions/create_image`, {
+    method: 'POST',
+    headers: hcloudHeaders(token),
+    body: JSON.stringify({ type: 'snapshot', description, labels: SNAPSHOT_LABELS }),
+  });
+  const body = (await res.json()) as {
+    image?: HcloudImage;
+    error?: { message: string };
+  };
+  if (!res.ok || body.image === undefined) {
+    throw new Error(
+      `hcloud createServerSnapshot ${serverId} → ${res.status}: ${body.error?.message ?? 'unknown'}`,
+    );
+  }
+  return body.image.id;
+};
+
+/** Current status of an image (`creating` → `available`). */
+export const getImageStatus = async (token: string, imageId: number): Promise<string> => {
+  const res = await fetch(`${HCLOUD_API}/images/${imageId}`, { headers: hcloudHeaders(token) });
+  if (!res.ok) throw new Error(`hcloud getImageStatus ${imageId} → ${res.status}`);
+  const body = (await res.json()) as { image: HcloudImage };
+  return body.image.status;
 };
 
 /**
