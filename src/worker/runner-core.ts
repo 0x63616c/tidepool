@@ -41,9 +41,10 @@ export interface GitPort {
 
 /**
  * Normalising generated code before it is committed. opencode emits unformatted
- * files, so a raw commit fails the target repo's `biome check` in CI. This port
- * runs the repo's own formatter + SAFE lint autofix in the clone, behind the same
- * plain-record seam as `GitPort`, so the pre-commit flow is testable with a fake.
+ * files, so a raw commit can fail the target repo's `biome check` in CI. This port
+ * runs the repo's own formatter (FORMAT only, never a lint-gate) in the clone,
+ * behind the same plain-record seam as `GitPort`, so the pre-commit flow is
+ * testable with a fake.
  */
 export interface FormatPort {
   /** Does the clone's `package.json` declare a `format` script? */
@@ -58,7 +59,11 @@ export class GitFailed extends Data.TaggedError('GitFailed')<{
   readonly reason: string;
 }> {}
 
-/** A pre-commit format/lint-autofix step failed (e.g. biome found unfixable errors). */
+/**
+ * A pre-commit format step failed. This is best-effort and NON-FATAL: formatting
+ * only helps the PR pass CI, it is not a gate, so the runner logs it and commits
+ * anyway. The typed error is kept so the failure can be surfaced in logs.
+ */
 export class FormatFailed extends Data.TaggedError('FormatFailed')<{
   readonly command: string;
   readonly reason: string;
@@ -68,19 +73,18 @@ export class FormatFailed extends Data.TaggedError('FormatFailed')<{
 export class NoChanges extends Data.TaggedError('NoChanges')<Record<string, never>> {}
 
 /**
- * The pre-commit command sequence that makes generated code pass the target
- * repo's `biome check` in CI: biome's SAFE autofix first (NEVER `--unsafe` — only
- * mechanically-safe fixes, so the agent's intent is preserved), then the repo's
- * own `format` script when it declares one. Each command is a no-op (exit 0) when
- * there is nothing to fix. Pure, so the biome-before-commit invariant is unit
- * tested without a clone.
+ * The pre-commit command sequence that reformats generated code so it is more
+ * likely to pass the target repo's CI. This FORMATS only — it never lint-gates.
+ * `biome check --write` would exit non-zero on unfixable/unsafe-only/info
+ * diagnostics and abort the commit, so we never use it here. Prefer the repo's
+ * own `format` script (`bun run format`) when it declares one; otherwise fall
+ * back to `biome format --write`, which only reformats and exits 0 on lint
+ * diagnostics. Pure, so the format-only invariant is unit tested without a clone.
  */
 export const preCommitCommands = (opts: {
   readonly hasFormatScript: boolean;
-}): ReadonlyArray<string> => [
-  'bunx biome check --write .',
-  ...(opts.hasFormatScript ? ['bun run format'] : []),
-];
+}): ReadonlyArray<string> =>
+  opts.hasFormatScript ? ['bun run format'] : ['bunx biome format --write .'];
 
 const gitOp = <A>(op: string, fn: () => Promise<A>): Effect.Effect<A, GitFailed> =>
   Effect.tryPromise({ try: fn, catch: (e) => new GitFailed({ op, reason: String(e) }) });
@@ -96,9 +100,7 @@ const fmtOp = <A>(command: string, fn: () => Promise<A>): Effect.Effect<A, Forma
  */
 export const makeRunner =
   (deps: { readonly git: GitPort; readonly opencode: OpencodePort; readonly format: FormatPort }) =>
-  (
-    config: RunnerConfig,
-  ): Effect.Effect<RunnerResult, GitFailed | FormatFailed | NoChanges | OpencodeFailed> =>
+  (config: RunnerConfig): Effect.Effect<RunnerResult, GitFailed | NoChanges | OpencodeFailed> =>
     Effect.gen(function* () {
       const { git, opencode, format } = deps;
       yield* Effect.logInfo(`cloning ${config.base} into ${config.dir}`);
@@ -117,14 +119,23 @@ export const makeRunner =
       const dirty = yield* gitOp('status', () => git.statusPorcelain(config.dir));
       if (dirty.trim() === '') return yield* Effect.fail(new NoChanges({}));
 
-      // Normalise the generated code (biome SAFE autofix + repo formatter) before
-      // staging, so the commit passes the target repo's `biome check` in CI.
-      const hasFormatScript = yield* fmtOp('hasFormatScript', () =>
-        format.hasFormatScript(config.dir),
+      // Reformat the generated code (FORMAT only, never a lint-gate) before
+      // staging, so the commit is more likely to pass the target repo's CI. This
+      // is best-effort: a format step that exits non-zero is logged and skipped,
+      // never aborting the commit — formatting helps CI pass, it is not a gate.
+      const hasFormatScript = yield* Effect.catchAll(
+        fmtOp('hasFormatScript', () => format.hasFormatScript(config.dir)),
+        () => Effect.succeed(false),
       );
       for (const command of preCommitCommands({ hasFormatScript })) {
         yield* Effect.logInfo(`pre-commit: ${command}`);
-        yield* fmtOp(command, () => format.run(config.dir, command));
+        yield* Effect.catchAll(
+          fmtOp(command, () => format.run(config.dir, command)),
+          (e) =>
+            Effect.logWarning(
+              `pre-commit format step failed (continuing): ${e.command}: ${e.reason}`,
+            ),
+        );
       }
 
       yield* gitOp('add', () => git.addAll(config.dir));

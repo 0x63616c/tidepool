@@ -48,10 +48,10 @@ const bunGitPort: GitPort = {
 /**
  * The pre-commit formatter over Bun's `$`. Reads the clone's package.json to see
  * whether it ships a `format` script, and runs each pre-commit command in the
- * clone. `.nothrow()` is deliberately NOT used: a non-zero exit (biome found
- * unfixable errors) becomes a typed `FormatFailed` rather than a silent bad
- * commit. Commands are run raw so a multi-token command line (`bunx biome check
- * --write .`) executes as written, not as one quoted argument.
+ * clone. A non-zero exit becomes a typed `FormatFailed`, which `makeRunner`
+ * treats as best-effort: it logs and commits anyway (formatting helps CI pass,
+ * it is not a gate). Commands are run raw so a multi-token command line (`bunx
+ * biome format --write .`) executes as written, not as one quoted argument.
  */
 const bunFormatPort: FormatPort = {
   hasFormatScript: async (dir) => {
