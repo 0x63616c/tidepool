@@ -51,18 +51,33 @@ export interface MainCloudInitParams {
 
 const DEFAULT_MOUNT = '/mnt/tidepool';
 const CLONE_DIR = '/opt/tidepool';
-const AGE_KEY_GUARD = '/root/.tidepool/bootstrap/age-mainbox.key';
+/** Where the operator SCPs the master age key; created (0700) by the install script. */
+const AGE_KEY_DIR = '/root/.tidepool/bootstrap';
+const AGE_KEY_GUARD = `${AGE_KEY_DIR}/age-mainbox.key`;
+/** Path on the box where the install recipe is written by cloud-init `write_files`. */
+const BOOTSTRAP_SCRIPT = '/opt/bootstrap-main.sh';
+/** Where the install script's combined stdout/stderr is captured for the reconciler. */
+const BOOTSTRAP_LOG = '/var/log/tp-cloudinit.log';
 
 /**
  * Build the `#cloud-config` document for the main box. Every step is idempotent
- * (re-running on a reboot is a no-op) and the whole runcmd is captured to
- * `/var/log/tp-cloudinit.log` for the reconciler to surface.
+ * (re-running on a reboot is a no-op).
+ *
+ * The install recipe is delivered as a SCRIPT FILE via `write_files:` and merely
+ * INVOKED by a single, quote-free `runcmd`. It must never be inlined as a
+ * `bash -c '<recipe>'` string: the recipe contains single-quoted fragments
+ * (e.g. `echo 'tidepool: inert …'`, `grep -q '<mount>'`), which would terminate
+ * the outer `bash -c '…'` at the first inner quote — silently mangling the whole
+ * command so NOTHING installs. Routing through a file sidesteps shell quoting
+ * entirely. All output is captured to `/var/log/tp-cloudinit.log` for the
+ * reconciler to surface.
  */
 export const mainCloudInit = (params: MainCloudInitParams): string => {
   const mount = params.mountPoint ?? DEFAULT_MOUNT;
   // systemd escapes a mount unit name from the path (e.g. /mnt/tidepool →
   // mnt-tidepool.mount); the service's After= depends on this exact name.
   const recipe = [
+    '#!/usr/bin/env bash',
     'set -ex',
     'export HOME=/root',
     // ── Toolchain ───────────────────────────────────────────────────────────
@@ -98,9 +113,20 @@ export const mainCloudInit = (params: MainCloudInitParams): string => {
     `install -m 644 ${CLONE_DIR}/infra/systemd/tidepool.service /etc/systemd/system/tidepool.service`,
     'systemctl daemon-reload',
     'systemctl enable tidepool.service',
+    // ── Age-key drop dir ─────────────────────────────────────────────────────
+    // The operator SCPs the master age key here out-of-band; create it 0700 so
+    // the scp target exists (and the unit's ConditionPathExists can ever pass).
+    `install -d -m 700 ${AGE_KEY_DIR}`,
     // Surface, in the boot log, exactly why the service is not running yet.
     `test -f ${AGE_KEY_GUARD} || echo 'tidepool: inert — awaiting ${AGE_KEY_GUARD} (deliver age-mainbox.key, then: systemctl start tidepool)'`,
-  ].join('; ');
+  ].join('\n');
+
+  // Indent the script under the `content: |` YAML block scalar (6 spaces, two
+  // levels past the `- ` list item). cloud-init writes it verbatim to disk.
+  const scriptBlock = recipe
+    .split('\n')
+    .map((line) => `      ${line}`)
+    .join('\n');
 
   const lines = [
     '#cloud-config',
@@ -117,8 +143,15 @@ export const mainCloudInit = (params: MainCloudInitParams): string => {
     '  - systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service || true',
     '  - systemctl disable --now apt-daily.timer apt-daily-upgrade.timer || true',
     'packages: [git, curl, unzip, age]',
+    // The install recipe is written to disk as a script (no shell quoting hazard)
+    // and run by a single clean runcmd below.
+    'write_files:',
+    `  - path: ${BOOTSTRAP_SCRIPT}`,
+    "    permissions: '0755'",
+    '    content: |',
+    scriptBlock,
     'runcmd:',
-    `  - bash -c '${recipe}' > /var/log/tp-cloudinit.log 2>&1`,
+    `  - bash ${BOOTSTRAP_SCRIPT} > ${BOOTSTRAP_LOG} 2>&1`,
   );
   return lines.join('\n');
 };
