@@ -6,10 +6,11 @@ import type {
   MergeConflict,
   RateCapped,
   Run,
+  RunEvent,
   Ticket,
   TicketNotFound,
 } from './domain.ts';
-import { newRunId } from './ids.ts';
+import { newRunId, type RunId, type TicketId } from './ids.ts';
 import {
   AgentRunner,
   BoxMaker,
@@ -17,6 +18,7 @@ import {
   Forge,
   TicketStore,
   type TicketStoreApi,
+  type WorkResult,
 } from './services.ts';
 
 /**
@@ -46,19 +48,78 @@ const boxSpec = (config: Config): BoxSpec => ({
   ttlSec: config.workers.maxTtlSec,
 });
 
-const recordRun = (store: TicketStoreApi, run: Omit<Run, 'id'>): Effect.Effect<void> =>
-  store.addRun({ id: newRunId(), ...run });
+/** Record a run, minting its id once so callers can attach `RunEvent`s to it. */
+const recordRun = (store: TicketStoreApi, run: Omit<Run, 'id'>): Effect.Effect<RunId> =>
+  Effect.gen(function* () {
+    const id = newRunId();
+    yield* store.addRun({ id, ...run });
+    return id;
+  });
+
+/** Build the obs events captured from a successful work run (one per layer present). */
+const workCaptures = (
+  ticketId: TicketId,
+  runId: RunId,
+  boxId: RunEvent['boxId'],
+  result: WorkResult,
+): ReadonlyArray<RunEvent> => {
+  const ts = Date.now();
+  const events: RunEvent[] = [];
+  if (result.transcript !== undefined)
+    events.push({
+      ticketId,
+      runId,
+      boxId,
+      source: 'opencode',
+      ts,
+      level: null,
+      line: JSON.stringify(result.transcript),
+    });
+  if (result.workerStderr !== undefined)
+    events.push({
+      ticketId,
+      runId,
+      boxId,
+      source: 'runner',
+      ts,
+      level: null,
+      line: result.workerStderr,
+    });
+  if (result.cloudInitLog !== undefined)
+    events.push({
+      ticketId,
+      runId,
+      boxId,
+      source: 'cloud-init',
+      ts,
+      level: null,
+      line: result.cloudInitLog,
+    });
+  return events;
+};
+
+/** One control-plane error event — the durable trace of why a ticket stalled. */
+const failureEvent = (ticketId: TicketId, line: string): RunEvent => ({
+  ticketId,
+  runId: null,
+  boxId: null,
+  source: 'control-plane',
+  ts: Date.now(),
+  level: 'error',
+  line,
+});
 
 /** Bump attempts; fail the ticket once it has burned through `retries`. */
 const retryOrFail = (
   store: TicketStoreApi,
   ticket: Ticket,
   retries: number,
+  reason: string,
 ): Effect.Effect<unknown, TicketNotFound> => {
   const attempts = ticket.attempts + 1;
   return attempts >= retries
-    ? store.patch(ticket.id, { attempts, state: 'failed' })
-    : store.patch(ticket.id, { attempts, state: 'in_progress' });
+    ? store.patch(ticket.id, { attempts, state: 'failed', reason })
+    : store.patch(ticket.id, { attempts, state: 'in_progress', reason });
 };
 
 const stepTicket = (
@@ -88,7 +149,7 @@ const stepTicket = (
         }
 
         const branch = branchFor(ticket);
-        const work = yield* Effect.scoped(
+        const { boxId, runId, work } = yield* Effect.scoped(
           Effect.gen(function* () {
             const box = yield* boxes.lease({
               ...boxSpec(config),
@@ -102,16 +163,19 @@ const stepTicket = (
               branch,
               model: models.work,
             });
-            yield* recordRun(store, {
+            const runId = yield* recordRun(store, {
               ticketId: ticket.id,
               kind: 'work',
               boxId: box.id,
               boxProvider: box.provider,
               usage: result.usage,
             });
-            return result;
+            return { boxId: box.id, runId, work: result };
           }),
         );
+
+        // Persist whatever the box captured (transcript / runner stderr / cloud-init).
+        yield* store.appendEvents(workCaptures(ticket.id, runId, boxId, work));
 
         // Open the PR on first work; on a retry the fix is pushed to the same branch.
         if (ticket.prNumber === null) {
@@ -150,7 +214,7 @@ const stepTicket = (
         const ci = yield* forge.checks({ repo: ticket.target, prNumber });
         if (ci === 'pending') return; // wait; next tick re-checks
         if (ci === 'red') {
-          yield* retryOrFail(store, ticket, config.retries);
+          yield* retryOrFail(store, ticket, config.retries, 'ci-red');
           return;
         }
 
@@ -161,16 +225,28 @@ const stepTicket = (
           prNumber,
           model: models.review,
         });
-        yield* recordRun(store, {
+        const reviewRunId = yield* recordRun(store, {
           ticketId: ticket.id,
           kind: 'review',
           boxId: null,
           boxProvider: null,
           usage: review.usage,
         });
+        if (review.transcript !== undefined)
+          yield* store.appendEvents([
+            {
+              ticketId: ticket.id,
+              runId: reviewRunId,
+              boxId: null,
+              source: 'opencode',
+              ts: Date.now(),
+              level: null,
+              line: JSON.stringify(review.transcript),
+            },
+          ]);
 
         if (review.verdict === 'request_changes') {
-          yield* retryOrFail(store, ticket, config.retries);
+          yield* retryOrFail(store, ticket, config.retries, 'review-rejected');
           return;
         }
 
@@ -187,14 +263,29 @@ const stepTicket = (
     // Typed failures never crash the loop — they map to ticket state (tenet: never crash).
     Effect.catchTags({
       RateCapped: (_: RateCapped) =>
-        Effect.flatMap(TicketStore, (s) => s.patch(ticket.id, { state: 'rate_capped' })),
-      AgentFailed: (_: AgentFailed) =>
-        Effect.flatMap(AppConfig, (c) =>
-          Effect.flatMap(TicketStore, (s) => retryOrFail(s, ticket, c.retries)),
+        Effect.flatMap(TicketStore, (s) =>
+          Effect.zipRight(
+            s.patch(ticket.id, { state: 'rate_capped', reason: 'rate-capped' }),
+            s.appendEvents([failureEvent(ticket.id, 'rate-capped')]),
+          ),
         ),
-      BoxFailed: (_: BoxFailed) =>
+      AgentFailed: (e: AgentFailed) =>
         Effect.flatMap(AppConfig, (c) =>
-          Effect.flatMap(TicketStore, (s) => retryOrFail(s, ticket, c.retries)),
+          Effect.flatMap(TicketStore, (s) =>
+            Effect.zipRight(
+              retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`),
+              s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]),
+            ),
+          ),
+        ),
+      BoxFailed: (e: BoxFailed) =>
+        Effect.flatMap(AppConfig, (c) =>
+          Effect.flatMap(TicketStore, (s) =>
+            Effect.zipRight(
+              retryOrFail(s, ticket, c.retries, `box: ${e.reason}`),
+              s.appendEvents([failureEvent(ticket.id, `BoxFailed: ${e.reason}`)]),
+            ),
+          ),
         ),
       MergeConflict: (_: MergeConflict) =>
         Effect.flatMap(TicketStore, (s) => s.patch(ticket.id, { state: 'in_progress' })),

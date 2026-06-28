@@ -120,3 +120,158 @@ describe('reconciler', () => {
       }),
   );
 });
+
+/**
+ * Observability: every typed failure must leave a durable trace — a `reason` on
+ * the ticket and exactly one control-plane/error event — and a successful run
+ * must persist whatever the box captured, linked to that run's id.
+ */
+describe('reconciler observability', () => {
+  /** Put a freshly-added ticket into in_progress so the next `step` runs the work agent. */
+  const inProgress = (store: TicketStoreApi, attempts: number) =>
+    Effect.gen(function* () {
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, { state: 'in_progress', attempts });
+      return ticket;
+    });
+
+  it.effect('AgentFailed under the cap → in_progress + reason + attempts bumped', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* inProgress(store, 0);
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentRunner({ failWork: 'agent' }),
+        fakeBoxMaker(),
+      );
+
+      yield* step.pipe(Effect.provide(env));
+
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'in_progress');
+      assert.strictEqual(final.attempts, 1);
+      assert.isNotNull(final.reason);
+
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.strictEqual(events.length, 1);
+      const [event] = events;
+      assert.isDefined(event);
+      assert.strictEqual(event.source, 'control-plane');
+      assert.strictEqual(event.level, 'error');
+    }),
+  );
+
+  it.effect('AgentFailed at the cap → failed + reason', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* inProgress(store, 1); // retries === 2, so the next bump fails it
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentRunner({ failWork: 'agent' }),
+        fakeBoxMaker(),
+      );
+
+      yield* step.pipe(Effect.provide(env));
+
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'failed');
+      assert.strictEqual(final.attempts, 2);
+      assert.isNotNull(final.reason);
+      assert.strictEqual((yield* store.eventsFor({ ticketId: ticket.id })).length, 1);
+    }),
+  );
+
+  it.effect('BoxFailed → reason + exactly one control-plane/error event', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* inProgress(store, 0);
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentRunner({ verdict: 'approve' }),
+        fakeBoxMaker({ failLease: true }),
+      );
+
+      yield* step.pipe(Effect.provide(env));
+
+      const final = yield* store.byId(ticket.id);
+      assert.isNotNull(final.reason);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.strictEqual(events.length, 1);
+      const [event] = events;
+      assert.isDefined(event);
+      assert.strictEqual(event.source, 'control-plane');
+      assert.strictEqual(event.level, 'error');
+    }),
+  );
+
+  it.effect("RateCapped → rate_capped + reason 'rate-capped' + event", () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* inProgress(store, 0);
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentRunner({ failWork: 'rate' }),
+        fakeBoxMaker(),
+      );
+
+      yield* step.pipe(Effect.provide(env));
+
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'rate_capped');
+      assert.strictEqual(final.reason, 'rate-capped');
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.strictEqual(events.length, 1);
+      const [event] = events;
+      assert.isDefined(event);
+      assert.strictEqual(event.source, 'control-plane');
+    }),
+  );
+
+  it.effect(
+    'successful work → one opencode + one runner + one cloud-init event on the run id',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentRunner({
+            verdict: 'approve',
+            transcript: [{ type: 'message', text: 'hi' }],
+            workerStderr: 'worker boot ok',
+            cloudInitLog: 'cloud-init done',
+          }),
+          fakeBoxMaker(),
+        );
+
+        yield* settle().pipe(Effect.provide(env));
+
+        const workRun = (yield* store.runsFor(ticket.id)).find((r) => r.kind === 'work');
+        assert.isDefined(workRun);
+        const events = yield* store.eventsFor({ ticketId: ticket.id });
+        const first = (s: string) => events.find((e) => e.source === s);
+        const count = (s: string) => events.filter((e) => e.source === s).length;
+        assert.strictEqual(count('opencode'), 1);
+        assert.strictEqual(count('runner'), 1);
+        assert.strictEqual(count('cloud-init'), 1);
+        // All three captures are linked to the work run.
+        const runId = workRun?.id ?? null;
+        const opencode = first('opencode');
+        const runner = first('runner');
+        const cloudInit = first('cloud-init');
+        assert.isDefined(opencode);
+        assert.isDefined(runner);
+        assert.isDefined(cloudInit);
+        assert.strictEqual(opencode.runId, runId);
+        assert.strictEqual(runner.runId, runId);
+        assert.strictEqual(cloudInit.runId, runId);
+        // The opencode line is the serialized transcript (what `tp transcript` parses).
+        assert.deepStrictEqual(JSON.parse(opencode.line), [{ type: 'message', text: 'hi' }]);
+      }),
+  );
+});

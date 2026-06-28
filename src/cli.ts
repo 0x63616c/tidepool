@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import { homedir } from 'node:os';
-import { Command, Options } from '@effect/cli';
+import { Args, Command, Options } from '@effect/cli';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
-import { Console, Effect, Layer } from 'effect';
+import { Console, Effect, Either, Layer, Option, Schema } from 'effect';
 import { AppConfig } from './config.ts';
 import { renderDoctor, runDoctor } from './doctor.ts';
-import type { Ticket } from './domain.ts';
+import type { RunEvent, Ticket } from './domain.ts';
+import { RunId, TicketId } from './ids.ts';
 import { settle } from './reconciler.ts';
 import { AppConfigLive, LiveStack, SqliteTicketStore } from './runtime.ts';
 import { TicketStore } from './services.ts';
@@ -138,6 +139,108 @@ const doctorCommand = Command.make('doctor', {}, () =>
   ),
 );
 
+// ── tp logs / tp transcript — the observability read path ────────────────────
+
+const LINE_LIMIT = 500;
+const decodeTicketId = Schema.decodeUnknownEither(TicketId);
+const decodeRunId = Schema.decodeUnknownEither(RunId);
+
+/** Collapse to one line, neutralise quotes, truncate with a definitive marker. */
+const previewLine = (line: string): string => {
+  const flat = line.replace(/\r?\n/g, ' ').replaceAll('"', "'");
+  return flat.length > LINE_LIMIT
+    ? `${flat.slice(0, LINE_LIMIT)}… (truncated, ${flat.length} chars total)`
+    : flat;
+};
+
+/** TOON table of events; a definitive zero-state when empty. */
+const renderEvents = (events: ReadonlyArray<RunEvent>, scope: string): string => {
+  if (events.length === 0) return `events: 0 events found for ${scope}`;
+  const rows = events.map((e) => `  ${e.source},${e.level ?? '-'},"${previewLine(e.line)}"`);
+  return [`events[${events.length}]{source,level,line}:`, ...rows].join('\n');
+};
+
+/** Print a structured usage error and exit 2 (AXI: errors on stdout, actionable). */
+const usageError = (line: string, help: string) =>
+  Console.log([`error: ${line}`, `help: ${help}`].join('\n')).pipe(
+    Effect.zipRight(Effect.sync(() => process.exit(2))),
+  );
+
+/**
+ * `tp logs <ticket>` / `tp logs --run <run_id>` — read the durable event stream.
+ * The opencode transcript blob is excluded from the ticket view by default (it's
+ * large); `tp transcript <run_id>` prints it. Scoping to `--run` shows everything.
+ */
+const logsCommand = Command.make(
+  'logs',
+  {
+    ticket: Args.text({ name: 'ticket' }).pipe(Args.optional),
+    run: Options.text('run').pipe(Options.optional),
+  },
+  ({ run, ticket }) =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* TicketStore;
+        if (Option.isSome(run)) {
+          const decoded = decodeRunId(run.value);
+          if (Either.isLeft(decoded))
+            return yield* usageError(`not a run id: ${run.value}`, 'tp logs --run run_…');
+          const events = yield* store.eventsFor({ runId: decoded.right });
+          return yield* Console.log(renderEvents(events, `run ${run.value}`));
+        }
+        if (Option.isSome(ticket)) {
+          const decoded = decodeTicketId(ticket.value);
+          if (Either.isLeft(decoded))
+            return yield* usageError(`not a ticket id: ${ticket.value}`, 'tp logs tckt_…');
+          const all = yield* store.eventsFor({ ticketId: decoded.right });
+          const shown = all.filter((e) => e.source !== 'opencode');
+          const hidden = all.length - shown.length;
+          const hints = [
+            'help[2]:',
+            ...(hidden > 0
+              ? [`  ${hidden} opencode transcript event(s) hidden — run \`tp transcript <run_id>\``]
+              : ['  Run `tp transcript <run_id>` to read an opencode transcript']),
+            '  Run `tp logs --run <run_id>` to scope to a single run',
+          ];
+          return yield* Console.log(
+            [renderEvents(shown, `ticket ${ticket.value}`), ...hints].join('\n'),
+          );
+        }
+        return yield* usageError(
+          'provide a ticket id or --run',
+          'tp logs <ticket> | tp logs --run <run_id>',
+        );
+      }),
+    ),
+);
+
+/** `tp transcript <run_id>` — parse the opencode capture for a run and pretty-print it. */
+const transcriptCommand = Command.make(
+  'transcript',
+  { run: Args.text({ name: 'run_id' }) },
+  ({ run }) =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* TicketStore;
+        const decoded = decodeRunId(run);
+        if (Either.isLeft(decoded))
+          return yield* usageError(`not a run id: ${run}`, 'tp transcript run_…');
+        const events = yield* store.eventsFor({ runId: decoded.right, source: 'opencode' });
+        if (events.length === 0)
+          return yield* Console.log(`transcript: 0 transcript events found for run ${run}`);
+        const blocks = events.map((e) => {
+          const parsed: unknown = JSON.parse(e.line);
+          const entries = Array.isArray(parsed) ? parsed.length : 1;
+          return [
+            `transcript: run ${run} (${entries} entries)`,
+            JSON.stringify(parsed, null, 2),
+          ].join('\n');
+        });
+        return yield* Console.log(blocks.join('\n'));
+      }),
+    ),
+);
+
 const homeView = withStore(
   Effect.gen(function* () {
     const store = yield* TicketStore;
@@ -149,7 +252,14 @@ const homeView = withStore(
 );
 
 const root = Command.make('tp', {}, () => homeView).pipe(
-  Command.withSubcommands([lsCommand, ticketCommand, runCommand, doctorCommand]),
+  Command.withSubcommands([
+    lsCommand,
+    ticketCommand,
+    runCommand,
+    doctorCommand,
+    logsCommand,
+    transcriptCommand,
+  ]),
 );
 
 const cli = Command.run(root, { name: 'tp', version: '0.0.0' });

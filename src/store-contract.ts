@@ -1,6 +1,6 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, type Scope } from 'effect';
-import type { Run } from './domain.ts';
+import type { Run, RunEvent } from './domain.ts';
 import { newBoxId, newRunId, newTicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -104,6 +104,133 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
           assert.deepStrictEqual(bRuns, []);
         }),
       ),
+    );
+
+    it.effect('appendEvents → eventsFor returns events oldest-first', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          const t = yield* store.add(newTicket);
+          const runId = newRunId();
+          const e1: RunEvent = {
+            ticketId: t.id,
+            runId,
+            boxId: newBoxId(),
+            source: 'runner',
+            ts: 100,
+            level: 'info',
+            line: 'first',
+          };
+          const e2: RunEvent = { ...e1, source: 'opencode', ts: 200, line: 'second' };
+          // Append in two batches; read order must be insertion order, not ts.
+          yield* store.appendEvents([e1]);
+          yield* store.appendEvents([e2]);
+          const got = yield* store.eventsFor({ ticketId: t.id });
+          assert.deepStrictEqual(
+            got.map((e) => e.line),
+            ['first', 'second'],
+          );
+        }),
+      ),
+    );
+
+    it.effect('eventsFor filters by runId', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          const t = yield* store.add(newTicket);
+          const runA = newRunId();
+          const runB = newRunId();
+          const base = { ticketId: t.id, boxId: null, source: 'runner', level: null } as const;
+          yield* store.appendEvents([
+            { ...base, runId: runA, ts: 1, line: 'a' },
+            { ...base, runId: runB, ts: 2, line: 'b' },
+          ]);
+          const got = yield* store.eventsFor({ runId: runA });
+          assert.deepStrictEqual(
+            got.map((e) => e.line),
+            ['a'],
+          );
+        }),
+      ),
+    );
+
+    it.effect('eventsFor filters by source', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          const t = yield* store.add(newTicket);
+          const base = { ticketId: t.id, runId: null, boxId: null, level: null } as const;
+          yield* store.appendEvents([
+            { ...base, source: 'opencode', ts: 1, line: 'transcript' },
+            { ...base, source: 'control-plane', ts: 2, line: 'failed' },
+          ]);
+          const got = yield* store.eventsFor({ ticketId: t.id, source: 'control-plane' });
+          assert.deepStrictEqual(
+            got.map((e) => e.line),
+            ['failed'],
+          );
+        }),
+      ),
+    );
+
+    it.effect('events written before a reopen survive it', () =>
+      Effect.gen(function* () {
+        const medium = yield* makeMedium;
+        const ticketId = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            const t = yield* store.add(newTicket);
+            yield* store.appendEvents([
+              {
+                ticketId: t.id,
+                runId: null,
+                boxId: null,
+                source: 'control-plane',
+                ts: 1,
+                level: 'error',
+                line: 'boom',
+              },
+            ]);
+            return t.id;
+          }),
+        );
+        const got = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            return yield* store.eventsFor({ ticketId });
+          }),
+        );
+        assert.deepStrictEqual(
+          got.map((e) => e.line),
+          ['boom'],
+        );
+      }),
+    );
+
+    it.effect('patch reason persists and survives a reopen', () =>
+      Effect.gen(function* () {
+        const medium = yield* makeMedium;
+        const id = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            const t = yield* store.add(newTicket);
+            const patched = yield* store.patch(t.id, { state: 'failed', reason: 'rate-capped' });
+            assert.strictEqual(patched.reason, 'rate-capped');
+            return t.id;
+          }),
+        );
+        const reread = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            return yield* store.byId(id);
+          }),
+        );
+        assert.strictEqual(reread.reason, 'rate-capped');
+      }),
     );
 
     it.effect('data written before a reopen survives it', () =>

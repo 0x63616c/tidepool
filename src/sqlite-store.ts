@@ -1,7 +1,7 @@
 import { Reactivity } from '@effect/experimental';
 import { SqliteClient } from '@effect/sql-sqlite-bun';
 import { Effect, Schema, type Scope } from 'effect';
-import { Run, Ticket, TicketNotFound } from './domain.ts';
+import { Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
 import { newTicketId, type TicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -17,9 +17,21 @@ const decodeTicket = Schema.decodeUnknownSync(Ticket);
 
 const decodeRun = Schema.decodeUnknownSync(Run);
 
+const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
+
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
-  'id, title, goal, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt"';
+  'id, title, goal, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason';
+
+interface EventRow {
+  readonly ticketId: string;
+  readonly runId: string | null;
+  readonly boxId: string | null;
+  readonly source: string;
+  readonly ts: number;
+  readonly level: string | null;
+  readonly line: string;
+}
 
 interface RunRow {
   readonly id: string;
@@ -88,10 +100,29 @@ export const makeSqliteStore = (
     // Migration: add box_provider column to existing databases (no-op if already present).
     yield* sql`ALTER TABLE runs ADD COLUMN box_provider TEXT`.pipe(Effect.ignore);
 
+    // Migration: add reason column to existing ticket tables (no-op if already present).
+    yield* sql`ALTER TABLE tickets ADD COLUMN reason TEXT`.pipe(Effect.ignore);
+
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS run_events (
+        ticket_id TEXT NOT NULL,
+        run_id TEXT,
+        box_id TEXT,
+        source TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        level TEXT,
+        line TEXT NOT NULL
+      )
+    `.pipe(Effect.orDie);
+    yield* sql`CREATE INDEX IF NOT EXISTS run_events_ticket ON run_events (ticket_id)`.pipe(
+      Effect.orDie,
+    );
+    yield* sql`CREATE INDEX IF NOT EXISTS run_events_run ON run_events (run_id)`.pipe(Effect.orDie);
+
     const insertTicket = (t: Ticket) =>
       sql`
-        INSERT INTO tickets (id, title, goal, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt)
-        VALUES (${t.id}, ${t.title}, ${t.goal}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt})
+        INSERT INTO tickets (id, title, goal, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason)
+        VALUES (${t.id}, ${t.title}, ${t.goal}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason})
       `.pipe(Effect.orDie);
 
     const findById = (id: TicketId) =>
@@ -120,6 +151,7 @@ export const makeSqliteStore = (
             mergeSha: null,
             attempts: 0,
             workedAttempt: null,
+            reason: null,
           });
           yield* insertTicket(ticket);
           return ticket;
@@ -142,7 +174,8 @@ export const makeSqliteStore = (
               pr_id = ${updated.prId},
               merge_sha = ${updated.mergeSha},
               attempts = ${updated.attempts},
-              worked_attempt = ${updated.workedAttempt}
+              worked_attempt = ${updated.workedAttempt},
+              reason = ${updated.reason}
             WHERE id = ${id}
           `.pipe(Effect.orDie);
           return updated;
@@ -163,6 +196,31 @@ export const makeSqliteStore = (
           Effect.orDie,
           Effect.map((rows) => rows.map(runFromRow)),
         ),
+      appendEvents: (events) =>
+        Effect.forEach(
+          events,
+          (e) =>
+            sql`
+              INSERT INTO run_events (ticket_id, run_id, box_id, source, ts, level, line)
+              VALUES (${e.ticketId}, ${e.runId}, ${e.boxId}, ${e.source}, ${e.ts}, ${e.level}, ${e.line})
+            `.pipe(Effect.orDie),
+          { discard: true },
+        ).pipe(Effect.asVoid),
+      eventsFor: (q) =>
+        Effect.gen(function* () {
+          const conds = [
+            ...(q.ticketId === undefined ? [] : [sql`ticket_id = ${q.ticketId}`]),
+            ...(q.runId === undefined ? [] : [sql`run_id = ${q.runId}`]),
+            ...(q.source === undefined ? [] : [sql`source = ${q.source}`]),
+          ];
+          const where = conds.length === 0 ? sql`` : sql`WHERE ${sql.and(conds)}`;
+          const rows = yield* sql<EventRow>`
+            SELECT ticket_id AS "ticketId", run_id AS "runId", box_id AS "boxId",
+                   source, ts, level, line
+            FROM run_events ${where} ORDER BY rowid
+          `.pipe(Effect.orDie);
+          return rows.map((r) => decodeRunEvent(r));
+        }),
     };
 
     return api;
