@@ -7,7 +7,7 @@ import { createOpencodeClient, createOpencodeServer } from '@opencode-ai/sdk';
 import { $ } from 'bun';
 import { Effect, Layer, Schema } from 'effect';
 import { AgentFailed, RateCapped, type ReviewVerdict, type Ticket, type Usage } from './domain.ts';
-import { githubToken } from './forge.ts';
+import { githubToken, parseRepo } from './forge.ts';
 import { AgentRunner, type AgentRunnerApi, type WorkResult } from './services.ts';
 import { RunnerResult } from './worker/protocol.ts';
 import { preCommitCommands } from './worker/runner-core.ts';
@@ -72,6 +72,48 @@ const reviewPrompt = (ticket: Ticket, diff: string): string =>
     '--- DIFF ---',
     diff,
   ].join('\n\n');
+
+/**
+ * The slice of `fetch` the diff fetch needs. Narrowing it (vs the full `fetch`
+ * type) keeps the port trivially fakeable in tests without `as` casts.
+ */
+type HttpGet = (
+  url: string,
+  init: { readonly headers: Record<string, string> },
+) => Promise<{
+  readonly ok: boolean;
+  readonly status: number;
+  readonly text: () => Promise<string>;
+}>;
+
+/**
+ * Fetch a PR's unified diff with the runner's OWN token over the REST diff media
+ * type. Deliberately NOT `gh pr diff`: `gh` authenticates through its GraphQL
+ * path and rejects the installation token that git-clone + REST accept, so on the
+ * control box review died with `HTTP 401 → ShellError exit 1` while work (git
+ * clone, same token) succeeded. This routes review through the same token +
+ * REST transport the forge already uses, so it has no `gh`/keyring/cwd
+ * dependency. Throws on non-2xx; the caller maps it onto `AgentFailed`.
+ */
+export const fetchPrDiff = async (
+  input: { readonly token: string; readonly repo: string; readonly prNumber: number },
+  http: HttpGet = (url, init) => fetch(url, init),
+): Promise<string> => {
+  const { owner, name } = parseRepo(input.repo);
+  const res = await http(`https://api.github.com/repos/${owner}/${name}/pulls/${input.prNumber}`, {
+    headers: {
+      Authorization: `Bearer ${input.token}`,
+      Accept: 'application/vnd.github.diff',
+      'User-Agent': 'tidepool',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 200);
+    throw new Error(`fetch PR diff ${input.repo}#${input.prNumber}: HTTP ${res.status} ${body}`);
+  }
+  return res.text();
+};
 
 /** Map an opencode/git failure onto the runner's typed errors (rate-cap aware). */
 const mapAgentError = (e: unknown): AgentFailed | RateCapped => {
@@ -356,7 +398,7 @@ export const makeOpencodeAgentRunner = (token: string): AgentRunnerApi => {
     review: (input) =>
       Effect.tryPromise({
         try: async () => {
-          const diff = await $`gh pr diff ${input.prNumber} --repo ${input.repo}`.text();
+          const diff = await fetchPrDiff({ token, repo: input.repo, prNumber: input.prNumber });
           const dir = await mkdtemp(join(tmpdir(), 'tp-review-'));
           const { usage, text } = await runAgent({
             directory: dir,

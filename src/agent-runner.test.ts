@@ -2,6 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import {
   buildRunnerBundle,
   commitMessage,
+  fetchPrDiff,
   parseUsage,
   parseVerdict,
   sshArgv,
@@ -161,6 +162,51 @@ describe('sshArgv', () => {
     const cmd = "cat > /tmp/x && echo 'hi'";
     const argv = sshArgv('1.2.3.4', cmd);
     assert.strictEqual(argv.at(-1), cmd);
+  });
+});
+
+/**
+ * The review path must fetch the PR diff with the runner's OWN token over the
+ * REST diff media type — never via `gh pr diff`. On the control box `gh`
+ * authenticates through its GraphQL path and rejects the installation token that
+ * git-clone + REST accept, so review died with `HTTP 401 / ShellError exit 1`
+ * while work (git clone, same token) succeeded. These lock review onto the same
+ * token + transport as work, with no `gh` dependency.
+ */
+describe('fetchPrDiff', () => {
+  type Captured = { url: string; headers: Record<string, string> };
+
+  it('GETs the REST diff endpoint with a bearer token and diff media type', async () => {
+    const seen: Captured[] = [];
+    const diff = await fetchPrDiff(
+      { token: 'ghs_tok', repo: '0x63616c/tidepool-testbed', prNumber: 7 },
+      (url, init) => {
+        seen.push({ url, headers: init.headers });
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: () => Promise.resolve('--- DIFF BODY ---'),
+        });
+      },
+    );
+
+    assert.strictEqual(diff, '--- DIFF BODY ---');
+    assert.strictEqual(seen.length, 1);
+    const [req] = seen;
+    assert.strictEqual(req?.url, 'https://api.github.com/repos/0x63616c/tidepool-testbed/pulls/7');
+    assert.strictEqual(req?.headers.Authorization, 'Bearer ghs_tok');
+    assert.strictEqual(req?.headers.Accept, 'application/vnd.github.diff');
+  });
+
+  it('throws (→ AgentFailed) carrying the HTTP status on a non-2xx response', async () => {
+    const err = await fetchPrDiff({ token: 'bad', repo: 'o/n', prNumber: 1 }, () =>
+      Promise.resolve({ ok: false, status: 401, text: () => Promise.resolve('Bad credentials') }),
+    ).then(
+      () => undefined,
+      (e: unknown) => String(e),
+    );
+    assert.isDefined(err);
+    assert.match(err ?? '', /401/);
   });
 });
 
