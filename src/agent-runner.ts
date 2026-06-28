@@ -2,92 +2,20 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createOpencodeClient, createOpencodeServer } from '@opencode-ai/sdk';
 import { $ } from 'bun';
-import { Effect, Layer } from 'effect';
+import { Effect, Layer, Schema } from 'effect';
 import { AgentFailed, RateCapped, type ReviewVerdict, type Ticket, type Usage } from './domain.ts';
 import { githubToken } from './forge.ts';
 import { AgentRunner, type AgentRunnerApi, type WorkResult } from './services.ts';
+import { RunnerResult } from './worker/protocol.ts';
+import { parseUsage } from './worker/usage.ts';
 
-/**
- * Narrowed view of the one event we care about: a `message.updated` whose info
- * is an AssistantMessage. The opencode SDK's event type is a wide union, so we
- * validate at the boundary (no casts) and keep only the fields usage needs.
- */
-interface AssistantInfo {
-  readonly id: string;
-  readonly modelID: string;
-  readonly providerID: string;
-  readonly tokensIn: number;
-  readonly tokensOut: number;
-  readonly created: number;
-  readonly completed: number | undefined;
-}
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
-
-const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
-const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
-
-/** Decode one event into an `AssistantInfo`, or null if it isn't one. */
-const assistantInfo = (ev: unknown): AssistantInfo | null => {
-  if (!isRecord(ev) || ev.type !== 'message.updated' || !isRecord(ev.properties)) return null;
-  const info = ev.properties.info;
-  if (!isRecord(info) || info.role !== 'assistant') return null;
-  if (!isRecord(info.tokens) || !isRecord(info.time)) return null;
-  const id = str(info.id);
-  const modelID = str(info.modelID);
-  const providerID = str(info.providerID);
-  const tokensIn = num(info.tokens.input);
-  const tokensOut = num(info.tokens.output);
-  const created = num(info.time.created);
-  if (
-    id === undefined ||
-    modelID === undefined ||
-    providerID === undefined ||
-    tokensIn === undefined ||
-    tokensOut === undefined ||
-    created === undefined
-  ) {
-    return null;
-  }
-  return {
-    id,
-    modelID,
-    providerID,
-    tokensIn,
-    tokensOut,
-    created,
-    completed: num(info.time.completed),
-  };
-};
-
-/**
- * Roll the opencode event stream into one `Usage`. `message.updated` fires
- * repeatedly per message with cumulative tokens, so we keep the LAST update per
- * message id, then sum across distinct messages. The model is `provider/model`
- * (matching the config strings) and wall time spans first-created to last-
- * completed. Non-zero tokens are the proof a real run happened.
- */
-export const parseUsage = (events: ReadonlyArray<unknown>): Usage => {
-  const byId = new Map<string, AssistantInfo>();
-  for (const ev of events) {
-    const info = assistantInfo(ev);
-    if (info !== null) byId.set(info.id, info);
-  }
-  const infos = [...byId.values()];
-  const tokensIn = infos.reduce((n, i) => n + i.tokensIn, 0);
-  const tokensOut = infos.reduce((n, i) => n + i.tokensOut, 0);
-  const last = infos.at(-1);
-  const model = last === undefined ? '' : `${last.providerID}/${last.modelID}`;
-  const created = infos.map((i) => i.created);
-  const completed = infos.flatMap((i) => (i.completed === undefined ? [] : [i.completed]));
-  const wallTimeSec =
-    created.length > 0 && completed.length > 0
-      ? Math.max(0, (Math.max(...completed) - Math.min(...created)) / 1000)
-      : 0;
-  return { model, tokensIn, tokensOut, wallTimeSec };
-};
+// Usage parsing lives in the worker module so the in-process runner and the
+// bun-built remote runner share one typed rollup (no hand-copied JS duplicate).
+// Re-exported so existing callers/tests keep importing it from this module.
+export { parseUsage };
 
 /**
  * Extract the review verdict from the agent's free text. Fail-closed: anything
@@ -241,131 +169,30 @@ const waitForReady = async (ip: string): Promise<void> => {
 };
 
 /**
- * Self-contained bun script uploaded to the worker that:
- * 1. Clones + branches the target repo
- * 2. Spins an embedded opencode server (spawns the `opencode` binary from PATH)
- * 3. Drives a full agent session
- * 4. Commits + pushes the result
- * 5. Writes one JSON line to stdout: { commitSha, usage }
- *
- * All log output goes to stderr; stdout is the machine-readable result only.
- * Dependencies are installed from the bun global cache (pre-warmed in cloud-init).
+ * Build the worker runner (`src/worker/runner.ts`) into one self-contained
+ * bundle: the opencode SDK + Effect are inlined; Bun's `$` and node builtins
+ * stay external (the box has its own bun runtime). This is the single artifact
+ * uploaded to the worker as `runner.js`, replacing the old stringified script +
+ * on-box `bun install`. Memoized — the bundle is identical across tickets, so
+ * the Bun.build cost is paid once per process.
  */
-// NOTE: $\` and \${} are bun-shell tagged template literals inside the script string.
-// The outer TS template literal escapes them so they survive as literals.
-const RUNNER_SCRIPT = `import { createOpencodeClient, createOpencodeServer } from '@opencode-ai/sdk';
-import { $ } from 'bun';
-import { readFile } from 'node:fs/promises';
-
-const log = (msg) => process.stderr.write('[runner] ' + msg + '\\n');
-
-// Ensure opencode binary is findable by createOpencodeServer (cross-spawn uses PATH).
-// The installer puts it in /usr/local/bin (-b flag) as primary; fall back to ~/.opencode/bin.
-process.env.PATH = [
-  '/usr/local/bin',
-  '/root/.opencode/bin',
-  '/root/.bun/bin',
-  process.env.PATH ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-].join(':');
-
-const cfg = JSON.parse(await readFile('./config.json', 'utf8'));
-const { cloneUrl, base, branch, dir, model, prompt, commitMsg } = cfg;
-
-const slashIdx = model.indexOf('/');
-const providerID = slashIdx >= 0 ? model.slice(0, slashIdx) : 'anthropic';
-const modelID = slashIdx >= 0 ? model.slice(slashIdx + 1) : model;
-
-log('cloning ' + base + ' ...');
-await $\`git clone --depth 1 --branch \${base} \${cloneUrl} \${dir}\`.quiet();
-await $\`git -C \${dir} checkout -b \${branch}\`.quiet();
-await $\`git -C \${dir} config user.email agent@tidepool.local\`.quiet();
-await $\`git -C \${dir} config user.name tidepool-agent\`.quiet();
-
-const isRecord = (v) => typeof v === 'object' && v !== null;
-const num = (v) => (typeof v === 'number' ? v : undefined);
-const str = (v) => (typeof v === 'string' ? v : undefined);
-const assistantInfo = (ev) => {
-  if (!isRecord(ev) || ev.type !== 'message.updated' || !isRecord(ev.properties)) return null;
-  const info = ev.properties.info;
-  if (!isRecord(info) || info.role !== 'assistant') return null;
-  if (!isRecord(info.tokens) || !isRecord(info.time)) return null;
-  const id = str(info.id), mid = str(info.modelID), pid = str(info.providerID);
-  const tin = num(info.tokens.input), tout = num(info.tokens.output);
-  const created = num(info.time.created);
-  if (!id || !mid || !pid || tin === undefined || tout === undefined || created === undefined) return null;
-  return { id, modelID: mid, providerID: pid, tokensIn: tin, tokensOut: tout, created, completed: num(info.time.completed) };
-};
-const parseUsage = (events) => {
-  const byId = new Map();
-  for (const ev of events) { const info = assistantInfo(ev); if (info) byId.set(info.id, info); }
-  const infos = [...byId.values()];
-  const tokensIn = infos.reduce((n, i) => n + i.tokensIn, 0);
-  const tokensOut = infos.reduce((n, i) => n + i.tokensOut, 0);
-  const last = infos.at(-1);
-  const modelStr = last ? last.providerID + '/' + last.modelID : '';
-  const created = infos.map((i) => i.created);
-  const completed = infos.flatMap((i) => (i.completed !== undefined ? [i.completed] : []));
-  const wallTimeSec = created.length > 0 && completed.length > 0
-    ? Math.max(0, (Math.max(...completed) - Math.min(...created)) / 1000) : 0;
-  return { model: modelStr, tokensIn, tokensOut, wallTimeSec };
-};
-const isIdleFor = (ev, sessionId) =>
-  isRecord(ev) && ev.type === 'session.idle' && isRecord(ev.properties) && ev.properties.sessionID === sessionId;
-
-log('starting opencode...');
-const server = await createOpencodeServer({ hostname: '127.0.0.1', port: 0, timeout: 30000 });
-log('server: ' + server.url);
-try {
-  const client = createOpencodeClient({ baseUrl: server.url, directory: dir });
-  const createdSess = await client.session.create({ query: { directory: dir } });
-  const sessionId = createdSess.data?.id;
-  if (!sessionId) throw new Error('session.create failed: ' + JSON.stringify(createdSess.error));
-
-  const events = [];
-  let idleResolve = () => {};
-  const idlePromise = new Promise((r) => { idleResolve = r; });
-  const sub = await client.event.subscribe();
-  (async () => {
-    try {
-      for await (const ev of sub.stream) {
-        events.push(ev);
-        if (isIdleFor(ev, sessionId)) { idleResolve(); return; }
-      }
-    } catch { idleResolve(); }
+let runnerBundle: Promise<string> | undefined;
+export const buildRunnerBundle = (): Promise<string> => {
+  runnerBundle ??= (async () => {
+    const built = await Bun.build({
+      entrypoints: [fileURLToPath(new URL('./worker/runner.ts', import.meta.url))],
+      target: 'bun',
+      external: ['bun'],
+    });
+    if (!built.success) {
+      throw new Error(`runner bundle build failed: ${built.logs.map(String).join('; ')}`);
+    }
+    const [artifact] = built.outputs;
+    if (artifact === undefined) throw new Error('runner bundle produced no output');
+    return artifact.text();
   })();
-
-  log('prompting...');
-  const res = await client.session.prompt({
-    path: { id: sessionId },
-    query: { directory: dir },
-    body: { model: { providerID, modelID }, parts: [{ type: 'text', text: prompt }] },
-  });
-  const info = res.data?.info;
-  if (!info) throw new Error('session.prompt failed: ' + JSON.stringify(res.error));
-  events.push({ type: 'message.updated', properties: { info } });
-
-  await Promise.race([idlePromise, new Promise((r) => setTimeout(r, 600000))]);
-  log('idle');
-
-  const dirty = (await $\`git -C \${dir} status --porcelain\`.text()).trim();
-  if (!dirty) throw new Error('work agent produced no changes');
-  await $\`git -C \${dir} add -A\`.quiet();
-  await $\`git -C \${dir} commit -m \${commitMsg}\`.quiet();
-  const commitSha = (await $\`git -C \${dir} rev-parse HEAD\`.text()).trim();
-  await $\`git -C \${dir} push -u origin \${branch}\`.quiet();
-  log('pushed ' + commitSha);
-
-  await new Promise((resolve) =>
-    process.stdout.write(JSON.stringify({ commitSha, usage: parseUsage(events) }) + '\\n', resolve),
-  );
-} finally {
-  server.close();
-}
-// The embedded opencode server + open event-subscription stream keep Bun's event
-// loop alive, so the runner would hang after pushing. Flush the result (above),
-// then force a clean exit so the reconciler's sshRun returns and can open the PR.
-process.exit(0);
-`;
+  return runnerBundle;
+};
 
 type RemoteWorkInput = {
   readonly box: { readonly ip: string };
@@ -378,8 +205,11 @@ type RemoteWorkInput = {
 
 /**
  * Run the work agent on a real Hetzner worker over SSH.
- * Flow: wait for cloud-init → inject auth.json → upload runner + config →
- * bun install (uses cache from cloud-init) → bun run → parse JSON result.
+ * Flow: wait for cloud-init → inject auth.json → upload bundled runner + config →
+ * `bun run runner.js` → decode the single RunnerResult line.
+ *
+ * The runner is a single pre-bundled `runner.js` (sdk + Effect inlined), so the
+ * box needs no `bun install` and no `package.json` — it just runs the artifact.
  */
 const remoteWork = async (input: RemoteWorkInput, token: string): Promise<WorkResult> => {
   const { ip } = input.box;
@@ -396,17 +226,11 @@ const remoteWork = async (input: RemoteWorkInput, token: string): Promise<WorkRe
     authJson,
   );
 
-  // Set up runner workspace: package.json + SDK install (uses bun global cache) + script
+  // Upload the single bundled runner — no on-box install, no package.json
   await sshRun(ip, `mkdir -p ${runDir}`);
-  await sshPipe(
-    ip,
-    `cat > ${runDir}/package.json`,
-    JSON.stringify({ type: 'module', dependencies: { '@opencode-ai/sdk': '1.17.11' } }),
-  );
-  await sshPipe(ip, `cat > ${runDir}/runner.ts`, RUNNER_SCRIPT);
-  await sshRun(ip, `cd ${runDir} && /root/.bun/bin/bun install 2>&1`);
+  await sshPipe(ip, `cat > ${runDir}/runner.js`, await buildRunnerBundle());
 
-  // Write config as JSON — avoids all shell quoting concerns
+  // Write config as JSON — decoded by the runner through the shared RunnerConfig schema
   const config = JSON.stringify({
     cloneUrl: `https://x-access-token:${token}@github.com/${input.repo}.git`,
     base: input.base,
@@ -418,12 +242,12 @@ const remoteWork = async (input: RemoteWorkInput, token: string): Promise<WorkRe
   });
   await sshPipe(ip, `cat > ${runDir}/config.json && chmod 600 ${runDir}/config.json`, config);
 
-  // Execute runner; stdout = one JSON line; stderr = debug logs (swallowed on success)
-  const raw = await sshRun(ip, `cd ${runDir} && /root/.bun/bin/bun run runner.ts`);
+  // Execute runner; stdout = one encoded RunnerResult line; stderr = debug logs
+  const raw = await sshRun(ip, `cd ${runDir} && /root/.bun/bin/bun run runner.js`);
 
   const jsonLine = raw.split('\n').findLast((l) => l.trim().startsWith('{'));
-  if (!jsonLine) throw new Error(`remote runner produced no JSON. tail: ${raw.slice(-300)}`);
-  const { commitSha, usage } = JSON.parse(jsonLine) as { commitSha: string; usage: Usage };
+  if (!jsonLine) throw new Error(`remote runner produced no result line. tail: ${raw.slice(-300)}`);
+  const { commitSha, usage } = Schema.decodeSync(Schema.parseJson(RunnerResult))(jsonLine);
 
   return {
     title: workTitle(input.ticket as Parameters<typeof workTitle>[0]),
