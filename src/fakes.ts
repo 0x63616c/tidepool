@@ -1,11 +1,13 @@
 import { Effect, Layer, Ref } from 'effect';
 import {
   AgentFailed,
+  BoxFailed,
   type CIStatus,
   MergeConflict,
   RateCapped,
   type ReviewVerdict,
   type Run,
+  type RunEvent,
   type Ticket,
   TicketNotFound,
 } from './domain.ts';
@@ -27,6 +29,7 @@ import { AgentRunner, BoxMaker, Forge, TicketStore, type TicketStoreApi } from '
 export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(function* () {
   const tickets = yield* Ref.make<ReadonlyArray<Ticket>>([]);
   const runs = yield* Ref.make<ReadonlyArray<Run>>([]);
+  const events = yield* Ref.make<ReadonlyArray<RunEvent>>([]);
 
   const api: TicketStoreApi = {
     add: (input) =>
@@ -43,6 +46,7 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
           mergeSha: null,
           attempts: 0,
           workedAttempt: null,
+          reason: null,
         };
         return [ticket, [...cur, ticket]];
       }),
@@ -68,6 +72,16 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
     addRun: (run) => Ref.update(runs, (cur) => [...cur, run]),
     runsFor: (id: TicketId) =>
       Effect.map(Ref.get(runs), (cur) => cur.filter((r) => r.ticketId === id)),
+    appendEvents: (evs) => Ref.update(events, (cur) => [...cur, ...evs]),
+    eventsFor: (q) =>
+      Effect.map(Ref.get(events), (cur) =>
+        cur.filter(
+          (e) =>
+            (q.ticketId === undefined || e.ticketId === q.ticketId) &&
+            (q.runId === undefined || e.runId === q.runId) &&
+            (q.source === undefined || e.source === q.source),
+        ),
+      ),
   };
 
   return api;
@@ -113,23 +127,27 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
 export interface FakeBoxMakerOptions {
   /** Increment on acquire, decrement on release — assert it returns to 0 (L3). */
   readonly live?: Ref.Ref<number>;
+  /** Fail the lease with `BoxFailed` to drive the provisioning-failure path. */
+  readonly failLease?: boolean;
 }
 
 export const fakeBoxMaker = (opts: FakeBoxMakerOptions = {}): Layer.Layer<BoxMaker> =>
   Layer.succeed(BoxMaker, {
     lease: () =>
-      Effect.acquireRelease(
-        Effect.gen(function* () {
-          if (opts.live) yield* Ref.update(opts.live, (n) => n + 1);
-          return {
-            id: newBoxId(),
-            ip: '10.0.0.2',
-            role: 'worker' as const,
-            provider: 'local' as const,
-          };
-        }),
-        () => (opts.live ? Ref.update(opts.live, (n) => n - 1) : Effect.void),
-      ),
+      opts.failLease
+        ? Effect.fail(new BoxFailed({ reason: 'capacity' }))
+        : Effect.acquireRelease(
+            Effect.gen(function* () {
+              if (opts.live) yield* Ref.update(opts.live, (n) => n + 1);
+              return {
+                id: newBoxId(),
+                ip: '10.0.0.2',
+                role: 'worker' as const,
+                provider: 'local' as const,
+              };
+            }),
+            () => (opts.live ? Ref.update(opts.live, (n) => n - 1) : Effect.void),
+          ),
     reap: () => Effect.succeed({ deleted: [] }),
   });
 
@@ -140,6 +158,12 @@ export interface FakeAgentRunnerOptions {
   readonly tokensIn?: number;
   readonly tokensOut?: number;
   readonly failWork?: 'rate' | 'agent';
+  /** Capture payloads to attach to the WorkResult (drive the obs-event path). */
+  readonly transcript?: ReadonlyArray<unknown>;
+  readonly workerStderr?: string;
+  readonly cloudInitLog?: string;
+  /** Capture payload to attach to the ReviewResult. */
+  readonly reviewTranscript?: ReadonlyArray<unknown>;
 }
 
 export const fakeAgentRunner = (opts: FakeAgentRunnerOptions = {}): Layer.Layer<AgentRunner> =>
@@ -157,11 +181,15 @@ export const fakeAgentRunner = (opts: FakeAgentRunnerOptions = {}): Layer.Layer<
           tokensOut: opts.tokensOut ?? 50,
           wallTimeSec: 1,
         },
+        ...(opts.transcript === undefined ? {} : { transcript: opts.transcript }),
+        ...(opts.workerStderr === undefined ? {} : { workerStderr: opts.workerStderr }),
+        ...(opts.cloudInitLog === undefined ? {} : { cloudInitLog: opts.cloudInitLog }),
       });
     },
     review: (input) =>
       Effect.succeed({
         verdict: opts.verdict ?? 'approve',
         usage: { model: input.model, tokensIn: 20, tokensOut: 10, wallTimeSec: 0.5 },
+        ...(opts.reviewTranscript === undefined ? {} : { transcript: opts.reviewTranscript }),
       }),
   });

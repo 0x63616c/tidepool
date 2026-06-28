@@ -68,6 +68,8 @@ export const Ticket = Schema.Struct({
   mergeSha: Schema.NullOr(Schema.String),
   attempts: Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)),
   workedAttempt: Schema.NullOr(Schema.Int),
+  /** Human-readable why-it-moved, set on failure/retry/rate-cap. Null while clean. */
+  reason: Schema.NullOr(Schema.String),
 });
 export type Ticket = typeof Ticket.Type;
 
@@ -78,6 +80,35 @@ export const NewTicket = Schema.Struct({
   target: Schema.String,
 });
 export type NewTicket = typeof NewTicket.Type;
+
+/**
+ * Where a `RunEvent` line came from. `control-plane` is the reconciler itself
+ * (state transitions, failures); `cloud-init` / `runner` / `opencode` are the
+ * three capture layers on the box (boot log, worker stderr, agent transcript).
+ */
+export const RunSource = Schema.Literal('control-plane', 'cloud-init', 'runner', 'opencode');
+export type RunSource = typeof RunSource.Type;
+
+/** Severity of a `RunEvent`. Null for raw captures whose level lives in the line. */
+export const EventLevel = Schema.Literal('info', 'warn', 'error');
+export type EventLevel = typeof EventLevel.Type;
+
+/**
+ * One observability event — an append-only log line tied to a ticket (and,
+ * where known, a run/box). The opencode transcript, worker stderr, cloud-init
+ * log, and control-plane failures all land here, so `tp logs`/`tp transcript`
+ * read a single durable stream instead of files (tenet 1: state in sqlite).
+ */
+export const RunEvent = Schema.Struct({
+  ticketId: TicketId,
+  runId: Schema.NullOr(RunId),
+  boxId: Schema.NullOr(BoxId),
+  source: RunSource,
+  ts: Schema.Number,
+  level: Schema.NullOr(EventLevel),
+  line: Schema.String,
+});
+export type RunEvent = typeof RunEvent.Type;
 
 export const CIStatus = Schema.Literal('pending', 'green', 'red');
 export type CIStatus = typeof CIStatus.Type;
