@@ -2,7 +2,15 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Exit } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import type { RunnerConfig } from './protocol.ts';
-import { GitFailed, type GitPort, makeRunner, NoChanges } from './runner-core.ts';
+import {
+  FormatFailed,
+  type FormatPort,
+  GitFailed,
+  type GitPort,
+  makeRunner,
+  NoChanges,
+  preCommitCommands,
+} from './runner-core.ts';
 
 /**
  * `makeRunner` is the runner's orchestration core: clone → branch → session →
@@ -36,8 +44,10 @@ interface GitCalls {
   readonly ops: Array<string>;
 }
 
-const makeGit = (over: Partial<GitPort> = {}): { git: GitPort; calls: GitCalls } => {
-  const calls: GitCalls = { ops: [] };
+const makeGit = (
+  over: Partial<GitPort> = {},
+  calls: GitCalls = { ops: [] },
+): { git: GitPort; calls: GitCalls } => {
   const note =
     <A>(op: string, value: A) =>
     async (): Promise<A> => {
@@ -58,6 +68,23 @@ const makeGit = (over: Partial<GitPort> = {}): { git: GitPort; calls: GitCalls }
   return { git, calls };
 };
 
+const makeFormat = (
+  over: Partial<FormatPort> = {},
+  calls: GitCalls = { ops: [] },
+): { format: FormatPort; calls: GitCalls } => {
+  const format: FormatPort = {
+    hasFormatScript: async () => {
+      calls.ops.push('hasFormatScript');
+      return true;
+    },
+    run: async (_dir, command) => {
+      calls.ops.push(`run:${command}`);
+    },
+    ...over,
+  };
+  return { format, calls };
+};
+
 const makeOpencode = (): { opencode: OpencodePort; stopped: () => number } => {
   let stopped = 0;
   const opencode: OpencodePort = {
@@ -75,42 +102,97 @@ const makeOpencode = (): { opencode: OpencodePort; stopped: () => number } => {
   return { opencode, stopped: () => stopped };
 };
 
+describe('preCommitCommands', () => {
+  it('always runs biome SAFE autofix and never --unsafe', () => {
+    const cmds = preCommitCommands({ hasFormatScript: false });
+    assert.deepStrictEqual(cmds, ['bunx biome check --write .']);
+    assert.strictEqual(
+      cmds.some((c) => c.includes('--unsafe')),
+      false,
+    );
+  });
+
+  it("appends the repo's format script when package.json declares one", () => {
+    assert.deepStrictEqual(preCommitCommands({ hasFormatScript: true }), [
+      'bunx biome check --write .',
+      'bun run format',
+    ]);
+  });
+});
+
 describe('makeRunner', () => {
-  it('clones, branches, drives the session, commits and pushes — returning the result', async () => {
-    const { git, calls } = makeGit();
+  it('formats + biome-fixes the generated code before committing', async () => {
+    // One shared ordered call log across git + format so we can assert ordering.
+    const calls: GitCalls = { ops: [] };
+    const { git } = makeGit({}, calls);
+    const { format } = makeFormat({}, calls);
     const { opencode, stopped } = makeOpencode();
-    const result = await Effect.runPromise(makeRunner({ git, opencode })(config));
+    const result = await Effect.runPromise(makeRunner({ git, opencode, format })(config));
     assert.strictEqual(result.commitSha, 'deadbeef');
-    assert.strictEqual(result.usage.tokensIn, 1200);
     assert.deepStrictEqual(calls.ops, [
       'clone',
       'branch',
       'config',
       'status',
+      'hasFormatScript',
+      'run:bunx biome check --write .',
+      'run:bun run format',
       'add',
       'commit',
       'headSha',
       'push',
     ]);
+    // The biome-write/format steps must precede the commit so PRs pass CI.
+    assert.strictEqual(
+      calls.ops.indexOf('run:bunx biome check --write .') < calls.ops.indexOf('commit'),
+      true,
+    );
     assert.strictEqual(stopped(), 1, 'server released on success');
   });
 
-  it('fails NoChanges (and never commits) when the agent produced no diff', async () => {
+  it('skips the format script step when package.json has none', async () => {
+    const { git, calls } = makeGit();
+    const { format } = makeFormat({ hasFormatScript: async () => false });
+    const { opencode } = makeOpencode();
+    await Effect.runPromise(makeRunner({ git, opencode, format })(config));
+    assert.strictEqual(calls.ops.includes('run:bun run format'), false);
+  });
+
+  it('fails NoChanges (and never formats or commits) when the agent produced no diff', async () => {
     const { git, calls } = makeGit({ statusPorcelain: async () => '   ' });
+    const { format } = makeFormat();
     const { opencode, stopped } = makeOpencode();
-    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode })(config));
+    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
     assert.strictEqual(
       Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof NoChanges,
       true,
     );
     assert.strictEqual(calls.ops.includes('commit'), false);
+    assert.strictEqual(calls.ops.includes('run:bunx biome check --write .'), false);
     assert.strictEqual(stopped(), 1, 'server still released on a post-session failure');
+  });
+
+  it('surfaces a typed FormatFailed when a pre-commit format step fails', async () => {
+    const { git, calls } = makeGit();
+    const { format } = makeFormat({
+      run: () => Promise.reject(new Error('biome: unfixable error')),
+    });
+    const { opencode } = makeOpencode();
+    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
+    assert.strictEqual(
+      Exit.isFailure(exit) &&
+        exit.cause._tag === 'Fail' &&
+        exit.cause.error instanceof FormatFailed,
+      true,
+    );
+    assert.strictEqual(calls.ops.includes('commit'), false);
   });
 
   it('surfaces a typed GitFailed when a git step fails', async () => {
     const { git } = makeGit({ push: () => Promise.reject(new Error('rejected')) });
+    const { format } = makeFormat();
     const { opencode } = makeOpencode();
-    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode })(config));
+    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
     assert.strictEqual(
       Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof GitFailed,
       true,

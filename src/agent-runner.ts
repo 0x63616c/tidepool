@@ -10,6 +10,7 @@ import { AgentFailed, RateCapped, type ReviewVerdict, type Ticket, type Usage } 
 import { githubToken } from './forge.ts';
 import { AgentRunner, type AgentRunnerApi, type WorkResult } from './services.ts';
 import { RunnerResult } from './worker/protocol.ts';
+import { preCommitCommands } from './worker/runner-core.ts';
 import { parseUsage } from './worker/usage.ts';
 
 // Usage parsing lives in the worker module so the in-process runner and the
@@ -326,6 +327,22 @@ export const makeOpencodeAgentRunner = (token: string): AgentRunnerApi => {
 
           const dirty = (await $`git -C ${dir} status --porcelain`.text()).trim();
           if (dirty === '') throw new Error('work agent produced no changes');
+
+          // Normalise generated code (biome SAFE autofix + repo formatter) before
+          // committing, so the PR passes the target repo's `biome check` in CI.
+          const hasFormatScript = (() => {
+            try {
+              const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+                scripts?: Record<string, unknown>;
+              };
+              return typeof pkg.scripts?.format === 'string';
+            } catch {
+              return false;
+            }
+          })();
+          for (const command of preCommitCommands({ hasFormatScript })) {
+            await $`${{ raw: command }}`.cwd(dir).quiet();
+          }
 
           await $`git -C ${dir} add -A`.quiet();
           await $`git -C ${dir} commit -m ${commitMessage(input.ticket)}`.quiet();

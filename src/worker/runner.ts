@@ -5,7 +5,7 @@ import { $ } from 'bun';
 import { Cause, Effect, Logger, Schema } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import { RunnerConfig, RunnerResult } from './protocol.ts';
-import { type GitPort, makeRunner } from './runner-core.ts';
+import { type FormatPort, type GitPort, makeRunner } from './runner-core.ts';
 
 /**
  * The worker entrypoint — `bun run runner.js` on the Hetzner box. This is the
@@ -42,6 +42,30 @@ const bunGitPort: GitPort = {
   headSha: (dir) => $`git -C ${dir} rev-parse HEAD`.text(),
   push: async (dir, branch) => {
     await $`git -C ${dir} push -u origin ${branch}`.quiet();
+  },
+};
+
+/**
+ * The pre-commit formatter over Bun's `$`. Reads the clone's package.json to see
+ * whether it ships a `format` script, and runs each pre-commit command in the
+ * clone. `.nothrow()` is deliberately NOT used: a non-zero exit (biome found
+ * unfixable errors) becomes a typed `FormatFailed` rather than a silent bad
+ * commit. Commands are run raw so a multi-token command line (`bunx biome check
+ * --write .`) executes as written, not as one quoted argument.
+ */
+const bunFormatPort: FormatPort = {
+  hasFormatScript: async (dir) => {
+    try {
+      const pkg = JSON.parse(await readFile(`${dir}/package.json`, 'utf8')) as {
+        scripts?: Record<string, unknown>;
+      };
+      return typeof pkg.scripts?.format === 'string';
+    } catch {
+      return false;
+    }
+  },
+  run: async (dir, command) => {
+    await $`${{ raw: command }}`.cwd(dir).quiet();
   },
 };
 
@@ -119,6 +143,7 @@ const makeSdkOpencodePort = (): OpencodePort => {
 export interface RunnerDeps {
   readonly git: GitPort;
   readonly opencode: OpencodePort;
+  readonly format: FormatPort;
   readonly readConfig: () => Promise<string>;
   readonly emit: (line: string) => void;
 }
@@ -134,7 +159,11 @@ export const makeProgram = (deps: RunnerDeps): Effect.Effect<void> =>
     Effect.gen(function* () {
       const raw = yield* Effect.tryPromise(() => deps.readConfig());
       const config = yield* Schema.decode(Schema.parseJson(RunnerConfig))(raw);
-      const result = yield* makeRunner({ git: deps.git, opencode: deps.opencode })(config);
+      const result = yield* makeRunner({
+        git: deps.git,
+        opencode: deps.opencode,
+        format: deps.format,
+      })(config);
       const line = yield* Schema.encode(Schema.parseJson(RunnerResult))(result);
       yield* Effect.sync(() => deps.emit(line));
       yield* Effect.logInfo('runner result emitted');
@@ -160,6 +189,7 @@ if (import.meta.main) {
   const program = makeProgram({
     git: bunGitPort,
     opencode: makeSdkOpencodePort(),
+    format: bunFormatPort,
     readConfig: () => readFile('./config.json', 'utf8'),
     emit: (line) => {
       process.stdout.write(`${line}\n`);
