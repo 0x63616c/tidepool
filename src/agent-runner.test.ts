@@ -1,5 +1,11 @@
 import { assert, describe, it } from '@effect/vitest';
-import { commitMessage, parseUsage, parseVerdict, sshArgv } from './agent-runner.ts';
+import {
+  buildRunnerBundle,
+  commitMessage,
+  parseUsage,
+  parseVerdict,
+  sshArgv,
+} from './agent-runner.ts';
 
 /**
  * Usage parsing is the proof-of-real-work signal (`tp doctor` asserts non-zero
@@ -155,5 +161,16 @@ describe('sshArgv', () => {
     const cmd = "cat > /tmp/x && echo 'hi'";
     const argv = sshArgv('1.2.3.4', cmd);
     assert.strictEqual(argv.at(-1), cmd);
+  });
+});
+
+describe('buildRunnerBundle', () => {
+  it('bundles the worker runner into one artifact and memoizes it', async () => {
+    const a = await buildRunnerBundle();
+    assert.strictEqual(a.length > 0, true);
+    // Bundled, not a module reference — sdk/effect are inlined into the artifact.
+    assert.strictEqual(a.includes('createOpencodeServer'), true);
+    const b = await buildRunnerBundle();
+    assert.strictEqual(a === b, true, 'second call returns the memoized bundle');
   });
 });
