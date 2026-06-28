@@ -49,6 +49,36 @@ describe('workerCloudInit', () => {
   });
 });
 
+describe('workerCloudInit baked mode', () => {
+  const baked = () => workerCloudInit(FAKE_KEY, { baked: true });
+
+  it('starts with #cloud-config marker', () => {
+    assert.isTrue(baked().startsWith('#cloud-config'));
+  });
+
+  it('embeds the ssh public key', () => {
+    assert.include(baked(), FAKE_KEY);
+  });
+
+  it('still touches the per-boot sentinel (the runner polls it every boot)', () => {
+    assert.include(baked(), 'touch /tmp/.tp-ready');
+  });
+
+  it('omits the bake recipe — everything is already in the image', () => {
+    const init = baked();
+    assert.notInclude(init, 'bun.sh/install');
+    assert.notInclude(init, '@opencode-ai/sdk');
+    // No apt install on a baked boot — the packages are already present.
+    assert.notInclude(init, 'packages:');
+  });
+
+  it('keeps the runcmd quote-safe (no nested single quotes)', () => {
+    // The full-mode `bash -c '...'` wrapper is the nested-quote hazard. The baked
+    // runcmd is a bare command with no embedded quoting, so it can never mangle.
+    assert.notInclude(baked(), "bash -c '");
+  });
+});
+
 describe('workerServerName', () => {
   it('includes the sanitized ticket id when provided', () => {
     const n = workerServerName('box_abc123', { ticket: 'tckt_qt6tbzn900' });

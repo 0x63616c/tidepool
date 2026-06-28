@@ -52,5 +52,6 @@ export const LiveStack = Layer.mergeAll(
   AppConfigLive,
   GithubForgeLive,
   OpencodeAgentRunnerLive,
-  HetznerBoxMakerLive,
+  // The box maker reads `box.imageId` from config, so feed it AppConfigLive.
+  HetznerBoxMakerLive.pipe(Layer.provide(AppConfigLive)),
 );
