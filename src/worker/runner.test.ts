@@ -4,7 +4,7 @@ import { Effect, Schema } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import { RunnerResult } from './protocol.ts';
 import { makeProgram } from './runner.ts';
-import type { GitPort } from './runner-core.ts';
+import type { FormatPort, GitPort } from './runner-core.ts';
 
 /**
  * Two guarantees the entrypoint must hold: (1) it bundles — `Bun.build` resolves
@@ -44,6 +44,11 @@ const fakeGit: GitPort = {
   push: async () => {},
 };
 
+const fakeFormat: FormatPort = {
+  hasFormatScript: async () => true,
+  run: async () => {},
+};
+
 const fakeOpencode: OpencodePort = {
   startServer: async () => ({ url: 'http://fake' }),
   stopServer: () => {},
@@ -77,6 +82,7 @@ describe('makeProgram', () => {
       makeProgram({
         git: fakeGit,
         opencode: fakeOpencode,
+        format: fakeFormat,
         readConfig: async () => JSON.stringify(config),
         emit: (line) => lines.push(line),
       }),
