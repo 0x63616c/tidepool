@@ -1,5 +1,8 @@
 # Pin the toolchain identically across local dev, CI, and the worker/main boxes (env parity).
-# Next session: confirm/pin pulumi + node versions.
+# bun + opencode run the control plane; node + pulumi run the standalone infra/pulumi
+# package (Pulumi programs run under Node, not Bun — see infra/pulumi/package.json).
 [tools]
 bun = "1.2.19"
 opencode = "1.17.11"
+node = "22.14.0"
+pulumi = "3.140.0"
