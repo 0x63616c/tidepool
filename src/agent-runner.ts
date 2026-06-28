@@ -370,8 +370,10 @@ export const makeOpencodeAgentRunner = (token: string): AgentRunnerApi => {
           const dirty = (await $`git -C ${dir} status --porcelain`.text()).trim();
           if (dirty === '') throw new Error('work agent produced no changes');
 
-          // Normalise generated code (biome SAFE autofix + repo formatter) before
-          // committing, so the PR passes the target repo's `biome check` in CI.
+          // Reformat generated code (FORMAT only, never a lint-gate) before
+          // committing, so the PR is more likely to pass the target repo's CI.
+          // Best-effort: a format step that exits non-zero is logged and skipped,
+          // never aborting the commit — formatting helps CI pass, it is not a gate.
           const hasFormatScript = (() => {
             try {
               const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
@@ -383,7 +385,10 @@ export const makeOpencodeAgentRunner = (token: string): AgentRunnerApi => {
             }
           })();
           for (const command of preCommitCommands({ hasFormatScript })) {
-            await $`${{ raw: command }}`.cwd(dir).quiet();
+            const res = await $`${{ raw: command }}`.cwd(dir).nothrow().quiet();
+            if (res.exitCode !== 0) {
+              console.warn(`[runner] pre-commit format step failed (continuing): ${command}`);
+            }
           }
 
           await $`git -C ${dir} add -A`.quiet();

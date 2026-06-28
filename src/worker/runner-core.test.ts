@@ -3,7 +3,6 @@ import { Effect, Exit } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import type { RunnerConfig } from './protocol.ts';
 import {
-  FormatFailed,
   type FormatPort,
   GitFailed,
   type GitPort,
@@ -103,25 +102,34 @@ const makeOpencode = (): { opencode: OpencodePort; stopped: () => number } => {
 };
 
 describe('preCommitCommands', () => {
-  it('always runs biome SAFE autofix and never --unsafe', () => {
-    const cmds = preCommitCommands({ hasFormatScript: false });
-    assert.deepStrictEqual(cmds, ['bunx biome check --write .']);
-    assert.strictEqual(
-      cmds.some((c) => c.includes('--unsafe')),
-      false,
-    );
+  it('formats only — never lint-gates with `biome check --write`', () => {
+    for (const hasFormatScript of [true, false]) {
+      const cmds = preCommitCommands({ hasFormatScript });
+      assert.strictEqual(
+        cmds.some((c) => c.includes('biome check')),
+        false,
+        'must never run `biome check` (it lint-gates and exits non-zero)',
+      );
+      assert.strictEqual(
+        cmds.some((c) => c.includes('--unsafe')),
+        false,
+      );
+    }
   });
 
-  it("appends the repo's format script when package.json declares one", () => {
-    assert.deepStrictEqual(preCommitCommands({ hasFormatScript: true }), [
-      'bunx biome check --write .',
-      'bun run format',
+  it("prefers the repo's `bun run format` script when package.json declares one", () => {
+    assert.deepStrictEqual(preCommitCommands({ hasFormatScript: true }), ['bun run format']);
+  });
+
+  it('falls back to `biome format --write` (format-only) when there is no format script', () => {
+    assert.deepStrictEqual(preCommitCommands({ hasFormatScript: false }), [
+      'bunx biome format --write .',
     ]);
   });
 });
 
 describe('makeRunner', () => {
-  it('formats + biome-fixes the generated code before committing', async () => {
+  it('reformats the generated code before committing (format-only, no biome check)', async () => {
     // One shared ordered call log across git + format so we can assert ordering.
     const calls: GitCalls = { ops: [] };
     const { git } = makeGit({}, calls);
@@ -135,27 +143,30 @@ describe('makeRunner', () => {
       'config',
       'status',
       'hasFormatScript',
-      'run:bunx biome check --write .',
       'run:bun run format',
       'add',
       'commit',
       'headSha',
       'push',
     ]);
-    // The biome-write/format steps must precede the commit so PRs pass CI.
+    // Must never lint-gate the commit with `biome check`.
     assert.strictEqual(
-      calls.ops.indexOf('run:bunx biome check --write .') < calls.ops.indexOf('commit'),
-      true,
+      calls.ops.some((c) => c.includes('biome check')),
+      false,
     );
+    // The format step must precede the commit so PRs are more likely to pass CI.
+    assert.strictEqual(calls.ops.indexOf('run:bun run format') < calls.ops.indexOf('commit'), true);
     assert.strictEqual(stopped(), 1, 'server released on success');
   });
 
-  it('skips the format script step when package.json has none', async () => {
-    const { git, calls } = makeGit();
-    const { format } = makeFormat({ hasFormatScript: async () => false });
+  it('falls back to `biome format --write` when package.json has no format script', async () => {
+    const calls: GitCalls = { ops: [] };
+    const { git } = makeGit({}, calls);
+    const { format } = makeFormat({ hasFormatScript: async () => false }, calls);
     const { opencode } = makeOpencode();
     await Effect.runPromise(makeRunner({ git, opencode, format })(config));
     assert.strictEqual(calls.ops.includes('run:bun run format'), false);
+    assert.strictEqual(calls.ops.includes('run:bunx biome format --write .'), true);
   });
 
   it('fails NoChanges (and never formats or commits) when the agent produced no diff', async () => {
@@ -168,24 +179,24 @@ describe('makeRunner', () => {
       true,
     );
     assert.strictEqual(calls.ops.includes('commit'), false);
-    assert.strictEqual(calls.ops.includes('run:bunx biome check --write .'), false);
+    assert.strictEqual(calls.ops.includes('run:bun run format'), false);
     assert.strictEqual(stopped(), 1, 'server still released on a post-session failure');
   });
 
-  it('surfaces a typed FormatFailed when a pre-commit format step fails', async () => {
-    const { git, calls } = makeGit();
-    const { format } = makeFormat({
-      run: () => Promise.reject(new Error('biome: unfixable error')),
-    });
-    const { opencode } = makeOpencode();
-    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
-    assert.strictEqual(
-      Exit.isFailure(exit) &&
-        exit.cause._tag === 'Fail' &&
-        exit.cause.error instanceof FormatFailed,
-      true,
+  it('treats a failing format step as non-fatal — logs and commits anyway', async () => {
+    const calls: GitCalls = { ops: [] };
+    const { git } = makeGit({}, calls);
+    const { format } = makeFormat(
+      { run: () => Promise.reject(new Error('biome: lint diagnostics remain')) },
+      calls,
     );
-    assert.strictEqual(calls.ops.includes('commit'), false);
+    const { opencode, stopped } = makeOpencode();
+    const result = await Effect.runPromise(makeRunner({ git, opencode, format })(config));
+    // Formatting failed, but the commit + push still happened.
+    assert.strictEqual(result.commitSha, 'deadbeef');
+    assert.strictEqual(calls.ops.includes('commit'), true);
+    assert.strictEqual(calls.ops.includes('push'), true);
+    assert.strictEqual(stopped(), 1, 'server released on success despite format failure');
   });
 
   it('surfaces a typed GitFailed when a git step fails', async () => {
