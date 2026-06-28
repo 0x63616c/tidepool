@@ -41,6 +41,9 @@ Done — Phase A, Phase B, and Phase C implementation complete:
   `biome.json`, `lefthook.yml`, `commitlint.config.mjs`, `.mise.toml` (bun+opencode pinned).
 - `tidepool-testbed` repo exists (`0x63616c/tidepool-testbed`): pure-fn TS lib + vitest + identical
   rails (biome, commitlint, CI, `main` protected). `tp doctor` passes against it.
+- **Both repos are now PUBLIC + hardened (2026-06-28):** `tidepool` and `tidepool-testbed` are public,
+  `main` protected (required check `check`, linear history, no force-push, no deletions,
+  enforce-admins), Actions `GITHUB_TOKEN` read-only, 0 repo secrets.
 - `secrets/tidepool.enc.yaml` — sops-encrypted (3 age recipients: mainbox/ci/breakglass).
   Contains: `hcloud_token`, `github_token`, `opencode_auth_json`, `ssh_worker_private_key`.
 - `src/` — full implementation:
@@ -53,19 +56,27 @@ Done — Phase A, Phase B, and Phase C implementation complete:
   - `sqlite-store.ts` — `@effect/sql-sqlite-bun` backed `TicketStore` (real)
   - `forge.ts` — GitHub `Forge` via Octokit port + `GithubForgeLive` Layer
   - `agent-runner.ts` — opencode `AgentRunner` (`@opencode-ai/sdk`) + SSH remote runner for
-    Hetzner workers + `OpencodeAgentRunnerLive`. Routes on `box.ip !== '127.0.0.1'`.
+    Hetzner workers + `OpencodeAgentRunnerLive`. Routes on `box.ip !== '127.0.0.1'`. `sshRun` passes
+    the remote command as a single arg; SSH uses `StrictHostKeyChecking=no` +
+    `UserKnownHostsFile=/dev/null` (recycled-IP ephemeral boxes). **TEMPORARY hotfix:** force-exits
+    (`process.exit(0)`) after push because the embedded opencode server keeps Bun's event loop alive
+    — stop-gap pending the Effect runner rewrite, not the intended shape.
   - `hetzner-box.ts` — `HetznerBoxMaker`: Hetzner API, `acquireRelease`, reaper, type/location
-    fallback, cloud-init (bun + opencode binary + sentinel `/tmp/.tp-ready`), `HetznerBoxMakerLive`
+    fallback, cloud-init (installs `unzip`, sets `HOME=/root`, installs opencode via `bun add -g
+    opencode-ai`, sentinel `/tmp/.tp-ready`; **bootcmd disables apt-daily/unattended-upgrades** to
+    avoid a ~12-min apt-lock stall), boxes named `tp-worker-<ticket>-<id>` with a ticket label,
+    `HetznerBoxMakerLive`
   - `local-box.ts` — `LocalBoxMaker` (degenerate localhost lease, kept for Phase B fallback)
   - `doctor.ts` — `runDoctor` / `renderDoctor` / `gatherDoctorFacts` (4 facts: slugify +
-    fresh-clone test + non-zero tokens + non-null `box_id`)
+    fresh-clone test + non-zero tokens + latest work-run provider = `hetzner`)
   - `runtime.ts` — `LiveStack` Layer (sqlite + config + GitHub + opencode + **HetznerBoxMaker**)
   - `cli.ts` — `tp ls / ticket add / run / doctor`
 - All 101 unit tests passing (`bun run check` exits 0).
 
-**Phase C e2e still pending** (the actual cloud run):
-- Run `tp run` → provisions real Hetzner cpx22 worker → agent runs ON box → PR merged → box deleted.
-- `tp doctor` exits 0 AND shows non-null `box_id` in run record.
+**Phase C e2e PROVEN (2026-06-28)** (the actual cloud run happened):
+- `tp run` provisioned a real Hetzner worker box → opencode ran ON the box → a merged PR on
+  `tidepool-testbed@main` → box DELETED (project servers back to baseline).
+- `tp doctor` exits 0 AND the run record's latest work-run provider = `hetzner`.
 
 ## Secrets / inputs in place
 
