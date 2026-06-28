@@ -10,6 +10,7 @@ import { RunId, TicketId } from './ids.ts';
 import { settle } from './reconciler.ts';
 import { AppConfigLive, LiveStack, SqliteTicketStore } from './runtime.ts';
 import { TicketStore } from './services.ts';
+import { costReport, traceReport } from './trace.ts';
 
 /**
  * `tp` — the control-plane CLI. Agent-facing (AXI): TOON output, content-first
@@ -166,6 +167,12 @@ const usageError = (line: string, help: string) =>
     Effect.zipRight(Effect.sync(() => process.exit(2))),
   );
 
+/** Print a definitive not-found and exit 1 (the intent genuinely can't be met). */
+const notFound = (what: string, help: string) =>
+  Console.log([`error: ${what} not found`, `help: ${help}`].join('\n')).pipe(
+    Effect.zipRight(Effect.sync(() => process.exit(1))),
+  );
+
 /**
  * `tp logs <ticket>` / `tp logs --run <run_id>` — read the durable event stream.
  * The opencode transcript blob is excluded from the ticket view by default (it's
@@ -241,6 +248,58 @@ const transcriptCommand = Command.make(
     ),
 );
 
+// ── tp trace / tp cost — the observability rollup path ───────────────────────
+
+/**
+ * `tp trace <ticket>` — reconstruct a ticket's lifecycle as a ts-ordered timeline
+ * (phases + run events + inter-event durations) over the runs/run_events the
+ * reconciler persisted. Definitive empty + not-found states.
+ */
+const traceCommand = Command.make(
+  'trace',
+  { ticket: Args.text({ name: 'ticket' }) },
+  ({ ticket }) =>
+    withStore(
+      Effect.gen(function* () {
+        const decoded = decodeTicketId(ticket);
+        if (Either.isLeft(decoded))
+          return yield* usageError(`not a ticket id: ${ticket}`, 'tp trace tckt_…');
+        return yield* traceReport(decoded.right).pipe(
+          Effect.flatMap(Console.log),
+          Effect.catchTag('TicketNotFound', () => notFound(`ticket ${ticket}`, 'tp ls')),
+        );
+      }),
+    ),
+);
+
+/**
+ * `tp cost [<ticket>]` — aggregate token usage + wall-time per run / ticket /
+ * model. Scoped to one ticket or, with no arg, across the whole backlog. Reports
+ * tokens-only (no dollar cost until a price map exists).
+ */
+const costCommand = Command.make(
+  'cost',
+  { ticket: Args.text({ name: 'ticket' }).pipe(Args.optional) },
+  ({ ticket }) =>
+    withStore(
+      Effect.gen(function* () {
+        let scope = Option.none<TicketId>();
+        if (Option.isSome(ticket)) {
+          const decoded = decodeTicketId(ticket.value);
+          if (Either.isLeft(decoded))
+            return yield* usageError(`not a ticket id: ${ticket.value}`, 'tp cost tckt_…');
+          scope = Option.some(decoded.right);
+        }
+        return yield* costReport(scope).pipe(
+          Effect.flatMap(Console.log),
+          Effect.catchTag('TicketNotFound', () =>
+            notFound(`ticket ${Option.getOrElse(ticket, () => '')}`, 'tp ls'),
+          ),
+        );
+      }),
+    ),
+);
+
 const homeView = withStore(
   Effect.gen(function* () {
     const store = yield* TicketStore;
@@ -259,6 +318,8 @@ const root = Command.make('tp', {}, () => homeView).pipe(
     doctorCommand,
     logsCommand,
     transcriptCommand,
+    traceCommand,
+    costCommand,
   ]),
 );
 
