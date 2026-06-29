@@ -6,6 +6,7 @@ import {
   type FormatPort,
   GitFailed,
   type GitPort,
+  makeReviewRunner,
   makeRunner,
   NoChanges,
   preCommitCommands,
@@ -96,7 +97,7 @@ const makeOpencode = (): { opencode: OpencodePort; stopped: () => number } => {
       yield { type: 'message.updated', properties: { info: assistantInfo } };
       yield { type: 'session.idle', properties: { sessionID: 'ses_fake' } };
     },
-    prompt: async () => assistantInfo,
+    prompt: async () => ({ info: assistantInfo, text: 'VERDICT: APPROVE' }),
   };
   return { opencode, stopped: () => stopped };
 };
@@ -208,5 +209,26 @@ describe('makeRunner', () => {
       Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof GitFailed,
       true,
     );
+  });
+});
+
+/**
+ * `makeReviewRunner` (FIX 1) is the review counterpart that runs on a leased
+ * worker box: no git, just one opencode session over the review prompt, handing
+ * back the assistant's reply text (verdict parsed upstream) + usage.
+ */
+describe('makeReviewRunner', () => {
+  const reviewConfig = {
+    dir: '/tmp/tp-review-x',
+    model: 'openai/gpt-5.4-mini',
+    prompt: 'grade it',
+  };
+
+  it('drives one session and returns the assistant text + usage (no git)', async () => {
+    const { opencode, stopped } = makeOpencode();
+    const result = await Effect.runPromise(makeReviewRunner({ opencode })(reviewConfig));
+    assert.strictEqual(result.text, 'VERDICT: APPROVE');
+    assert.strictEqual(result.usage.tokensIn, 1200);
+    assert.strictEqual(stopped(), 1, 'server released on success');
   });
 });

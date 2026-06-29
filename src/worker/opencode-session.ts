@@ -1,15 +1,38 @@
-import { Data, Deferred, Effect } from 'effect';
+import { Data, Deferred, Duration, Effect } from 'effect';
 import type { Usage } from '../domain.ts';
 import { parseUsage } from './usage.ts';
 
 /**
  * The opencode session seam. `runSession` is a deep module: it owns the embedded
  * server's lifecycle and the event-collector fiber, and exposes one narrow front
- * — given a dir/model/prompt, drive a full agent session and return a `Usage`.
+ * — given a dir/model/prompt, drive a full agent session and return its `Usage`
+ * plus the assistant's reply text (the review agent grades on that text).
  * The opencode SDK's types stop at the `OpencodePort`; above it everything is
  * plain records + Effect, so the orchestration is testable against a fake port
  * (no server, no network), exactly like `forge`'s `GithubRest`.
  */
+
+/**
+ * Hard ceiling for one opencode session. A hung session (server stuck, files
+ * created but `session.idle` never arrives, or `prompt` never resolving) would
+ * otherwise pin the runner — and, upstream, the reconciler's settle — forever.
+ * The default is generous (real sessions finish in minutes); a worker exceeding
+ * it is treated as stuck: the scope releases (killing the server) and the run
+ * fails with a typed `OpencodeFailed`, so the box is torn down and retried.
+ */
+export const DEFAULT_SESSION_TIMEOUT_MS = 8 * 60 * 1000;
+
+/** What one driven session yields: token accounting plus the assistant's reply. */
+export interface SessionOutcome {
+  readonly usage: Usage;
+  readonly text: string;
+}
+
+/** The assistant's reply to one prompt: its message info plus the rendered text. */
+export interface PromptReply {
+  readonly info: unknown;
+  readonly text: string;
+}
 
 /** Opaque handle to a started opencode server (just its base URL). */
 export interface OpencodeServerHandle {
@@ -38,8 +61,8 @@ export interface OpencodePort {
   readonly createSession: (server: OpencodeServerHandle, dir: string) => Promise<string>;
   /** Subscribe to the server's event stream (ends when the server closes). */
   readonly subscribeEvents: (server: OpencodeServerHandle, dir: string) => AsyncIterable<unknown>;
-  /** Send a prompt; resolves with the final assistant message info. */
-  readonly prompt: (server: OpencodeServerHandle, params: PromptParams) => Promise<unknown>;
+  /** Send a prompt; resolves with the final assistant message info + reply text. */
+  readonly prompt: (server: OpencodeServerHandle, params: PromptParams) => Promise<PromptReply>;
 }
 
 /** A step of the opencode session failed (server, session, or prompt). */
@@ -82,18 +105,26 @@ const collectEvents = (
   }).pipe(Effect.ignore, Effect.ensuring(Deferred.succeed(done, undefined)));
 
 /**
- * Drive one agent session end-to-end and roll the events into a `Usage`. The
- * server is owned by `acquireRelease` so its finalizer (stopServer) runs on
- * success AND failure; the collector runs in a `forkScoped` fiber tied to the
- * same scope. We send the prompt, wait for idle (bounded by a generous timeout
- * so a missing idle event can't hang the runner), then append the prompt's final
- * assistant info before parsing — guaranteeing non-zero tokens even if the
- * stream dropped the cumulative updates.
+ * Drive one agent session end-to-end, rolling the events into a `Usage` and
+ * surfacing the assistant's reply text. The server is owned by `acquireRelease`
+ * so its finalizer (stopServer) runs on success AND failure; the collector runs
+ * in a `forkScoped` fiber tied to the same scope. We send the prompt, wait for
+ * idle (bounded by a short timeout so a dropped idle event after a completed
+ * prompt can't hang the runner), then append the prompt's final assistant info
+ * before parsing — guaranteeing non-zero tokens even if the stream dropped the
+ * cumulative updates.
+ *
+ * The whole session is bounded by `timeoutMs` (FIX 2): a genuinely stuck server
+ * — where `prompt` itself never resolves — would slip past the idle wait, so the
+ * outer `timeoutFail` is the hard backstop. On timeout the scope releases
+ * (stopServer aborts the server) and we fail with a typed `OpencodeFailed`,
+ * which maps to `AgentFailed` upstream so the box is torn down and retried.
  */
 export const runSession = (
   port: OpencodePort,
   params: { readonly dir: string; readonly model: string; readonly prompt: string },
-): Effect.Effect<Usage, OpencodeFailed, never> =>
+  timeoutMs: number = DEFAULT_SESSION_TIMEOUT_MS,
+): Effect.Effect<SessionOutcome, OpencodeFailed, never> =>
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* Effect.acquireRelease(
@@ -111,7 +142,7 @@ export const runSession = (
       const done = yield* Deferred.make<void>();
       yield* Effect.forkScoped(collectEvents(port, server, params.dir, sessionId, events, done));
 
-      const info = yield* Effect.tryPromise({
+      const { info, text } = yield* Effect.tryPromise({
         try: () =>
           port.prompt(server, {
             sessionId,
@@ -122,9 +153,20 @@ export const runSession = (
         catch: fail('prompt'),
       });
 
-      yield* Deferred.await(done).pipe(Effect.timeout('10 minutes'), Effect.ignore);
+      // The prompt has resolved, so idle is imminent; cap the wait well under the
+      // hard timeout so a dropped idle event still yields a successful run.
+      yield* Deferred.await(done).pipe(Effect.timeout('2 minutes'), Effect.ignore);
       events.push({ type: 'message.updated', properties: { info } });
       yield* Effect.logInfo('opencode session complete');
-      return parseUsage(events);
+      return { usage: parseUsage(events), text };
+    }),
+  ).pipe(
+    Effect.timeoutFail({
+      duration: Duration.millis(timeoutMs),
+      onTimeout: () =>
+        new OpencodeFailed({
+          op: 'session',
+          reason: `opencode session exceeded ${timeoutMs}ms hard timeout`,
+        }),
     }),
   );

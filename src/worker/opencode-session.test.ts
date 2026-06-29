@@ -50,16 +50,16 @@ const makeFake = (over: Partial<OpencodePort> = {}): { port: OpencodePort; calls
       yield assistantMsg;
       yield idleFor('ses_fake');
     },
-    prompt: async () => assistantMsg.properties.info,
+    prompt: async () => ({ info: assistantMsg.properties.info, text: 'VERDICT: APPROVE' }),
     ...over,
   };
   return { port, calls };
 };
 
 describe('runSession', () => {
-  it('rolls streamed assistant events into a typed Usage', async () => {
+  it('rolls streamed assistant events into a typed Usage and surfaces the reply text', async () => {
     const { port } = makeFake();
-    const usage = await Effect.runPromise(
+    const { usage, text } = await Effect.runPromise(
       Effect.scoped(
         runSession(port, { dir: '/tmp/w', model: 'openai/gpt-5.4-mini', prompt: 'go' }),
       ),
@@ -67,6 +67,7 @@ describe('runSession', () => {
     assert.strictEqual(usage.tokensIn, 1200);
     assert.strictEqual(usage.tokensOut, 340);
     assert.strictEqual(usage.model, 'openai/gpt-5.4-mini');
+    assert.strictEqual(text, 'VERDICT: APPROVE');
   });
 
   it('starts then releases the server exactly once on success', async () => {
@@ -101,5 +102,24 @@ describe('runSession', () => {
         exit.cause.error instanceof OpencodeFailed,
       true,
     );
+  });
+
+  it('(FIX 2) fails OpencodeFailed and releases the server when the hard timeout elapses', async () => {
+    // A stuck server: prompt never resolves (opencode serve hung). Without the
+    // hard timeout this would pin the runner — and the reconciler's settle —
+    // forever. With it, the scope releases (server torn down) and the run fails.
+    const { port, calls } = makeFake({ prompt: () => new Promise(() => {}) });
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(runSession(port, { dir: '/tmp/w', model: 'm', prompt: 'go' }, 30)),
+    );
+    assert.strictEqual(
+      Exit.isFailure(exit) &&
+        exit.cause._tag === 'Fail' &&
+        exit.cause.error instanceof OpencodeFailed &&
+        exit.cause.error.op === 'session',
+      true,
+    );
+    // Scoped finalizer fired on timeout — the embedded server was torn down.
+    assert.strictEqual(calls.stopped, 1);
   });
 });

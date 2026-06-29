@@ -109,7 +109,14 @@ const failureEvent = (ticketId: TicketId, line: string): RunEvent => ({
   line,
 });
 
-/** Bump attempts; fail the ticket once it has burned through `retries`. */
+/**
+ * Bump attempts; fail the ticket once it has burned through `retries`. The retry
+ * target depends on how far the ticket got (FIX 3): a ticket that already opened a
+ * PR re-enters `review` (re-check CI / re-grade the existing branch), because
+ * re-running work would push to an existing branch and fail the non-fast-forward,
+ * wasting attempts. Only a pre-PR failure (no open PR yet) re-runs work via
+ * `in_progress`.
+ */
 const retryOrFail = (
   store: TicketStoreApi,
   ticket: Ticket,
@@ -117,9 +124,10 @@ const retryOrFail = (
   reason: string,
 ): Effect.Effect<unknown, TicketNotFound> => {
   const attempts = ticket.attempts + 1;
+  const retryState: Ticket['state'] = ticket.prNumber !== null ? 'review' : 'in_progress';
   return attempts >= retries
     ? store.patch(ticket.id, { attempts, state: 'failed', reason })
-    : store.patch(ticket.id, { attempts, state: 'in_progress', reason });
+    : store.patch(ticket.id, { attempts, state: retryState, reason });
 };
 
 const stepTicket = (
@@ -218,26 +226,42 @@ const stepTicket = (
           return;
         }
 
-        // CI green → review agent grades the diff vs goal.
-        const review = yield* agents.review({
-          ticket,
-          repo: ticket.target,
-          prNumber,
-          model: models.review,
-        });
-        const reviewRunId = yield* recordRun(store, {
-          ticketId: ticket.id,
-          kind: 'review',
-          boxId: null,
-          boxProvider: null,
-          usage: review.usage,
-        });
+        // CI green → lease a worker box and grade the diff vs goal on it. Review
+        // runs remotely exactly like work (FIX 1), so the control box never needs
+        // opencode or its auth; the box is released on scope close.
+        const {
+          boxId: reviewBoxId,
+          reviewRunId,
+          review,
+        } = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const box = yield* boxes.lease({
+              ...boxSpec(config),
+              labels: { ticket: ticket.id },
+            });
+            const review = yield* agents.review({
+              box,
+              ticket,
+              repo: ticket.target,
+              prNumber,
+              model: models.review,
+            });
+            const reviewRunId = yield* recordRun(store, {
+              ticketId: ticket.id,
+              kind: 'review',
+              boxId: box.id,
+              boxProvider: box.provider,
+              usage: review.usage,
+            });
+            return { boxId: box.id, reviewRunId, review };
+          }),
+        );
         if (review.transcript !== undefined)
           yield* store.appendEvents([
             {
               ticketId: ticket.id,
               runId: reviewRunId,
-              boxId: null,
+              boxId: reviewBoxId,
               source: 'opencode',
               ts: Date.now(),
               level: null,

@@ -1,6 +1,11 @@
 import { Data, Effect } from 'effect';
 import { type OpencodeFailed, type OpencodePort, runSession } from './opencode-session.ts';
-import type { RunnerConfig, RunnerResult } from './protocol.ts';
+import type {
+  ReviewRunnerConfig,
+  ReviewRunnerResult,
+  RunnerConfig,
+  RunnerResult,
+} from './protocol.ts';
 
 /**
  * The runner's orchestration core — the one place that sequences a worker run:
@@ -110,7 +115,7 @@ export const makeRunner =
       yield* gitOp('branch', () => git.checkoutBranch(config.dir, config.branch));
       yield* gitOp('config', () => git.configUser(config.dir));
 
-      const usage = yield* runSession(opencode, {
+      const { usage } = yield* runSession(opencode, {
         dir: config.dir,
         model: config.model,
         prompt: config.prompt,
@@ -145,4 +150,24 @@ export const makeRunner =
       yield* Effect.logInfo(`pushed ${commitSha}`);
 
       return { commitSha, usage };
+    });
+
+/**
+ * The review runner's core: drive one opencode session over the review prompt and
+ * hand back the assistant's reply text + usage. No git — the diff is embedded in
+ * the prompt, so review only needs the opencode port. Mirrors `makeRunner` so the
+ * review agent runs on a leased worker box (FIX 1), keeping opencode + its auth
+ * off the control box entirely. The verdict is parsed upstream from `text`.
+ */
+export const makeReviewRunner =
+  (deps: { readonly opencode: OpencodePort }) =>
+  (config: ReviewRunnerConfig): Effect.Effect<ReviewRunnerResult, OpencodeFailed> =>
+    Effect.gen(function* () {
+      yield* Effect.logInfo(`reviewing in ${config.dir}`);
+      const { usage, text } = yield* runSession(deps.opencode, {
+        dir: config.dir,
+        model: config.model,
+        prompt: config.prompt,
+      });
+      return { text, usage };
     });

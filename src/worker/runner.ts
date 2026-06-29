@@ -83,7 +83,7 @@ const splitModel = (model: string): { providerID: string; modelID: string } => {
  * embedded server and the open event subscription — the latter is what lets the
  * process exit without `process.exit`.
  */
-const makeSdkOpencodePort = (): OpencodePort => {
+export const makeSdkOpencodePort = (): OpencodePort => {
   const controller = new AbortController();
   let live:
     | {
@@ -134,7 +134,9 @@ const makeSdkOpencodePort = (): OpencodePort => {
       const info = res.data?.info;
       if (info === undefined)
         throw new Error(`session.prompt failed: ${JSON.stringify(res.error)}`);
-      return info;
+      const parts = res.data?.parts ?? [];
+      const text = parts.flatMap((p) => (p.type === 'text' ? [p.text] : [])).join('');
+      return { info, text };
     },
   };
 };
