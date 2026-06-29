@@ -37,8 +37,8 @@ export type BoxProvider = typeof BoxProvider.Type;
 
 /**
  * One agent invocation. `boxProvider === 'hetzner'` ⇒ ran on a REAL cloud worker
- * (Phase C proof). `'local'` means LocalBoxMaker (Phase B); null means review run
- * (no box involved).
+ * (Phase C proof). `'local'` means LocalBoxMaker (Phase B). Both work and review
+ * lease a box, so the id/provider are nullable only for legacy/in-process runs.
  */
 export const Run = Schema.Struct({
   id: RunId,

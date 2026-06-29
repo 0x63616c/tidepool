@@ -159,8 +159,13 @@ export interface AgentRunnerApi {
     readonly branch: string;
     readonly model: string;
   }) => Effect.Effect<WorkResult, AgentFailed | RateCapped>;
-  /** Run the review agent: grade the open PR's diff against the ticket goal. */
+  /**
+   * Run the review agent on `box`: fetch the open PR's diff and grade it against
+   * the ticket goal. Runs on a leased worker box exactly like `work`, so opencode
+   * and its auth never need to live on the control box (FIX 1).
+   */
   readonly review: (input: {
+    readonly box: Box;
     readonly ticket: Ticket;
     readonly repo: string;
     readonly prNumber: number;

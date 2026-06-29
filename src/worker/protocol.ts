@@ -36,3 +36,30 @@ export const RunnerResult = Schema.Struct({
   usage: Usage,
 });
 export type RunnerResult = typeof RunnerResult.Type;
+
+/**
+ * The review runner's wire config. Review needs no clone/branch/commit — the PR
+ * diff is fetched on the control box and embedded in `prompt`, so the runner only
+ * spins an opencode session in a scratch `dir`. Kept separate from `RunnerConfig`
+ * so neither carries fields the other ignores.
+ */
+export const ReviewRunnerConfig = Schema.Struct({
+  /** Scratch directory the review session runs in (created by the runner). */
+  dir: Schema.String,
+  /** `provider/model` string for the review session. */
+  model: Schema.String,
+  /** Full review-agent prompt (goal + embedded diff). */
+  prompt: Schema.String,
+});
+export type ReviewRunnerConfig = typeof ReviewRunnerConfig.Type;
+
+/**
+ * The single line the review runner writes to stdout. The raw assistant `text`
+ * crosses the seam (not a parsed verdict) so the control box owns verdict parsing
+ * with the same fail-closed `parseVerdict` the in-process path uses.
+ */
+export const ReviewRunnerResult = Schema.Struct({
+  text: Schema.String,
+  usage: Usage,
+});
+export type ReviewRunnerResult = typeof ReviewRunnerResult.Type;

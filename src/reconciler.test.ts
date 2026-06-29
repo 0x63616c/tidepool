@@ -62,7 +62,7 @@ describe('reconciler', () => {
     }),
   );
 
-  it.effect('(b) red CI: retry to cap → failed, attempts === 2, exactly two work runs', () =>
+  it.effect('(b) red CI: retry to cap → failed, attempts === 2, work runs ONCE (FIX 3)', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
       const ticket = yield* store.add(newTicket);
@@ -80,8 +80,10 @@ describe('reconciler', () => {
       assert.strictEqual(final.state, 'failed');
       assert.strictEqual(final.attempts, 2);
 
+      // Red CI is a REVIEW-phase failure: it re-enters review (re-checks CI), it
+      // never re-runs work against the already-pushed branch. Work ran exactly once.
       const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
-      assert.strictEqual(work.length, 2);
+      assert.strictEqual(work.length, 1);
     }),
   );
 
@@ -115,6 +117,43 @@ describe('reconciler', () => {
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'review');
 
+        const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
+        assert.strictEqual(work.length, 0);
+      }),
+  );
+
+  it.effect(
+    '(d) FIX 3: a review failure under the cap re-reviews the existing PR — work never re-runs',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+
+        // A PR is already open and under review (work succeeded on attempt 0).
+        yield* store.patch(ticket.id, {
+          state: 'review',
+          branch: 'tp/x',
+          prNumber: 7,
+          prId: newPrId(),
+          workedAttempt: 0,
+          attempts: 0,
+        });
+
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentRunner({ verdict: 'request_changes' }),
+          fakeBoxMaker(),
+        );
+
+        yield* step.pipe(Effect.provide(env));
+
+        const final = yield* store.byId(ticket.id);
+        // Re-enters REVIEW (not in_progress), keeps the existing PR, consumes an attempt.
+        assert.strictEqual(final.state, 'review');
+        assert.strictEqual(final.prNumber, 7);
+        assert.strictEqual(final.attempts, 1);
+        // Crucially, work never re-ran against the already-pushed branch.
         const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
         assert.strictEqual(work.length, 0);
       }),

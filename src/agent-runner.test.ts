@@ -1,5 +1,6 @@
 import { assert, describe, it } from '@effect/vitest';
 import {
+  buildReviewRunnerBundle,
   buildRunnerBundle,
   commitMessage,
   fetchPrDiff,
@@ -217,6 +218,17 @@ describe('buildRunnerBundle', () => {
     // Bundled, not a module reference — sdk/effect are inlined into the artifact.
     assert.strictEqual(a.includes('createOpencodeServer'), true);
     const b = await buildRunnerBundle();
+    assert.strictEqual(a === b, true, 'second call returns the memoized bundle');
+  });
+});
+
+describe('buildReviewRunnerBundle', () => {
+  it('bundles the review runner (FIX 1) into one inlined artifact and memoizes it', async () => {
+    const a = await buildReviewRunnerBundle();
+    assert.strictEqual(a.length > 0, true);
+    // The opencode SDK is inlined so the leased box needs no install.
+    assert.strictEqual(a.includes('createOpencodeServer'), true);
+    const b = await buildReviewRunnerBundle();
     assert.strictEqual(a === b, true, 'second call returns the memoized bundle');
   });
 });
