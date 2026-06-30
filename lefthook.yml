@@ -7,6 +7,11 @@ pre-commit:
       stage_fixed: true
     typecheck:
       run: bun run typecheck
+    gitleaks:
+      # Scan only staged changes for plaintext secrets. encrypted secrets/*.enc.*
+      # are allowlisted in .gitleaks.toml. Requires `gitleaks` on PATH
+      # (brew install gitleaks). CI re-runs the same scan as the authoritative gate.
+      run: gitleaks protect --staged --redact --config .gitleaks.toml
 
 commit-msg:
   commands:

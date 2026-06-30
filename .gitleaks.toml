@@ -1,0 +1,11 @@
+title = "tidepool gitleaks"
+
+# Build on gitleaks' bundled ruleset; add repo-specific allowlisting below.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "sops-encrypted secrets are high-entropy ciphertext by design"
+paths = [
+  '''secrets/.*\.enc\.(yaml|json)$''',
+]
