@@ -1,3 +1,4 @@
+import { FetchHttpClient, HttpClient } from '@effect/platform';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { BoxFailed } from './domain.ts';
@@ -15,8 +16,21 @@ import {
 
 /**
  * Hetzner box maker — unit tests over pure functions and the factory.
- * No network calls: all HTTP helpers are replaced with fakes.
+ * No real network: the HTTP helpers run on the real `@effect/platform` Fetch
+ * client, but `globalThis.fetch` is stubbed per-test (FetchHttpClient resolves
+ * the global at request time), so the wire layer is exercised against fakes.
  */
+
+/**
+ * Resolve the live `FetchHttpClient` and hand it to `f`, then run to a Promise.
+ * Keeps each HTTP-helper test a one-liner over the stubbed `globalThis.fetch`.
+ */
+const withClient = <A, E>(f: (client: HttpClient.HttpClient) => Effect.Effect<A, E>): Promise<A> =>
+  HttpClient.HttpClient.pipe(
+    Effect.flatMap(f),
+    Effect.provide(FetchHttpClient.layer),
+    Effect.runPromise,
+  );
 
 const FAKE_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@tidepool';
 
@@ -106,8 +120,8 @@ describe('worker snapshot image API', () => {
   it('findWorkerSnapshot returns the first managed worker snapshot', async () => {
     const origFetch = globalThis.fetch;
     let capturedUrl = '';
-    globalThis.fetch = ((url: string) => {
-      capturedUrl = url;
+    globalThis.fetch = ((url: string | URL) => {
+      capturedUrl = String(url);
       return Promise.resolve(
         new Response(JSON.stringify({ images: [{ id: 555, status: 'available' }] }), {
           status: 200,
@@ -115,7 +129,7 @@ describe('worker snapshot image API', () => {
       );
     }) as typeof fetch;
 
-    const snap = await findWorkerSnapshot('tok');
+    const snap = await withClient((client) => findWorkerSnapshot(client, 'tok'));
     globalThis.fetch = origFetch;
 
     assert.deepEqual(snap, { id: 555, status: 'available' });
@@ -131,7 +145,7 @@ describe('worker snapshot image API', () => {
         new Response(JSON.stringify({ images: [] }), { status: 200 }),
       )) as typeof fetch;
 
-    const snap = await findWorkerSnapshot('tok');
+    const snap = await withClient((client) => findWorkerSnapshot(client, 'tok'));
     globalThis.fetch = origFetch;
 
     assert.isUndefined(snap);
@@ -141,15 +155,17 @@ describe('worker snapshot image API', () => {
     const origFetch = globalThis.fetch;
     let capturedUrl = '';
     let capturedBody: Record<string, unknown> = {};
-    globalThis.fetch = ((url: string, init: RequestInit) => {
-      capturedUrl = url;
+    globalThis.fetch = ((url: string | URL, init: RequestInit) => {
+      capturedUrl = String(url);
       capturedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
       return Promise.resolve(
         new Response(JSON.stringify({ image: { id: 777, status: 'creating' } }), { status: 201 }),
       );
     }) as typeof fetch;
 
-    const imageId = await createServerSnapshot('tok', 42, 'tidepool worker');
+    const imageId = await withClient((client) =>
+      createServerSnapshot(client, 'tok', 42, 'tidepool worker'),
+    );
     globalThis.fetch = origFetch;
 
     assert.equal(imageId, 777);
@@ -165,7 +181,7 @@ describe('worker snapshot image API', () => {
         new Response(JSON.stringify({ image: { id: 777, status: 'available' } }), { status: 200 }),
       )) as typeof fetch;
 
-    const status = await getImageStatus('tok', 777);
+    const status = await withClient((client) => getImageStatus(client, 'tok', 777));
     globalThis.fetch = origFetch;
 
     assert.equal(status, 'available');
@@ -200,15 +216,17 @@ describe('createServer labels', () => {
       { preconnect: () => {} },
     ) as typeof fetch;
 
-    await createServer('tok', {
-      name: 'tp-worker-x',
-      serverType: 'cpx22',
-      location: 'nbg1',
-      sshKeyId: 1,
-      networkId: 2,
-      userData: 'x',
-      labels: { ticket: 'tckt_qt6tbzn900' },
-    });
+    await withClient((client) =>
+      createServer(client, 'tok', {
+        name: 'tp-worker-x',
+        serverType: 'cpx22',
+        location: 'nbg1',
+        sshKeyId: 1,
+        networkId: 2,
+        userData: 'x',
+        labels: { ticket: 'tckt_qt6tbzn900' },
+      }),
+    );
 
     globalThis.fetch = origFetch;
 
@@ -244,7 +262,7 @@ describe('createServer image', () => {
     const capture: { value?: string | number } = {};
     const origFetch = globalThis.fetch;
     globalThis.fetch = fakeCreate(capture);
-    await createServer('tok', baseParams);
+    await withClient((client) => createServer(client, 'tok', baseParams));
     globalThis.fetch = origFetch;
     assert.equal(capture.value, 'ubuntu-24.04');
   });
@@ -253,7 +271,9 @@ describe('createServer image', () => {
     const capture: { value?: string | number } = {};
     const origFetch = globalThis.fetch;
     globalThis.fetch = fakeCreate(capture);
-    await createServer('tok', { ...baseParams, image: 234_567_890 });
+    await withClient((client) =>
+      createServer(client, 'tok', { ...baseParams, image: 234_567_890 }),
+    );
     globalThis.fetch = origFetch;
     assert.equal(capture.value, 234_567_890);
   });
@@ -306,7 +326,9 @@ describe('makeHetznerBoxMaker reap', () => {
 describe('makeHetznerBoxMaker lease', () => {
   it('propagates createServer error as BoxFailed', () =>
     Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
       const maker = makeHetznerBoxMaker({
+        client,
         token: 'fake',
         sshKeyId: 1,
         networkId: 2,
@@ -333,5 +355,5 @@ describe('makeHetznerBoxMaker lease', () => {
       if (exit._tag === 'Failure' && exit.cause._tag === 'Fail') {
         assert.instanceOf(exit.cause.error, BoxFailed);
       }
-    }).pipe(Effect.runPromise));
+    }).pipe(Effect.provide(FetchHttpClient.layer), Effect.runPromise));
 });

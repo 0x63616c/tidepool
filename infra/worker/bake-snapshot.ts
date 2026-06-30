@@ -20,6 +20,8 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { FetchHttpClient, HttpClient } from '@effect/platform';
+import { Effect } from 'effect';
 import { sshArgv } from '../../src/agent-runner.ts';
 import {
   createServer,
@@ -63,21 +65,28 @@ const waitForBake = async (ip: string, timeoutSec: number): Promise<void> => {
 };
 
 /** Poll an image until it reports `available`. */
-const waitForImage = async (token: string, imageId: number, timeoutSec: number): Promise<void> => {
-  const deadline = Date.now() + timeoutSec * 1000;
-  while (Date.now() < deadline) {
-    const status = await getImageStatus(token, imageId);
-    if (status === 'available') return;
-    log(`  image ${imageId} status=${status} …`);
-    await sleep(10_000);
-  }
-  throw new Error(`image ${imageId} not available within ${timeoutSec}s`);
-};
+const waitForImage = (
+  client: HttpClient.HttpClient,
+  token: string,
+  imageId: number,
+  timeoutSec: number,
+): Effect.Effect<void, Error, never> =>
+  Effect.gen(function* () {
+    const deadline = Date.now() + timeoutSec * 1000;
+    while (Date.now() < deadline) {
+      const status = yield* getImageStatus(client, token, imageId);
+      if (status === 'available') return;
+      log(`  image ${imageId} status=${status} …`);
+      yield* Effect.promise(() => sleep(10_000));
+    }
+    return yield* Effect.fail(new Error(`image ${imageId} not available within ${timeoutSec}s`));
+  });
 
-const main = async (): Promise<void> => {
+const program = Effect.gen(function* () {
+  const client = yield* HttpClient.HttpClient;
   const token = readToken();
 
-  const existing = await findWorkerSnapshot(token);
+  const existing = yield* findWorkerSnapshot(client, token);
   if (existing !== undefined && existing.status === 'available') {
     log(`reusing existing tidepool worker snapshot (idempotent, no re-bake)`);
     process.stdout.write(`snapshot:\n  id: ${existing.id}\n  status: available\n  reused: true\n`);
@@ -93,7 +102,7 @@ const main = async (): Promise<void> => {
   const name = `tp-worker-builder-${Date.now().toString(36)}`;
 
   log(`provisioning stock builder ${name} (${serverType} @ ${location}) …`);
-  const { serverId, ip } = await createServer(token, {
+  const { serverId, ip } = yield* createServer(client, token, {
     name,
     serverType,
     location,
@@ -104,24 +113,29 @@ const main = async (): Promise<void> => {
     labels: { role: 'builder' },
   });
 
-  try {
+  // The builder box is ALWAYS deleted (success or failure) — zero leaked servers.
+  yield* Effect.gen(function* () {
     log(`builder ${serverId} @ ${ip}: waiting for SSH …`);
-    await waitForSsh(ip, 180);
+    yield* Effect.promise(() => waitForSsh(ip, 180));
     log(`builder ${serverId}: running bake.sh (this takes a few minutes) …`);
-    await waitForBake(ip, 900);
+    yield* Effect.promise(() => waitForBake(ip, 900));
     log(`builder ${serverId}: bake complete, creating snapshot …`);
-    const imageId = await createServerSnapshot(token, serverId, 'tidepool worker (baked)');
-    await waitForImage(token, imageId, 900);
+    const imageId = yield* createServerSnapshot(client, token, serverId, 'tidepool worker (baked)');
+    yield* waitForImage(client, token, imageId, 900);
     log(`snapshot ${imageId} available`);
     process.stdout.write(`snapshot:\n  id: ${imageId}\n  status: available\n  reused: false\n`);
-  } finally {
-    log(`deleting builder ${serverId} …`);
-    await deleteServer(token, serverId);
-    log(`builder ${serverId} deleted`);
-  }
-};
+  }).pipe(
+    Effect.ensuring(
+      Effect.gen(function* () {
+        log(`deleting builder ${serverId} …`);
+        yield* deleteServer(client, token, serverId);
+        log(`builder ${serverId} deleted`);
+      }).pipe(Effect.orDie),
+    ),
+  );
+});
 
-main().catch((err: unknown) => {
+Effect.runPromise(program.pipe(Effect.provide(FetchHttpClient.layer))).catch((err: unknown) => {
   process.stdout.write(`error: snapshot bake failed\n  reason: ${String(err)}\n`);
   process.exit(1);
 });
