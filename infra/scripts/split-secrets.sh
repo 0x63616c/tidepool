@@ -74,8 +74,10 @@ sops -d --extract '["ssh_tidepool_private_key"]' \
   "$SEC/ssh_tidepool_private_key.enc.yaml" >"$TMP/ssh.new"
 chmod 600 "$TMP/ssh.new"
 NEWPUB="$(ssh-keygen -y -f "$TMP/ssh.new" | awk '{print $1, $2}')"
-OLDPUB="$(sops -d --extract '["ssh_worker_private_key"]' "$OLD" \
-  | ssh-keygen -y -f /dev/stdin | awk '{print $1, $2}')"
+# ssh-keygen refuses a key on /dev/stdin (fd perms too open) — use a 0600 temp file.
+sops -d --extract '["ssh_worker_private_key"]' "$OLD" >"$TMP/ssh.old"
+chmod 600 "$TMP/ssh.old"
+OLDPUB="$(ssh-keygen -y -f "$TMP/ssh.old" | awk '{print $1, $2}')"
 [ "$NEWPUB" = "$OLDPUB" ] || {
   echo "FATAL: ssh pubkey mismatch — NOT deleting old blob"; exit 1;
 }
