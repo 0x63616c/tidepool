@@ -74,12 +74,7 @@ bun run check     # prettier --check + typecheck + commitlint (last commit) + te
 
 ## Secrets
 
-**sops + age**, encrypted in git, one file per secret (`secrets/*.enc.yaml`); `.sops.yaml` is the
-recipient matrix (`mainbox` = box-only key, `breakglass` = recovery, `ci` where CI must read). The box
-decrypts with its own key — **1Password is backup-only; nothing reads it at runtime.** Add a secret:
-new `secrets/<snake_name>.enc.yaml` + a `.sops.yaml` rule above the catch-all, then `sops updatekeys`.
-**Local:** `.envrc` (direnv) caches the break-glass key in the macOS login keychain → `SOPS_AGE_KEY`,
-so `sops -d` is promptless after a one-time per-machine seed from 1Password. Full setup: `DESIGN.md`.
+sops + age, one file per secret (`secrets/*.enc.yaml`); 1Password is backup-only. Local: `.envrc` caches the break-glass key in the macOS keychain → `SOPS_AGE_KEY`. Detail: `DESIGN.md`.
 
 ## Do / Don't
 
