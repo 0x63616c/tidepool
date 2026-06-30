@@ -24,3 +24,7 @@ infra/pulumi/bin/
 # Claude Code + opencode both auto-discover them.
 .agents/
 .claude/
+
+
+# stray agent scratch output (session temp) — never commit
+scratchpad/

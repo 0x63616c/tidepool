@@ -32,3 +32,16 @@ brew install gitleaks # pre-commit leak scanner (lefthook hook prerequisite)
 bun install
 bun run check        # prettier + typecheck + commitlint + test
 ```
+
+## Local secrets (optional, recommended)
+
+Decrypting `secrets/*.enc.yaml` needs your age key in `SOPS_AGE_KEY`.
+[direnv](https://direnv.net) auto-loads it from 1Password (see `.envrc`):
+
+```bash
+brew install direnv          # then add the shell hook, e.g. eval "$(direnv hook zsh)"
+direnv allow
+```
+
+Adjust the `op://` path in `.envrc` to your own 1Password vault if it differs.
+Once loaded, `sops -d …` just works.
