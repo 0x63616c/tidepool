@@ -63,6 +63,8 @@ a secret outside sops.
 - **PR titles:** conventional + ticket id → `feat(reconciler): add claim loop (tckt_a1b2c3)`.
 - **Formatting:** Prettier (`bun run format`). **Types:** `bun run typecheck` must pass.
 - **Tests:** vitest. New behavior needs a test. **Lint commits:** commitlint.
+- **Effect everywhere (tenet 10), incl HTTP:** all I/O goes through Effect; HTTP uses the one layer
+  `@effect/platform` (`HttpClient`) — never raw `fetch`.
 
 ## Local quality gates (same as CI)
 
@@ -75,6 +77,8 @@ bun run check     # prettier --check + typecheck + commitlint (last commit) + te
 ## Secrets
 
 sops + age, one file per secret (`secrets/*.enc.yaml`); 1Password is backup-only. Local: `.envrc` caches the break-glass key in the macOS keychain → `SOPS_AGE_KEY`. Detail: `DESIGN.md`.
+
+Resolve a credential via sops before concluding it's absent — don't infer absence from a filesystem search (a missing `~/.ssh` file ≠ no key; check `secrets/*.enc.yaml`).
 
 ## Do / Don't
 
