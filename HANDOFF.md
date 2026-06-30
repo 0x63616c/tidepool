@@ -44,8 +44,13 @@ Done — Phase A, Phase B, and Phase C implementation complete:
 - **Both repos are now PUBLIC + hardened (2026-06-28):** `tidepool` and `tidepool-testbed` are public,
   `main` protected (required check `check`, linear history, no force-push, no deletions,
   enforce-admins), Actions `GITHUB_TOKEN` read-only, 0 repo secrets.
-- `secrets/tidepool.enc.yaml` — sops-encrypted (3 age recipients: mainbox/ci/breakglass).
-  Contains: `hcloud_token`, `github_token`, `opencode_auth_json`, `ssh_worker_private_key`.
+- `secrets/*.enc.yaml` — sops+age, **one file per secret**, each with its own recipient set
+  (`.sops.yaml` is the access-control matrix; recipients: mainbox/ci/breakglass anchors):
+  - `hcloud_api_token` — ci + mainbox + breakglass (box provisions workers; future Pulumi-in-CI)
+  - `forge_github_token` — mainbox + breakglass (reconciler/Forge; CI uses its native token)
+  - `runner_opencode_auth_json` — mainbox + breakglass (AgentRunner subscription cred)
+  - `ssh_tidepool_private_key` — mainbox + breakglass (shared fleet SSH identity: box→worker
+    AND operator→box; **NOT** worker-specific despite the old `ssh_worker_private_key` name)
 - `src/` — full implementation:
   - `domain.ts` — branded ids, typed errors, Ticket/Run schemas (Effect Schema)
   - `config.ts` — Effect Schema Config + `AppConfig` Tag + `loadConfig`

@@ -182,9 +182,12 @@ everything upstream). Two levels:
 ### Config & secrets (three stores, never mixed)
 1. **Declarative config** — typed `tidepool.config.ts` (`defineConfig`, zod-validated), in git,
    changed via PR. Holds targets, worker cap/box specs, models, retries, idle timeout.
-2. **Secrets** — **sops + age**, encrypted in git. Recipients: main-box pubkey + your break-glass
-   pubkey. **Private key lives on the main box only.** Workers get JIT-decrypted creds over the
-   lease's SSH — the master key never leaves the main box.
+2. **Secrets** — **sops + age**, encrypted in git, **one file per secret** so each secret's
+   recipient set is an independently-tunable dial (`.sops.yaml` is the access-control matrix;
+   change audience = edit one rule + `sops updatekeys`). Recipients: main-box pubkey + break-glass
+   pubkey (+ CI where a secret must be CI-readable). **Private key lives on the main box only.**
+   Workers get JIT-decrypted creds over the lease's SSH — the master key never leaves the main box.
+   See `docs/sops-migration.md`.
 3. **Runtime state** — sqlite on the main box, never in git.
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
 

@@ -21,13 +21,14 @@ Scaffolding. Design locked. v1 target: a working **N=1** loop against `tidepool-
 src/            cli, reconciler, runner, interfaces, store   (TypeScript + Bun)
 tickets/        git-backed backlog (markdown, frontmatter)
 infra/          Pulumi (main box, firewall) + Hetzner-API workers + bootstrap
-secrets/        sops+age encrypted secrets (steady state)
+secrets/        sops+age encrypted secrets, one file per secret (steady state)
 .github/        CI rails (prettier, typecheck, commitlint, vitest)
 ```
 
 ## Quick start (dev)
 
 ```bash
+brew install gitleaks # pre-commit leak scanner (lefthook hook prerequisite)
 bun install
 bun run check        # prettier + typecheck + commitlint + test
 ```

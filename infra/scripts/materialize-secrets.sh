@@ -10,7 +10,7 @@
 set -euo pipefail
 
 REPO="${TIDEPOOL_REPO_DIR:-/opt/tidepool}"
-ENC="$REPO/secrets/tidepool.enc.yaml"
+SECRETS="$REPO/secrets"
 BOOT="${TIDEPOOL_BOOTSTRAP_DIR:-/root/.tidepool/bootstrap}"
 ENV_DIR=/etc/tidepool
 ENV_FILE="$ENV_DIR/env"
@@ -28,19 +28,19 @@ chmod 700 "$BOOT"
 mkdir -p "$ENV_DIR"
 chmod 755 "$ENV_DIR"
 
-# Pull a single top-level key out of the encrypted bundle (decrypt in memory).
-extract() { sops -d --extract "[\"$1\"]" "$ENC"; }
+# Decrypt one per-file secret (file name == top-level key == secret name).
+sec() { sops -d --extract "[\"$1\"]" "$SECRETS/$1.enc.yaml"; }
 
 # 1. Hetzner token — worker provisioning (src/hetzner-box.ts).
-extract hcloud_token >"$BOOT/hcloud_token"
+sec hcloud_api_token >"$BOOT/hcloud_token"
 chmod 600 "$BOOT/hcloud_token"
 
 # 2. opencode auth.json — the agent subscription credential.
-extract opencode_auth_json >"$BOOT/opencode-auth.json"
+sec runner_opencode_auth_json >"$BOOT/opencode-auth.json"
 chmod 600 "$BOOT/opencode-auth.json"
 
-# 3. Shared SSH key to reach workers, plus its derived public half.
-extract ssh_worker_private_key >"$BOOT/ssh-tidepool"
+# 3. Shared fleet SSH key (box->worker AND operator->box), plus derived public half.
+sec ssh_tidepool_private_key >"$BOOT/ssh-tidepool"
 chmod 600 "$BOOT/ssh-tidepool"
 ssh-keygen -y -f "$BOOT/ssh-tidepool" >"$BOOT/ssh-tidepool.pub"
 chmod 644 "$BOOT/ssh-tidepool.pub"
@@ -49,8 +49,8 @@ chmod 644 "$BOOT/ssh-tidepool.pub"
 #    directly from its environment.
 {
   echo "TIDEPOOL_DB_PATH=$DB_PATH"
-  echo "HCLOUD_TOKEN=$(extract hcloud_token)"
-  echo "GITHUB_TOKEN=$(extract github_token)"
+  echo "HCLOUD_TOKEN=$(sec hcloud_api_token)"
+  echo "GITHUB_TOKEN=$(sec forge_github_token)"
 } >"$ENV_FILE"
 chmod 600 "$ENV_FILE"
 

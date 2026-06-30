@@ -1,13 +1,44 @@
-# sops creation rules — encrypts secrets in git to three age recipients:
-#   mainbox    — the always-on control plane (its private key lives ONLY on the box)
-#   ci         — GitHub Actions (decrypts to provide Pulumi config at provision time)
-#   breakglass — Calum's offline recovery key
+# sops creation rules — one file per secret, each with its own recipient set.
+# The recipient ANCHORS below are the access-control matrix: to change who can
+# decrypt a secret, edit that secret's rule and run `sops updatekeys <file>`.
+#
+#   mainbox    — the always-on control plane (private key lives ONLY on the box)
+#   ci         — GitHub Actions (Pulumi-in-CI; currently only hcloud_api_token)
+#   breakglass — Calum's offline recovery key (recipient of EVERY secret)
+#
 # Holds NO secret values (those live in secrets/*.enc.yaml, encrypted). Tenet 9:
 # the master key never leaves the main box; workers get JIT-decrypted creds over SSH.
+# See docs/sops-migration.md for the layout rationale.
+
+keys:
+  - &mainbox    age1368zpnurgca5mraqvf3d8d6sl6ctkpxd7ht2mwuvmevpxu74j5tsms9lur
+  - &ci         age1c8rzq8txxlq4g6zu0yn46rr9rdzfyn3j5u9d8cxnq2h5w3yrve6sjs3gkc
+  - &breakglass age1ewkw53p9v6w44uae75kxnnwnmnt9etqpkems2kjqkyjwldrjju0qe2t4tn
+
 creation_rules:
+  # Hetzner API token — box provisions workers; (future) Pulumi-in-CI. CI-readable.
+  - path_regex: secrets/hcloud_api_token\.enc\.yaml$
+    key_groups:
+      - age: [*ci, *mainbox, *breakglass]
+
+  # GitHub PAT — reconciler/Forge. Box-only; CI uses its native GITHUB_TOKEN.
+  - path_regex: secrets/forge_github_token\.enc\.yaml$
+    key_groups:
+      - age: [*mainbox, *breakglass]
+
+  # opencode auth.json — AgentRunner subscription credential. Box-only.
+  - path_regex: secrets/runner_opencode_auth_json\.enc\.yaml$
+    key_groups:
+      - age: [*mainbox, *breakglass]
+
+  # Shared fleet SSH identity (root on every box + operator laptop). Box-only.
+  - path_regex: secrets/ssh_tidepool_private_key\.enc\.yaml$
+    key_groups:
+      - age: [*mainbox, *breakglass]
+
+  # Catch-all so any NEW secrets/*.enc.* file is at least sealed to box+breakglass
+  # until it gets its own explicit rule above. sops uses the FIRST matching rule,
+  # so this MUST stay last.
   - path_regex: secrets/.*\.enc\.(yaml|json)$
     key_groups:
-      - age:
-          - age1368zpnurgca5mraqvf3d8d6sl6ctkpxd7ht2mwuvmevpxu74j5tsms9lur # mainbox
-          - age1c8rzq8txxlq4g6zu0yn46rr9rdzfyn3j5u9d8cxnq2h5w3yrve6sjs3gkc # ci
-          - age1ewkw53p9v6w44uae75kxnnwnmnt9etqpkems2kjqkyjwldrjju0qe2t4tn # breakglass
+      - age: [*mainbox, *breakglass]
