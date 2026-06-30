@@ -72,6 +72,10 @@ Run before pushing — git hooks run these automatically, CI re-runs them (never
 bun run check     # prettier --check + typecheck + commitlint (last commit) + test
 ```
 
+## Secrets
+
+sops + age, one file per secret (`secrets/*.enc.yaml`); 1Password is backup-only. Local: `.envrc` caches the break-glass key in the macOS keychain → `SOPS_AGE_KEY`. Detail: `DESIGN.md`.
+
 ## Do / Don't
 
 - DO be concise everywhere — docs included.

@@ -187,6 +187,9 @@ everything upstream). Two levels:
    change audience = edit one rule + `sops updatekeys`). Recipients: main-box pubkey + break-glass
    pubkey (+ CI where a secret must be CI-readable). **Private key lives on the main box only.**
    Workers get JIT-decrypted creds over the lease's SSH — the master key never leaves the main box.
+   *Local dev:* `.envrc` (direnv) caches the break-glass key in the macOS login keychain and exports
+   `SOPS_AGE_KEY`, so `sops -d` is promptless after a one-time per-machine seed from 1Password (the
+   keys' backup-only store; nothing reads it at runtime). 1Password access uses a vault-scoped service account.
 3. **Runtime state** — sqlite on the main box, never in git.
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
 
