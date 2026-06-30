@@ -8,7 +8,6 @@
 #
 # Holds NO secret values (those live in secrets/*.enc.yaml, encrypted). Tenet 9:
 # the master key never leaves the main box; workers get JIT-decrypted creds over SSH.
-# See docs/sops-migration.md for the layout rationale.
 
 keys:
   - &mainbox    age1368zpnurgca5mraqvf3d8d6sl6ctkpxd7ht2mwuvmevpxu74j5tsms9lur

@@ -187,7 +187,6 @@ everything upstream). Two levels:
    change audience = edit one rule + `sops updatekeys`). Recipients: main-box pubkey + break-glass
    pubkey (+ CI where a secret must be CI-readable). **Private key lives on the main box only.**
    Workers get JIT-decrypted creds over the lease's SSH — the master key never leaves the main box.
-   See `docs/sops-migration.md`.
 3. **Runtime state** — sqlite on the main box, never in git.
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
 
