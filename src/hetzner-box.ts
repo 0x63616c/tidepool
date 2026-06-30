@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { Effect, Layer } from 'effect';
+import { FetchHttpClient, HttpBody, HttpClient, type HttpClientError } from '@effect/platform';
+import { Data, Effect, Layer } from 'effect';
 import { AppConfig } from './config.ts';
 import { BoxFailed } from './domain.ts';
-import { type BoxId, newBoxId } from './ids.ts';
+import { newBoxId } from './ids.ts';
 import { BoxMaker, type BoxMakerApi, type BoxSpec } from './services.ts';
 
 /**
@@ -43,14 +44,26 @@ interface HcloudServerListed {
 
 // ── Sentinel for resource capacity errors ────────────────────────────────────
 
-class ResourceUnavailable extends Error {
-  constructor(
-    readonly serverType: string,
-    readonly location: string,
-  ) {
-    super(`resource_unavailable: ${serverType} in ${location}`);
-  }
-}
+/**
+ * Tagged sentinel: Hetzner has no capacity for this type+location. The lease
+ * loop catches it (`Effect.catchTag`) to fall through to the next combination;
+ * every other failure surfaces as `BoxFailed`.
+ */
+class ResourceUnavailable extends Data.TaggedError('ResourceUnavailable')<{
+  readonly serverType: string;
+  readonly location: string;
+}> {}
+
+/**
+ * Fold an `@effect/platform` HTTP transport/decode failure into the seam's
+ * `BoxFailed`. Used with `Effect.catchTags` so the deliberate `ResourceUnavailable`
+ * and `BoxFailed` failures pass through untouched.
+ */
+const httpFail = (e: HttpClientError.HttpClientError): Effect.Effect<never, BoxFailed> =>
+  Effect.fail(new BoxFailed({ reason: String(e) }));
+
+/** True for a 2xx response (mirrors the old `Response.ok`). */
+const isOk = (status: number): boolean => status >= 200 && status < 300;
 
 // ── Worker install recipe (single source of truth) ───────────────────────────
 
@@ -155,66 +168,87 @@ export const workerServerName = (boxId: string, labels: Record<string, string>):
   return (ticket ? `tp-worker-${ticket}-${suffix}` : `tp-worker-${suffix}`).slice(0, 63);
 };
 
-export const createServer = async (
-  token: string,
-  params: {
-    readonly name: string;
-    readonly serverType: string;
-    readonly location: string;
-    readonly sshKeyId: number;
-    readonly networkId: number;
-    readonly userData: string;
-    /** Boot image: a Hetzner image name or a snapshot id. Defaults to ubuntu-24.04. */
-    readonly image?: string | number;
-    readonly labels?: Record<string, string>;
-  },
-): Promise<{ readonly serverId: number; readonly ip: string }> => {
-  const res = await fetch(`${HCLOUD_API}/servers`, {
-    method: 'POST',
-    headers: hcloudHeaders(token),
-    body: JSON.stringify({
-      name: params.name,
-      server_type: params.serverType,
-      image: params.image ?? 'ubuntu-24.04',
-      location: params.location,
-      ssh_keys: [params.sshKeyId],
-      networks: [params.networkId],
-      // Caller labels first, then the reaper-critical labels (never overridable).
-      labels: { ...params.labels, managed_by: 'tidepool', role: 'worker' },
-      user_data: params.userData,
-    }),
-  });
-  const body = (await res.json()) as HcloudServerCreated;
-  if (!res.ok) {
-    if (body.error?.code === 'resource_unavailable') {
-      throw new ResourceUnavailable(params.serverType, params.location);
+export const createServer = Effect.fn('createServer')(
+  function* (
+    client: HttpClient.HttpClient,
+    token: string,
+    params: {
+      readonly name: string;
+      readonly serverType: string;
+      readonly location: string;
+      readonly sshKeyId: number;
+      readonly networkId: number;
+      readonly userData: string;
+      /** Boot image: a Hetzner image name or a snapshot id. Defaults to ubuntu-24.04. */
+      readonly image?: string | number;
+      readonly labels?: Record<string, string>;
+    },
+  ) {
+    const response = yield* client.post(`${HCLOUD_API}/servers`, {
+      headers: hcloudHeaders(token),
+      body: HttpBody.raw(
+        JSON.stringify({
+          name: params.name,
+          server_type: params.serverType,
+          image: params.image ?? 'ubuntu-24.04',
+          location: params.location,
+          ssh_keys: [params.sshKeyId],
+          networks: [params.networkId],
+          // Caller labels first, then the reaper-critical labels (never overridable).
+          labels: { ...params.labels, managed_by: 'tidepool', role: 'worker' },
+          user_data: params.userData,
+        }),
+        { contentType: 'application/json' },
+      ),
+    });
+    const body = (yield* response.json) as HcloudServerCreated;
+    if (!isOk(response.status)) {
+      if (body.error?.code === 'resource_unavailable') {
+        return yield* Effect.fail(
+          new ResourceUnavailable({ serverType: params.serverType, location: params.location }),
+        );
+      }
+      return yield* Effect.fail(
+        new BoxFailed({
+          reason: `hcloud createServer ${response.status}: ${body.error?.message ?? 'unknown'}`,
+        }),
+      );
     }
-    throw new Error(`hcloud createServer ${res.status}: ${body.error?.message ?? 'unknown'}`);
-  }
-  return { serverId: body.server.id, ip: body.server.public_net.ipv4.ip };
-};
+    return { serverId: body.server.id, ip: body.server.public_net.ipv4.ip };
+  },
+  Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }),
+);
 
-export const deleteServer = async (token: string, serverId: number): Promise<void> => {
-  const res = await fetch(`${HCLOUD_API}/servers/${serverId}`, {
-    method: 'DELETE',
-    headers: hcloudHeaders(token),
-  });
-  if (!res.ok && res.status !== 404) {
-    throw new Error(`hcloud deleteServer ${serverId} → ${res.status}`);
-  }
-};
+export const deleteServer = Effect.fn('deleteServer')(
+  function* (client: HttpClient.HttpClient, token: string, serverId: number) {
+    const response = yield* client.del(`${HCLOUD_API}/servers/${serverId}`, {
+      headers: hcloudHeaders(token),
+    });
+    if (!isOk(response.status) && response.status !== 404) {
+      return yield* Effect.fail(
+        new BoxFailed({ reason: `hcloud deleteServer ${serverId} → ${response.status}` }),
+      );
+    }
+  },
+  Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }),
+);
 
-export const listWorkerServers = async (
-  token: string,
-): Promise<ReadonlyArray<HcloudServerListed>> => {
-  const res = await fetch(
-    `${HCLOUD_API}/servers?label_selector=managed_by%3Dtidepool%2Crole%3Dworker`,
-    { headers: hcloudHeaders(token) },
-  );
-  if (!res.ok) throw new Error(`hcloud listWorkers → ${res.status}`);
-  const body = (await res.json()) as { servers: HcloudServerListed[] };
-  return body.servers;
-};
+export const listWorkerServers = Effect.fn('listWorkerServers')(
+  function* (client: HttpClient.HttpClient, token: string) {
+    const response = yield* client.get(
+      `${HCLOUD_API}/servers?label_selector=managed_by%3Dtidepool%2Crole%3Dworker`,
+      { headers: hcloudHeaders(token) },
+    );
+    if (!isOk(response.status)) {
+      return yield* Effect.fail(
+        new BoxFailed({ reason: `hcloud listWorkers → ${response.status}` }),
+      );
+    }
+    const body = (yield* response.json) as { servers: HcloudServerListed[] };
+    return body.servers;
+  },
+  Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }),
+);
 
 // ── Prebaked worker snapshot (#8) ────────────────────────────────────────────
 // One tidepool-managed snapshot holds the fully-baked worker image; config
@@ -235,49 +269,68 @@ const SNAPSHOT_LABELS = { managed_by: 'tidepool', role: 'worker' } as const;
  * The existing tidepool worker snapshot, if one is already baked. Lets the bake
  * be idempotent — reuse rather than pile up snapshots. Returns the newest by id.
  */
-export const findWorkerSnapshot = async (token: string): Promise<HcloudImage | undefined> => {
-  const res = await fetch(
-    `${HCLOUD_API}/images?type=snapshot&label_selector=managed_by%3Dtidepool%2Crole%3Dworker`,
-    { headers: hcloudHeaders(token) },
-  );
-  if (!res.ok) throw new Error(`hcloud findWorkerSnapshot → ${res.status}`);
-  const body = (await res.json()) as { images: HcloudImage[] };
-  return [...body.images].sort((a, b) => b.id - a.id)[0];
-};
+export const findWorkerSnapshot = Effect.fn('findWorkerSnapshot')(
+  function* (client: HttpClient.HttpClient, token: string) {
+    const response = yield* client.get(
+      `${HCLOUD_API}/images?type=snapshot&label_selector=managed_by%3Dtidepool%2Crole%3Dworker`,
+      { headers: hcloudHeaders(token) },
+    );
+    if (!isOk(response.status)) {
+      return yield* Effect.fail(
+        new BoxFailed({ reason: `hcloud findWorkerSnapshot → ${response.status}` }),
+      );
+    }
+    const body = (yield* response.json) as { images: HcloudImage[] };
+    return [...body.images].sort((a, b) => b.id - a.id)[0];
+  },
+  Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }),
+);
 
 /**
  * Snapshot a (fully-baked) builder server into a new image. Returns the image
  * id; the image starts `creating` and must be polled to `available` before use.
  */
-export const createServerSnapshot = async (
-  token: string,
-  serverId: number,
-  description: string,
-): Promise<number> => {
-  const res = await fetch(`${HCLOUD_API}/servers/${serverId}/actions/create_image`, {
-    method: 'POST',
-    headers: hcloudHeaders(token),
-    body: JSON.stringify({ type: 'snapshot', description, labels: SNAPSHOT_LABELS }),
-  });
-  const body = (await res.json()) as {
-    image?: HcloudImage;
-    error?: { message: string };
-  };
-  if (!res.ok || body.image === undefined) {
-    throw new Error(
-      `hcloud createServerSnapshot ${serverId} → ${res.status}: ${body.error?.message ?? 'unknown'}`,
-    );
-  }
-  return body.image.id;
-};
+export const createServerSnapshot = Effect.fn('createServerSnapshot')(
+  function* (client: HttpClient.HttpClient, token: string, serverId: number, description: string) {
+    const response = yield* client.post(`${HCLOUD_API}/servers/${serverId}/actions/create_image`, {
+      headers: hcloudHeaders(token),
+      body: HttpBody.raw(
+        JSON.stringify({ type: 'snapshot', description, labels: SNAPSHOT_LABELS }),
+        { contentType: 'application/json' },
+      ),
+    });
+    const body = (yield* response.json) as {
+      image?: HcloudImage;
+      error?: { message: string };
+    };
+    if (!isOk(response.status) || body.image === undefined) {
+      return yield* Effect.fail(
+        new BoxFailed({
+          reason: `hcloud createServerSnapshot ${serverId} → ${response.status}: ${body.error?.message ?? 'unknown'}`,
+        }),
+      );
+    }
+    return body.image.id;
+  },
+  Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }),
+);
 
 /** Current status of an image (`creating` → `available`). */
-export const getImageStatus = async (token: string, imageId: number): Promise<string> => {
-  const res = await fetch(`${HCLOUD_API}/images/${imageId}`, { headers: hcloudHeaders(token) });
-  if (!res.ok) throw new Error(`hcloud getImageStatus ${imageId} → ${res.status}`);
-  const body = (await res.json()) as { image: HcloudImage };
-  return body.image.status;
-};
+export const getImageStatus = Effect.fn('getImageStatus')(
+  function* (client: HttpClient.HttpClient, token: string, imageId: number) {
+    const response = yield* client.get(`${HCLOUD_API}/images/${imageId}`, {
+      headers: hcloudHeaders(token),
+    });
+    if (!isOk(response.status)) {
+      return yield* Effect.fail(
+        new BoxFailed({ reason: `hcloud getImageStatus ${imageId} → ${response.status}` }),
+      );
+    }
+    const body = (yield* response.json) as { image: HcloudImage };
+    return body.image.status;
+  },
+  Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }),
+);
 
 /**
  * Poll TCP port 22 every 5 s until SSH accepts a connection.
@@ -311,6 +364,8 @@ const typeChain = (primary: string): ReadonlyArray<string> => {
 };
 
 export const makeHetznerBoxMaker = (params: {
+  /** Resolved HTTP client — captured here so the seam never exposes `HttpClient`. */
+  readonly client: HttpClient.HttpClient;
   readonly token: string;
   readonly sshKeyId: number;
   readonly networkId: number;
@@ -323,72 +378,68 @@ export const makeHetznerBoxMaker = (params: {
     let provisionedServerId = -1;
 
     return Effect.acquireRelease(
-      Effect.tryPromise({
-        try: async () => {
-          // A prebaked image already has the recipe applied, so cloud-init
-          // shrinks to the ssh key + the per-boot sentinel (seconds, not
-          // minutes). Stock boots run the full recipe.
-          const userData = workerCloudInit(params.sshPubKey, {
-            baked: params.imageId !== undefined,
-          });
-          for (const serverType of typeChain(spec.type)) {
-            for (const location of spec.locations) {
-              try {
-                const boxId = newBoxId();
-                const serverName = workerServerName(boxId, spec.labels ?? {});
-                const { serverId, ip } = await createServer(params.token, {
-                  name: serverName,
-                  serverType,
-                  location,
-                  sshKeyId: params.sshKeyId,
-                  networkId: params.networkId,
-                  userData,
-                  image: params.imageId,
-                  labels: spec.labels,
-                });
-                provisionedServerId = serverId;
-                await waitForSsh(ip);
-                return { id: boxId, ip, role: 'worker' as const, provider: 'hetzner' as const };
-              } catch (e) {
-                if (e instanceof ResourceUnavailable) continue;
-                throw e;
-              }
+      Effect.gen(function* () {
+        // A prebaked image already has the recipe applied, so cloud-init
+        // shrinks to the ssh key + the per-boot sentinel (seconds, not
+        // minutes). Stock boots run the full recipe.
+        const userData = workerCloudInit(params.sshPubKey, {
+          baked: params.imageId !== undefined,
+        });
+        for (const serverType of typeChain(spec.type)) {
+          for (const location of spec.locations) {
+            const boxId = newBoxId();
+            const serverName = workerServerName(boxId, spec.labels ?? {});
+            // A capacity miss for this type+location falls through to the next
+            // combination; any other failure propagates as BoxFailed.
+            const created = yield* createServer(params.client, params.token, {
+              name: serverName,
+              serverType,
+              location,
+              sshKeyId: params.sshKeyId,
+              networkId: params.networkId,
+              userData,
+              image: params.imageId,
+              labels: spec.labels,
+            }).pipe(Effect.catchTag('ResourceUnavailable', () => Effect.succeed(undefined)));
+            if (created !== undefined) {
+              provisionedServerId = created.serverId;
+              yield* Effect.tryPromise({
+                try: () => waitForSsh(created.ip),
+                catch: (e) => new BoxFailed({ reason: String(e) }),
+              });
+              return {
+                id: boxId,
+                ip: created.ip,
+                role: 'worker' as const,
+                provider: 'hetzner' as const,
+              };
             }
           }
-          throw new Error(`all type+location combinations exhausted`);
-        },
-        catch: (e) => new BoxFailed({ reason: String(e) }),
+        }
+        return yield* Effect.fail(
+          new BoxFailed({ reason: 'all type+location combinations exhausted' }),
+        );
       }),
       (_box) =>
-        Effect.tryPromise({
-          try: () =>
-            provisionedServerId >= 0
-              ? deleteServer(params.token, provisionedServerId)
-              : Promise.resolve(),
-          catch: (e) =>
-            // Log but never throw — the reaper will clean up orphans.
-            new Error(`hcloud delete failed (reaper will clean up): ${e}`),
-        }).pipe(Effect.orDie),
+        // Delete on scope close. A failure here dies (the reaper is the backstop);
+        // this mirrors the prior `orDie` behaviour.
+        provisionedServerId >= 0
+          ? deleteServer(params.client, params.token, provisionedServerId).pipe(Effect.orDie)
+          : Effect.void,
     );
   },
 
   reap: () =>
-    Effect.tryPromise({
-      try: async () => {
-        const servers = await listWorkerServers(params.token);
-        const now = Date.now();
-        const deleted: BoxId[] = [];
-        await Promise.all(
-          servers.map(async (s) => {
-            if (now - Date.parse(s.created) > MAX_TTL_MS) {
-              await deleteServer(params.token, s.id);
-              deleted.push(newBoxId()); // generate a local id for the audit log
-            }
-          }),
-        );
-        return { deleted };
-      },
-      catch: (e) => new BoxFailed({ reason: String(e) }),
+    Effect.gen(function* () {
+      const servers = yield* listWorkerServers(params.client, params.token);
+      const now = Date.now();
+      const expired = servers.filter((s) => now - Date.parse(s.created) > MAX_TTL_MS);
+      yield* Effect.forEach(expired, (s) => deleteServer(params.client, params.token, s.id), {
+        concurrency: 'unbounded',
+        discard: true,
+      });
+      // One local audit id per deleted server (the Hetzner id is not a BoxId).
+      return { deleted: expired.map(() => newBoxId()) };
     }),
 });
 
@@ -417,7 +468,9 @@ export const HetznerBoxMakerLive: Layer.Layer<BoxMaker, BoxFailed, AppConfig> = 
   Effect.gen(function* () {
     const token = yield* hcloudToken;
     const config = yield* AppConfig;
+    const client = yield* HttpClient.HttpClient;
     return makeHetznerBoxMaker({
+      client,
       token,
       sshKeyId: SSH_KEY_ID,
       networkId: NETWORK_ID,
@@ -428,4 +481,4 @@ export const HetznerBoxMakerLive: Layer.Layer<BoxMaker, BoxFailed, AppConfig> = 
       imageId: config.box.imageId,
     });
   }),
-);
+).pipe(Layer.provide(FetchHttpClient.layer));

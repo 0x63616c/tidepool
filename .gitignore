@@ -23,7 +23,10 @@ infra/pulumi/bin/
 # .agents/skills/ holds the real files; .claude/skills is a symlink into it so
 # Claude Code + opencode both auto-discover them.
 .agents/
-.claude/
+# Only the local-ergonomics bits of .claude/ are ignored; .claude/settings.json +
+# .claude/hooks/ are TRACKED so CI / other machines / PR-builders share the guards.
+.claude/skills
+.claude/worktrees/
 
 
 # stray agent scratch output (session temp) — never commit
