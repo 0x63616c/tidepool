@@ -74,8 +74,10 @@ bun run check     # prettier --check + typecheck + commitlint (last commit) + te
 
 ## Do / Don't
 
+- DO be concise everywhere — docs included.
 - DO keep interfaces narrow and implementations swappable.
 - DO write the test first for bugfixes (reproduce, then fix).
 - DON'T edit `secrets/**` or `.github/workflows/**` unless the ticket explicitly says so
   (these are security-sensitive; protected once self-bootstrap is live).
 - DON'T add dependencies casually; prefer the standard lib / existing deps.
+- DON'T surface a secret value (sops or `op`) in chat — decrypt only piped into a derive tool that prints public/hash output.
