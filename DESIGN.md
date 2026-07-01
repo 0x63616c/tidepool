@@ -66,7 +66,16 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
 - **Pulumi (TypeScript)** for infra, **not OpenTofu** — stack unity + shared types; **state in Hetzner
   Object Storage (S3, bucket `tidepool-pulumi-state`)**, self-managed and encrypted by the stack
   passphrase. Still declarative + CI-applied (`pulumi up` in Actions) → GitOps tenet intact.
-- **`bun:sqlite` + Drizzle** (or `@effect/sql-sqlite`) for the typed ticket store + migrations.
+- **Datastore = CloudNativePG (Postgres).** Runtime state (tickets/transcripts/usage) lives in a CNPG
+  `Cluster` `tidepool-pg` (`instances: 1`; DSN `tidepool-pg-rw.tidepool.svc:5432`) on `hcloud-volumes`
+  PVCs (data + WAL), with daily `ScheduledBackup` → Hetzner S3 via the Barman Cloud **plugin** (CNPG
+  1.30 dropped the in-tree store; the plugin needs cert-manager). The backup bucket
+  (`tidepool-pg-backups`) is **Pulumi-managed** — an `aws.s3.Bucket` under an `aws.Provider` aimed at
+  the Hetzner S3 endpoint (creds from the ambient sops-decrypted env, never in state), so there is **no
+  hand-created prerequisite** (tenet 2). Single instance now, **HA one field
+  away** (`instances: 3`) — no schema change. Infra lands PR-5b; the app driver swaps
+  `@effect/sql-sqlite-bun`→`@effect/sql-pg` at the PR-6 cutover (the dead `drizzle-orm`/`drizzle-kit`
+  deps get deleted then too). `@effect/sql` layer + prefixed-id domain types are unchanged.
 - **`mise`** pins bun/opencode/pulumi versions identically across local + CI + box (env parity).
 - **Bun `$`** for git/ssh/hetzner shelling; **Octokit** for the GitHub `Forge`.
 - Next session: pin exact versions (`npm view`), then build `src/` on this stack from line 1.

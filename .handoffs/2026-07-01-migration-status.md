@@ -19,7 +19,7 @@ Live tracker for the k8s/AgentWorker migration (goal: `.handoffs/GOAL-k8s-migrat
 
 ## Calum prereqs
 **DONE:** `SOPS_AGE_KEY` GH secret (ci key) · `PULUMI_CONFIG_PASSPHRASE` moved OUT of GH → sops (GH secret deleted) · `pulumi_config_passphrase` sealed (ci+breakglass) · S3 `updatekeys` granted ci · `tidepool-pulumi-state` bucket exists (nbg1) · **`production` GH Environment created w/ Calum required-reviewer** · **admin `/32` set in `infra/pulumi/cluster/Pulumi.production.yaml` = Calum's NordVPN dedicated static IP** (⚠️ admin kubectl/talosctl requires being connected to that Nord IP; if Nord reassigns it, update the config) · upsert-stack fix landed, preview GREEN.
-**REMAINING:** just **approve the `pulumi up`** at the `production` gate once 5a merges (~€36/mo) — every future infra `pulumi up` also needs this click (rare; not per-ticket). **Later (5b):** pre-create `tidepool-pg-backups` bucket.
+**REMAINING:** just **approve the `pulumi up`** at the `production` gate once 5a merges (~€36/mo) — every future infra `pulumi up` also needs this click (rare; not per-ticket). **5b:** the `tidepool-pg-backups` bucket is now **Pulumi-managed** (aws.s3.Bucket → Hetzner S3), so no manual pre-create — it's created by the same gated `pulumi up`.
 **IN PROGRESS:** 5a (#39) update-branched onto main, CI re-running → merge on green → up-job prompts Calum.
 
 ## Then (orchestrator resumes)
