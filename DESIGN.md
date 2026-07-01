@@ -22,7 +22,7 @@ Secrets via **sops + age**. You drive it with the **`tp`** CLI.
 ```
 laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main box (always-on, thin)
                                                          │  reconciler + sqlite + transcripts
-  tp ls / tp logs ──(SSH tunnel; later Tailscale)──────▶ │
+  tp ticket list/get/logs ──(port-forward; later Tailscale)▶ │
                                                          │ tickets queued & capacity<cap
                                                          ▼
                                           BoxMaker → ephemeral worker (0→3, self-destruct)
@@ -199,7 +199,8 @@ everything upstream). Two levels:
   (Reversed the earlier "backlog = markdown in git" idea: it split state across file+DB, made
   done-ness ambiguous, and gave files a churny move/delete lifecycle. Markdown can't hold deps/
   comments/relations — a dead end for a system we want to *beef up*. So: DB, not files.)
-  - **Created** via `tp ticket add` (writes a row); later optionally a small API.
+  - **Created** via `tp ticket add` → the `QueueControl` seam (in-process locally, or the daemon's
+    HTTP API remotely); the reconciler is still the only mover.
   - **Done** = a DB state transition the reconciler makes after auto-merge (review ✅ + CI ✅ +
     merged), recording pr id + merge SHA + usage. Not "a file moved." Queryable.
   - **Beefable** — deps, comments, priority, attempts, retries, links = columns/tables.
@@ -303,8 +304,23 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   reconciler resumes polling existing work handles on restart.
 
 ### Surface & cost visibility
-- **CLI-first, AXI-compliant; no TUI in v1.** `tp add | ls | logs | transcript | trace | cost`. AXI
-  skill installed at `.agents/skills/axi/` (shared across opencode + claude). TUI is a later skin.
+- **CLI-first, AXI-compliant; no TUI in v1.** `tp ticket add | list | get | logs | transcript`
+  (`get` merges the old `trace`+`cost` into one detail view). AXI skill installed at
+  `.agents/skills/axi/` (shared across opencode + claude). TUI is a later skin.
+- **Queue control — `tp` is a client, the daemon is the mover.** `tp` speaks a narrow `QueueControl`
+  seam (`src/queue-control.ts`): read + enqueue only (`add`/`list`/`get`/`runsFor`/`events`). The
+  reconciler's mover methods (`patch`/`addRun`/`appendEvents`) are *not* in that interface, so no
+  client can move ticket state over the wire (tenet 3). Two adapters satisfy the tag, chosen by the
+  active client context: **`sqlite`** (in-process store, for dev/tests) and **`http`** (an
+  `@effect/platform` `HttpApiClient` → the daemon's queue API, `src/queue-api.ts`). The daemon
+  (`src/daemon.ts`) runs the reconcile loop *and* serves that API on one pg-backed store. Every
+  collection response is the uniform envelope `{ items, nextCursor }` + `limit` (no bare arrays).
+  `add` validates its `--target` against the configured repos and rejects unknown ones
+  (`TargetNotConfigured`) — the target set in `tidepool.config.ts` is the repo universe (tenet 1).
+- **Client contexts (per-operator, not git).** Which backend `tp` drives lives in `~/.tidepool/config`
+  (kubectl/hcloud-style named contexts + `current-context`), never in `tidepool.config.ts` (that's
+  declarative shared app config — tenet 1/2). Resolution order: `--context` flag > `TIDEPOOL_API_URL`
+  / `TIDEPOOL_CONTEXT` env > file `current-context` > built-in `local` (sqlite).
 - **`tp trace <ticket>`** reconstructs a ticket's lifecycle from `run_events` (+ `runs`): a
   ts-ordered timeline with phase labels (`in_progress`/`review`/`failed`), the work/review runs with
   `box_id`/provider, and inter-event durations. **A browser/web view over the same data is a
@@ -317,8 +333,17 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
 
 ### Connectivity & security
 - **v1 floor:** deny-all-inbound firewall except key-only SSH (ideally IP-pinned); reconciler is
-  **outbound-only** (no public listen port). `tp ls/logs` over SSH tunnel. Small attack surface.
-- **v1.1:** **Tailscale** the main box → `tp` over the tailnet, drop public SSH. (You have it.)
+  **outbound-only** (no public listen port). Small attack surface.
+- **Reaching the queue API from a laptop (tenet 9 — no public inbound).** The daemon serves the
+  queue-control API on a **ClusterIP** Service (`tidepool-control-plane:8080`) — no LoadBalancer, no
+  Ingress. `tp`'s `http` context reaches it via `kubectl port-forward` through the already-/32-
+  firewalled apiserver, so nothing new is exposed. A context can declare the forward
+  (`namespace`/`service`/`remote-port`/`local-port`) and `tp` opens it **invisibly** per command —
+  the operator never runs the tunnel by hand. **No app-level auth in v1**: reaching the port already
+  requires kube creds + the VPN /32, so reachability *is* the auth (marked `TODO(tailscale)` in the
+  server).
+- **v1.1:** **Tailscale** the box → `tp` over the tailnet (a direct address, no per-command forward),
+  drop public SSH; add a bearer token to the queue API at that point. (You have it.)
 - Firewall is declarative (Pulumi).
 - **Operator kubectl access:** the cluster kubeconfig is a *secret output* of the
   `tidepool-cluster` Pulumi stack; `bun run kube` (`infra/scripts/tp-kubeconfig.sh`) decrypts the
@@ -418,6 +443,13 @@ hourly-only-when-up). State backend = Hetzner Object Storage (S3, `tidepool-pulu
 
 plan/decompose agent · auto-scale >3 · multi-repo · TUI · Tailscale · dedicated GitHub identity ·
 self-bootstrap flip · cost analytics UI · Temporal (only if reconciler hurts) · Crabbox→direct-Hetzner.
+
+**User-facing `cancel` / `retry` verbs — deferred, not built (decision pending).** Today both exist
+only as reconciler-internal automation (the deadline reaper's `AgentWorker.cancel`, and
+`retryOrFail`); there is no `tp ticket cancel/retry`. Adding them cleanly means an intent/desired-state
+seam — the CLI writes desired intent, the reconciler observes and performs the transition — so the
+"only mover" invariant (tenet 3) holds. Whether they're wanted at all is an open call; `QueueControl`
+stays read+enqueue until then.
 
 ## 6. Open items (pending research workflow → RESEARCH.md)
 
