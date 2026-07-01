@@ -48,6 +48,13 @@ export const SA_CA_CERT_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/ca
  */
 export const OPENCODE_MOUNT_DIR = '/root/.tidepool/bootstrap';
 export const OPENCODE_FILE = 'opencode-auth.json';
+/**
+ * Port the daemon serves the queue-control HTTP API on. Exposed only via a
+ * ClusterIP Service (see workloads.ts) reached by `kubectl port-forward` through
+ * the /32-firewalled apiserver — never a LoadBalancer/public ingress (tenet 9).
+ */
+export const API_PORT = 8080;
+export const API_PORT_NAME = 'queue-api';
 
 const LABELS = { 'app.kubernetes.io/name': CONTROL_PLANE_SA, 'app.kubernetes.io/part-of': 'tidepool' };
 const OPENCODE_VOLUME = 'opencode-auth';
@@ -92,6 +99,8 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
               { name: 'NODE_EXTRA_CA_CERTS', value: SA_CA_CERT_PATH },
             ],
             volumeMounts: [{ name: OPENCODE_VOLUME, mountPath: OPENCODE_MOUNT_DIR, readOnly: true }],
+            // The queue-control HTTP API (reached via port-forward, tenet 9).
+            ports: [{ name: API_PORT_NAME, containerPort: API_PORT }],
             // CPU request but NO cpu limit (bursty boot/migrate); mem request==limit
             // — the same tenet-6 shape the agent-worker Jobs use.
             resources: {

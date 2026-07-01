@@ -1,9 +1,13 @@
 #!/usr/bin/env bun
-import { BunContext, BunRuntime } from '@effect/platform-bun';
-import { Effect, Logger } from 'effect';
+import { Etag, HttpApiBuilder, HttpPlatform } from '@effect/platform';
+import { BunContext, BunHttpServer, BunRuntime } from '@effect/platform-bun';
+import { Effect, Layer, Logger } from 'effect';
 import type { AppConfig } from './config.ts';
+import { queueApi } from './queue-api.ts';
+import { QueueApiLive } from './queue-api-server.ts';
+import { LocalQueueControl } from './queue-control.ts';
 import { reconcileForever } from './reconciler.ts';
-import { liveStack } from './runtime.ts';
+import { AppConfigLive, liveStack, ticketStoreLive } from './runtime.ts';
 import type { AgentWorker, Forge, TicketStore } from './services.ts';
 
 /**
@@ -23,10 +27,36 @@ export const makeDaemon = (): Effect.Effect<
   TicketStore | Forge | AgentWorker | AppConfig
 > => reconcileForever();
 
-if (import.meta.main) {
-  const program = Effect.scoped(makeDaemon().pipe(Effect.provide(liveStack()))).pipe(
-    Effect.provide(BunContext.layer),
-    Effect.provide(Logger.json),
+/**
+ * The queue-control HTTP server (`QueueControl` over the durable store), served
+ * on `TIDEPOOL_API_PORT` (default 8080). Reached only via `kubectl port-forward`
+ * through the /32-firewalled apiserver — no public inbound, no app auth in v1
+ * (tenet 9). The server's store connection is independent of the reconciler's;
+ * both point at the same DSN (single source of truth is the store, not the pool).
+ */
+const apiServerLive = () => {
+  const apiPort = Number(process.env.TIDEPOOL_API_PORT ?? '8080');
+  const queueLocal = LocalQueueControl.pipe(
+    Layer.provide(Layer.merge(ticketStoreLive(), AppConfigLive)),
   );
+  const apiLayer = HttpApiBuilder.api(queueApi).pipe(
+    Layer.provide(QueueApiLive),
+    Layer.provide(queueLocal),
+  );
+  return HttpApiBuilder.serve().pipe(
+    Layer.provide(apiLayer),
+    Layer.provide(Layer.mergeAll(HttpPlatform.layer, Etag.layer)),
+    Layer.provide(BunHttpServer.layer({ port: apiPort })),
+  );
+};
+
+if (import.meta.main) {
+  // Run the reconcile loop and the HTTP API concurrently over the live stack.
+  const program = Effect.scoped(
+    Effect.all([Layer.launch(apiServerLive()), makeDaemon().pipe(Effect.provide(liveStack()))], {
+      concurrency: 'unbounded',
+      discard: true,
+    }),
+  ).pipe(Effect.provide(BunContext.layer), Effect.provide(Logger.json));
   BunRuntime.runMain(program, { disablePrettyLogger: true });
 }

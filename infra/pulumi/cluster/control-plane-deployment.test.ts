@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  API_PORT,
+  API_PORT_NAME,
   buildControlPlaneDeploymentSpec,
   CONTROL_PLANE_SA,
   CONTROL_PLANE_SECRET,
@@ -43,6 +45,7 @@ const spec = buildControlPlaneDeploymentSpec(IMAGES) as {
           valueFrom?: { secretKeyRef?: { name: string; key: string } };
         }>;
         volumeMounts: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
+        ports?: Array<{ name: string; containerPort: number }>;
       }>;
       volumes: Array<{
         name: string;
@@ -67,6 +70,10 @@ describe('buildControlPlaneDeploymentSpec — singleton reconciler', () => {
 
   it('runs as the least-privilege control-plane ServiceAccount', () => {
     expect(spec.template.spec.serviceAccountName).toBe(CONTROL_PLANE_SA);
+  });
+
+  it('exposes the queue-control API port for the ClusterIP Service', () => {
+    expect(container.ports).toContainEqual({ name: API_PORT_NAME, containerPort: API_PORT });
   });
 
   it('selector matches the pod template labels (a valid Deployment)', () => {

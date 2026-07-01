@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Schema } from 'effect';
+import { Context, Effect, Layer, Schema } from 'effect';
 import { AppConfig, configuredRepos } from './config.ts';
 import type { NewTicket, Run, Ticket, TicketNotFound } from './domain.ts';
 import { type RunEvent, RunSource } from './domain.ts';
@@ -45,10 +45,10 @@ export const EventsQuery = Schema.Struct({
 export type EventsQuery = typeof EventsQuery.Type;
 
 /** `add` rejected — the target repo is not declared in `tidepool.config.ts`. */
-export class TargetNotConfigured extends Data.TaggedError('TargetNotConfigured')<{
-  readonly repo: string;
-  readonly configured: ReadonlyArray<string>;
-}> {}
+export class TargetNotConfigured extends Schema.TaggedError<TargetNotConfigured>()(
+  'TargetNotConfigured',
+  { repo: Schema.String, configured: Schema.Array(Schema.String) },
+) {}
 
 export interface QueueControlApi {
   readonly add: (input: NewTicket) => Effect.Effect<Ticket, TargetNotConfigured>;

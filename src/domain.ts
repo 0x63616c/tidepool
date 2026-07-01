@@ -176,6 +176,6 @@ export class CredentialError extends Data.TaggedError('CredentialError')<{
 }> {}
 
 /** Looked-up ticket not present in the store. */
-export class TicketNotFound extends Data.TaggedError('TicketNotFound')<{
-  readonly id: string;
-}> {}
+export class TicketNotFound extends Schema.TaggedError<TicketNotFound>()('TicketNotFound', {
+  id: Schema.String,
+}) {}
