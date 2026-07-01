@@ -1,7 +1,6 @@
-import { Context, type Effect, type Scope } from 'effect';
+import { Context, Data, type Effect } from 'effect';
 import type {
   AgentFailed,
-  BoxFailed,
   CIStatus,
   ForgeError,
   MergeConflict,
@@ -13,13 +12,14 @@ import type {
   RunSource,
   Ticket,
   Usage,
+  WorkHandle,
 } from './domain.ts';
-import type { BoxId, PrId, RunId, TicketId } from './ids.ts';
+import type { PrId, RunId, TicketId } from './ids.ts';
 
 /**
- * The four deep modules. Each is a single `Context.Tag` (narrow front); real
- * and `Fake*` implementations are just swapped `Layer`s. Hetzner / GitHub /
- * opencode types never leak across these seams.
+ * The deep modules. Each is a single `Context.Tag` (narrow front); real and
+ * `Fake*` implementations are just swapped `Layer`s. Hetzner / GitHub / opencode
+ * / k8s types never leak across these seams.
  */
 
 // ── TicketStore: the durable single source of truth (tickets + runs) ─────────
@@ -27,7 +27,16 @@ import type { BoxId, PrId, RunId, TicketId } from './ids.ts';
 export type TicketPatch = Partial<
   Pick<
     Ticket,
-    'state' | 'branch' | 'prNumber' | 'prId' | 'mergeSha' | 'attempts' | 'workedAttempt' | 'reason'
+    | 'state'
+    | 'branch'
+    | 'prNumber'
+    | 'prId'
+    | 'mergeSha'
+    | 'attempts'
+    | 'workedAttempt'
+    | 'reason'
+    | 'workHandle'
+    | 'dispatchedAt'
   >
 >;
 
@@ -86,49 +95,13 @@ export interface ForgeApi {
 
 export class Forge extends Context.Tag('Forge')<Forge, ForgeApi>() {}
 
-// ── BoxMaker: ephemeral compute (direct Hetzner API; Local/Fake for A & B) ───
-
-export type BoxRole = 'worker' | 'management';
-
-export interface Box {
-  readonly id: BoxId;
-  readonly ip: string;
-  readonly role: BoxRole;
-  /** Identifies the provisioner — 'hetzner' for real cloud, 'local' for LocalBoxMaker. */
-  readonly provider: 'hetzner' | 'local';
-}
-
-export interface BoxSpec {
-  readonly type: string;
-  readonly locations: ReadonlyArray<string>;
-  readonly ttlSec: number;
-  /**
-   * Opaque key/value tags applied to the provisioned box (e.g. `{ ticket }`) so
-   * a live box is traceable to its work. The `BoxMaker` treats them as strings —
-   * it never interprets them, keeping the seam provider-agnostic.
-   */
-  readonly labels?: Record<string, string>;
-}
-
-export interface BoxMakerApi {
-  /**
-   * Lease a worker box inside the caller's `Scope`. `acquireRelease` guarantees
-   * the box is DELETEd on scope close — even on crash/defect (spend guardrail L3).
-   */
-  readonly lease: (spec: BoxSpec) => Effect.Effect<Box, BoxFailed, Scope.Scope>;
-  /** Reaper: destroy orphaned / over-TTL worker boxes. Never touches management. */
-  readonly reap: () => Effect.Effect<{ readonly deleted: ReadonlyArray<BoxId> }, BoxFailed>;
-}
-
-export class BoxMaker extends Context.Tag('BoxMaker')<BoxMaker, BoxMakerApi>() {}
-
-// ── AgentRunner: drives opencode (real) / scripted results (fake) ────────────
+// ── AgentWorker: async dispatch+poll of agent-workers (work | review) ────────
 
 /**
  * Title/body are owned by the agent; the branch name is owned by the reconciler.
- * The optional capture fields carry the observability payload back from the box
- * (opaque to this seam — `transcript` stays `unknown[]` so no opencode type leaks,
- * tenet 4); the reconciler persists them as `RunEvent`s.
+ * The optional capture fields carry the observability payload back from the
+ * worker (opaque to this seam — `transcript` stays `unknown[]` so no opencode
+ * type leaks, tenet 4); the reconciler persists them as `RunEvent`s.
  */
 export interface WorkResult {
   readonly title: string;
@@ -146,31 +119,66 @@ export interface ReviewResult {
   readonly transcript?: ReadonlyArray<unknown>;
 }
 
-export interface AgentRunnerApi {
+/**
+ * What a finished agent-worker produced. A union (not just `WorkResult`) because
+ * the review agent yields a verdict, not a work result — `poll`'s `Succeeded`
+ * carries whichever matches the dispatched `kind`.
+ */
+export type DispatchOutcome = Data.TaggedEnum<{
+  readonly Work: { readonly result: WorkResult };
+  readonly Review: { readonly result: ReviewResult };
+}>;
+export const DispatchOutcome = Data.taggedEnum<DispatchOutcome>();
+
+/**
+ * The lifecycle of one dispatched agent-worker, observed via `poll`. `Running`
+ * = still in flight (wait, re-poll next tick); `Succeeded` = finished cleanly,
+ * harvest the outcome; `Failed` = the worker errored (the reconciler classifies
+ * `reason` into retry vs rate-cap, mirroring the old in-process mapping).
+ */
+export type WorkStatus = Data.TaggedEnum<{
+  readonly Running: object;
+  readonly Succeeded: { readonly outcome: DispatchOutcome };
+  readonly Failed: { readonly reason: string };
+}>;
+export const WorkStatus = Data.taggedEnum<WorkStatus>();
+
+/**
+ * What to dispatch. Tagged on `kind` so work (needs `base`/`branch`) and review
+ * (needs `prNumber`) carry exactly their own fields — both run as agent-workers,
+ * the only difference the control-plane sees is this discriminant.
+ */
+export type DispatchInput =
+  | {
+      readonly kind: 'work';
+      readonly ticket: Ticket;
+      readonly repo: string;
+      readonly base: string;
+      readonly branch: string;
+      readonly model: string;
+    }
+  | {
+      readonly kind: 'review';
+      readonly ticket: Ticket;
+      readonly repo: string;
+      readonly prNumber: number;
+      readonly model: string;
+    };
+
+export interface AgentWorkerApi {
   /**
-   * Run the work agent on `box`: clone `repo`, branch `branch` off `base`,
-   * implement the ticket goal, commit, and push `branch` to the forge.
+   * Launch an agent-worker for `input` and return its opaque `WorkHandle` (stored
+   * on the ticket as the reattach handle). Fire-and-forget: the work runs out of
+   * band and is observed via `poll`. A failure to *launch* (or, for synchronous
+   * adapters, the agent itself) surfaces here as `AgentFailed | RateCapped`.
    */
-  readonly work: (input: {
-    readonly box: Box;
-    readonly ticket: Ticket;
-    readonly repo: string;
-    readonly base: string;
-    readonly branch: string;
-    readonly model: string;
-  }) => Effect.Effect<WorkResult, AgentFailed | RateCapped>;
-  /**
-   * Run the review agent on `box`: fetch the open PR's diff and grade it against
-   * the ticket goal. Runs on a leased worker box exactly like `work`, so opencode
-   * and its auth never need to live on the control box (FIX 1).
-   */
-  readonly review: (input: {
-    readonly box: Box;
-    readonly ticket: Ticket;
-    readonly repo: string;
-    readonly prNumber: number;
-    readonly model: string;
-  }) => Effect.Effect<ReviewResult, AgentFailed | RateCapped>;
+  readonly dispatch: (input: DispatchInput) => Effect.Effect<WorkHandle, AgentFailed | RateCapped>;
+  /** Observe a dispatched worker: `Running` / `Succeeded{outcome}` / `Failed{reason}`. */
+  readonly poll: (handle: WorkHandle) => Effect.Effect<WorkStatus, AgentFailed>;
+  /** Stop a worker (deadline reaper / abandon). Idempotent — a gone worker is success. */
+  readonly cancel: (handle: WorkHandle) => Effect.Effect<void>;
+  /** Sweep finished / orphaned workers (label-selector + TTL under k8s). */
+  readonly reap: () => Effect.Effect<{ readonly cancelled: ReadonlyArray<WorkHandle> }>;
 }
 
-export class AgentRunner extends Context.Tag('AgentRunner')<AgentRunner, AgentRunnerApi>() {}
+export class AgentWorker extends Context.Tag('AgentWorker')<AgentWorker, AgentWorkerApi>() {}

@@ -5,10 +5,38 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createOpencodeClient, createOpencodeServer } from '@opencode-ai/sdk';
 import { $ } from 'bun';
-import { Effect, Layer, Schema } from 'effect';
+import { Effect, Schema } from 'effect';
 import { AgentFailed, RateCapped, type ReviewVerdict, type Ticket, type Usage } from './domain.ts';
-import { githubToken, parseRepo } from './forge.ts';
-import { AgentRunner, type AgentRunnerApi, type WorkResult } from './services.ts';
+import { parseRepo } from './forge.ts';
+import type { ReviewResult, WorkResult } from './services.ts';
+
+/**
+ * The local opencode driver, behind the `AgentWorker` seam (not a `Context.Tag`
+ * itself). `LocalAgentWorker` calls this to run an agent on this machine; the
+ * dead SSH remote-work path (`box.ip !== '127.0.0.1'`) is retired in PR-7.
+ */
+export interface OpencodeWorkInput {
+  readonly box: { readonly ip: string };
+  readonly ticket: Ticket;
+  readonly repo: string;
+  readonly base: string;
+  readonly branch: string;
+  readonly model: string;
+}
+export interface OpencodeReviewInput {
+  readonly box: { readonly ip: string };
+  readonly ticket: Ticket;
+  readonly repo: string;
+  readonly prNumber: number;
+  readonly model: string;
+}
+export interface OpencodeRunner {
+  readonly work: (input: OpencodeWorkInput) => Effect.Effect<WorkResult, AgentFailed | RateCapped>;
+  readonly review: (
+    input: OpencodeReviewInput,
+  ) => Effect.Effect<ReviewResult, AgentFailed | RateCapped>;
+}
+
 import { ReviewRunnerResult, RunnerResult } from './worker/protocol.ts';
 import { preCommitCommands } from './worker/runner-core.ts';
 import { parseUsage } from './worker/usage.ts';
@@ -415,8 +443,8 @@ const runAgent = async (params: {
   }
 };
 
-/** Build the `AgentRunnerApi` over a GitHub push token. */
-export const makeOpencodeAgentRunner = (token: string): AgentRunnerApi => {
+/** Build the local opencode `OpencodeRunner` over a GitHub push token. */
+export const makeOpencodeAgentRunner = (token: string): OpencodeRunner => {
   const cloneUrl = (repo: string) => `https://x-access-token:${token}@github.com/${repo}.git`;
   return {
     work: (input) =>
@@ -494,9 +522,3 @@ export const makeOpencodeAgentRunner = (token: string): AgentRunnerApi => {
       }),
   };
 };
-
-/** Live `AgentRunner` layer — real opencode + git behind the locked interface. */
-export const OpencodeAgentRunnerLive: Layer.Layer<AgentRunner, never> = Layer.effect(
-  AgentRunner,
-  Effect.map(githubToken.pipe(Effect.orDie), makeOpencodeAgentRunner),
-);

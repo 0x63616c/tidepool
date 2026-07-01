@@ -1,18 +1,26 @@
 import { Effect, Layer, Ref } from 'effect';
 import {
   AgentFailed,
-  BoxFailed,
   type CIStatus,
   MergeConflict,
+  makeWorkHandle,
   RateCapped,
   type ReviewVerdict,
   type Run,
   type RunEvent,
   type Ticket,
   TicketNotFound,
+  type WorkHandle,
 } from './domain.ts';
-import { newBoxId, newPrId, newTicketId, type TicketId } from './ids.ts';
-import { AgentRunner, BoxMaker, Forge, TicketStore, type TicketStoreApi } from './services.ts';
+import { newPrId, newTicketId, type TicketId } from './ids.ts';
+import {
+  AgentWorker,
+  DispatchOutcome,
+  Forge,
+  TicketStore,
+  type TicketStoreApi,
+  WorkStatus,
+} from './services.ts';
 
 /**
  * Fakes-first dev loop: the whole reconciler runs locally, fast, free against
@@ -47,6 +55,8 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
           attempts: 0,
           workedAttempt: null,
           reason: null,
+          workHandle: null,
+          dispatchedAt: null,
         };
         return [ticket, [...cur, ticket]];
       }),
@@ -122,41 +132,13 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
     }),
   );
 
-// ── FakeBoxMaker — scoped lease, optional live-count probe ────────────────────
+// ── FakeAgentWorker — scripted dispatch+poll, no real agent ──────────────────
 
-export interface FakeBoxMakerOptions {
-  /** Increment on acquire, decrement on release — assert it returns to 0 (L3). */
-  readonly live?: Ref.Ref<number>;
-  /** Fail the lease with `BoxFailed` to drive the provisioning-failure path. */
-  readonly failLease?: boolean;
-}
-
-export const fakeBoxMaker = (opts: FakeBoxMakerOptions = {}): Layer.Layer<BoxMaker> =>
-  Layer.succeed(BoxMaker, {
-    lease: () =>
-      opts.failLease
-        ? Effect.fail(new BoxFailed({ reason: 'capacity' }))
-        : Effect.acquireRelease(
-            Effect.gen(function* () {
-              if (opts.live) yield* Ref.update(opts.live, (n) => n + 1);
-              return {
-                id: newBoxId(),
-                ip: '10.0.0.2',
-                role: 'worker' as const,
-                provider: 'local' as const,
-              };
-            }),
-            () => (opts.live ? Ref.update(opts.live, (n) => n - 1) : Effect.void),
-          ),
-    reap: () => Effect.succeed({ deleted: [] }),
-  });
-
-// ── FakeAgentRunner — scripted work/review + usage ───────────────────────────
-
-export interface FakeAgentRunnerOptions {
+export interface FakeAgentWorkerOptions {
   readonly verdict?: ReviewVerdict;
   readonly tokensIn?: number;
   readonly tokensOut?: number;
+  /** Make `dispatch` fail synchronously (mirrors today's in-process failure path). */
   readonly failWork?: 'rate' | 'agent';
   /** Capture payloads to attach to the WorkResult (drive the obs-event path). */
   readonly transcript?: ReadonlyArray<unknown>;
@@ -164,32 +146,77 @@ export interface FakeAgentRunnerOptions {
   readonly cloudInitLog?: string;
   /** Capture payload to attach to the ReviewResult. */
   readonly reviewTranscript?: ReadonlyArray<unknown>;
+  /** Force `poll` to report the worker still in flight (drives the wait + reaper paths). */
+  readonly stuckRunning?: boolean;
+  /** Force `poll` to report a worker-side failure (drives the async `Failed` branch). */
+  readonly pollFails?: string;
 }
 
-export const fakeAgentRunner = (opts: FakeAgentRunnerOptions = {}): Layer.Layer<AgentRunner> =>
-  Layer.succeed(AgentRunner, {
-    work: (input) => {
-      if (opts.failWork === 'rate') return Effect.fail(new RateCapped({}));
-      if (opts.failWork === 'agent') return Effect.fail(new AgentFailed({ reason: 'fake' }));
-      return Effect.succeed({
-        title: `feat: ${input.ticket.title} (${input.ticket.id})`,
-        body: input.ticket.goal,
-        commitSha: 'deadbeef',
-        usage: {
-          model: input.model,
-          tokensIn: opts.tokensIn ?? 100,
-          tokensOut: opts.tokensOut ?? 50,
-          wallTimeSec: 1,
+/**
+ * Scripted `AgentWorker` for tests. `dispatch` records the outcome it would
+ * produce under a fresh handle (or fails synchronously, exactly like the old
+ * in-process runner); `poll` replays it as `Succeeded` immediately — so the
+ * suite stays green with no k8s. `stuckRunning` / `pollFails` exercise the new
+ * async `Running` / `Failed` poll branches.
+ */
+export const fakeAgentWorker = (opts: FakeAgentWorkerOptions = {}): Layer.Layer<AgentWorker> =>
+  Layer.effect(
+    AgentWorker,
+    Effect.gen(function* () {
+      const outcomes = yield* Ref.make(new Map<WorkHandle, DispatchOutcome>());
+      const counter = yield* Ref.make(0);
+      return {
+        dispatch: (input) => {
+          if (opts.failWork === 'rate') return Effect.fail(new RateCapped({}));
+          if (opts.failWork === 'agent') return Effect.fail(new AgentFailed({ reason: 'fake' }));
+          const outcome: DispatchOutcome =
+            input.kind === 'work'
+              ? DispatchOutcome.Work({
+                  result: {
+                    title: `feat: ${input.ticket.title} (${input.ticket.id})`,
+                    body: input.ticket.goal,
+                    commitSha: 'deadbeef',
+                    usage: {
+                      model: input.model,
+                      tokensIn: opts.tokensIn ?? 100,
+                      tokensOut: opts.tokensOut ?? 50,
+                      wallTimeSec: 1,
+                    },
+                    ...(opts.transcript === undefined ? {} : { transcript: opts.transcript }),
+                    ...(opts.workerStderr === undefined ? {} : { workerStderr: opts.workerStderr }),
+                    ...(opts.cloudInitLog === undefined ? {} : { cloudInitLog: opts.cloudInitLog }),
+                  },
+                })
+              : DispatchOutcome.Review({
+                  result: {
+                    verdict: opts.verdict ?? 'approve',
+                    usage: { model: input.model, tokensIn: 20, tokensOut: 10, wallTimeSec: 0.5 },
+                    ...(opts.reviewTranscript === undefined
+                      ? {}
+                      : { transcript: opts.reviewTranscript }),
+                  },
+                });
+          return Effect.gen(function* () {
+            const n = yield* Ref.updateAndGet(counter, (c) => c + 1);
+            const handle = makeWorkHandle(`wh_fake_${input.kind}_${n}`);
+            yield* Ref.update(outcomes, (m) => new Map(m).set(handle, outcome));
+            return handle;
+          });
         },
-        ...(opts.transcript === undefined ? {} : { transcript: opts.transcript }),
-        ...(opts.workerStderr === undefined ? {} : { workerStderr: opts.workerStderr }),
-        ...(opts.cloudInitLog === undefined ? {} : { cloudInitLog: opts.cloudInitLog }),
-      });
-    },
-    review: (input) =>
-      Effect.succeed({
-        verdict: opts.verdict ?? 'approve',
-        usage: { model: input.model, tokensIn: 20, tokensOut: 10, wallTimeSec: 0.5 },
-        ...(opts.reviewTranscript === undefined ? {} : { transcript: opts.reviewTranscript }),
-      }),
-  });
+        poll: (handle) => {
+          if (opts.stuckRunning) return Effect.succeed(WorkStatus.Running());
+          if (opts.pollFails !== undefined)
+            return Effect.succeed(WorkStatus.Failed({ reason: opts.pollFails }));
+          return Effect.map(Ref.get(outcomes), (m) => {
+            const outcome = m.get(handle);
+            return outcome === undefined
+              ? WorkStatus.Failed({ reason: `unknown handle ${handle}` })
+              : WorkStatus.Succeeded({ outcome });
+          });
+        },
+        cancel: (handle) =>
+          Ref.update(outcomes, (m) => new Map([...m].filter(([h]) => h !== handle))),
+        reap: () => Effect.succeed({ cancelled: [] }),
+      };
+    }),
+  );

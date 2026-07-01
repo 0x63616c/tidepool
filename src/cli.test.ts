@@ -2,7 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import { Duration, Effect, Fiber, Layer, TestClock } from 'effect';
 import { runProgram } from './cli.ts';
 import { AppConfig, type Config, defineConfig } from './config.ts';
-import { fakeAgentRunner, fakeBoxMaker, fakeForge, makeInMemoryStore } from './fakes.ts';
+import { fakeAgentWorker, fakeForge, makeInMemoryStore } from './fakes.ts';
 import { TicketStore, type TicketStoreApi } from './services.ts';
 
 /**
@@ -24,8 +24,7 @@ const env = (store: TicketStoreApi) =>
     Layer.succeed(TicketStore, store),
     Layer.succeed(AppConfig, testConfig),
     fakeForge({ ci: 'green' }),
-    fakeAgentRunner({ verdict: 'approve' }),
-    fakeBoxMaker(),
+    fakeAgentWorker({ verdict: 'approve' }),
   );
 
 describe('runProgram', () => {

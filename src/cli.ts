@@ -12,7 +12,7 @@ import { RunId, TicketId } from './ids.ts';
 import { initStateBucket } from './object-storage.ts';
 import { reconcileForever, settle } from './reconciler.ts';
 import { AppConfigLive, LiveStack, SqliteTicketStore } from './runtime.ts';
-import { type AgentRunner, type BoxMaker, type Forge, TicketStore } from './services.ts';
+import { type AgentWorker, type Forge, TicketStore } from './services.ts';
 import { costReport, traceReport } from './trace.ts';
 import { BunCommandRunner, DEFAULT_BOOTSTRAP_DIR, up } from './up.ts';
 
@@ -115,7 +115,7 @@ const ticketCommand = Command.make('ticket', {}, () =>
  */
 export const runProgram = (
   watch: boolean,
-): Effect.Effect<void, never, TicketStore | Forge | BoxMaker | AgentRunner | AppConfig> =>
+): Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =>
   Effect.gen(function* () {
     const store = yield* TicketStore;
     if (watch) {

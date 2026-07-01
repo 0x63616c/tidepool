@@ -1,10 +1,9 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Effect, Layer } from 'effect';
-import { OpencodeAgentRunnerLive } from './agent-runner.ts';
 import { AppConfig, loadConfig } from './config.ts';
 import { GithubForgeLive } from './forge.ts';
-import { HetznerBoxMakerLive } from './hetzner-box.ts';
+import { LocalAgentWorker } from './local-agent-worker.ts';
 import { TicketStore } from './services.ts';
 import { makeSqliteStore } from './sqlite-store.ts';
 
@@ -46,12 +45,15 @@ export const AppConfigLive = Layer.effect(
   loadConfig(() => import('../tidepool.config.ts')),
 );
 
-/** The full real stack: durable store + GitHub + opencode + real Hetzner workers. */
+/**
+ * The full real stack: durable store + GitHub + the local opencode agent-worker.
+ * Until k8s lands (PR-4/6) `LocalAgentWorker` runs work/review on this machine
+ * behind the async `AgentWorker` seam; the `K8sAgentWorker` Layer swaps in later
+ * with zero reconciler change.
+ */
 export const LiveStack = Layer.mergeAll(
   SqliteTicketStore,
   AppConfigLive,
   GithubForgeLive,
-  OpencodeAgentRunnerLive,
-  // The box maker reads `box.imageId` from config, so feed it AppConfigLive.
-  HetznerBoxMakerLive.pipe(Layer.provide(AppConfigLive)),
+  LocalAgentWorker,
 );

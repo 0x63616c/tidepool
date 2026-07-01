@@ -7,10 +7,15 @@ import { BoxId, PrId, RunId, TicketId } from './ids.ts';
  * with `effect/Schema` (no zod — tenet 10, one way of doing things).
  */
 
-/** Ticket lifecycle. Terminal: `done`, `failed`. `rate_capped` is requeueable. */
+/**
+ * Ticket lifecycle. Terminal: `done`, `failed`. `rate_capped` is requeueable.
+ * `running` = an agent-worker (work or review) has been dispatched and is in
+ * flight; the reconciler polls it each tick (async dispatch+poll model).
+ */
 export const TicketState = Schema.Literal(
   'backlog',
   'in_progress',
+  'running',
   'review',
   'done',
   'failed',
@@ -31,6 +36,17 @@ export type Usage = typeof Usage.Type;
 
 export const AgentKind = Schema.Literal('work', 'review');
 export type AgentKind = typeof AgentKind.Type;
+
+/**
+ * Opaque reattach handle for an in-flight agent-worker, stored on the ticket
+ * while it is `running`. Today a fake/local id; under k8s (PR-4) it is the Job
+ * name. The seam treats it as an opaque string — no provider type leaks (tenet 4).
+ */
+export const WorkHandle = Schema.String.pipe(Schema.brand('WorkHandle'));
+export type WorkHandle = typeof WorkHandle.Type;
+
+/** Brand an opaque string as a `WorkHandle` (any non-empty string is valid). */
+export const makeWorkHandle = Schema.decodeSync(WorkHandle);
 
 export const BoxProvider = Schema.Literal('hetzner', 'local');
 export type BoxProvider = typeof BoxProvider.Type;
@@ -70,6 +86,16 @@ export const Ticket = Schema.Struct({
   workedAttempt: Schema.NullOr(Schema.Int),
   /** Human-readable why-it-moved, set on failure/retry/rate-cap. Null while clean. */
   reason: Schema.NullOr(Schema.String),
+  /**
+   * Reattach handle for the in-flight agent-worker — set on `dispatch`, cleared
+   * when the ticket leaves `running`. Non-null iff `state === 'running'`.
+   */
+  workHandle: Schema.NullOr(WorkHandle),
+  /**
+   * Epoch-ms the current work was dispatched; powers the deadline reaper
+   * (`now - dispatchedAt > deadline → cancel`). Non-null iff `state === 'running'`.
+   */
+  dispatchedAt: Schema.NullOr(Schema.Number),
 });
 export type Ticket = typeof Ticket.Type;
 
