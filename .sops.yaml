@@ -2,61 +2,64 @@
 # The recipient ANCHORS below are the access-control matrix: to change who can
 # decrypt a secret, edit that secret's rule and run `sops updatekeys <file>`.
 #
-#   mainbox    — the always-on control plane (private key lives ONLY on the box)
-#   ci         — GitHub Actions (Pulumi-in-CI). Decrypts 5 secrets: hcloud_api_token,
-#                hetzner_s3_credentials, pulumi_config_passphrase, and (PR-6.5,
-#                human-approved tenet-9 widening) forge_github_token +
-#                runner_opencode_auth_json — so `pulumi up` can create the
-#                control-plane k8s Secret. Widening ci must be re-scoped/rotated in
-#                the deferred rotation pass.
+#   ci         — GitHub Actions (Pulumi-in-CI). Decrypts hcloud_api_token,
+#                hetzner_s3_credentials, pulumi_config_passphrase, forge_github_token,
+#                and runner_opencode_auth_json — so `pulumi up` can create the
+#                control-plane k8s Secret that the Deployment mounts.
 #   breakglass — Calum's offline recovery key (recipient of EVERY secret)
 #
+# The old `mainbox` recipient (the always-on Hetzner control-plane box, whose
+# private key lived only on that box) was removed once the box was torn down and
+# the control plane moved to k8s — CI now seeds every runtime secret into the
+# cluster, so nothing decrypts sops on a box anymore.
+#
 # Holds NO secret values (those live in secrets/*.enc.yaml, encrypted). Tenet 9:
-# the master key never leaves the main box; workers get JIT-decrypted creds over SSH.
+# runtime creds are JIT-decrypted by CI and seeded into the in-cluster k8s Secret;
+# no master key leaves this repo's encrypted store.
 
 keys:
-  - &mainbox    age1368zpnurgca5mraqvf3d8d6sl6ctkpxd7ht2mwuvmevpxu74j5tsms9lur
   - &ci         age1c8rzq8txxlq4g6zu0yn46rr9rdzfyn3j5u9d8cxnq2h5w3yrve6sjs3gkc
   - &breakglass age1ewkw53p9v6w44uae75kxnnwnmnt9etqpkems2kjqkyjwldrjju0qe2t4tn
 
 creation_rules:
-  # Hetzner API token — box provisions workers; (future) Pulumi-in-CI. CI-readable.
+  # Hetzner API token — Pulumi-in-CI (cluster provisioning). CI-readable.
   - path_regex: secrets/hcloud_api_token\.enc\.yaml$
     key_groups:
-      - age: [*ci, *mainbox, *breakglass]
+      - age: [*ci, *breakglass]
 
-  # GitHub PAT — reconciler/Forge. CI-readable since PR-6.5: `pulumi up` seeds it
-  # into the control-plane k8s Secret (human-approved tenet-9 widening).
+  # GitHub PAT — reconciler/Forge. CI-readable: `pulumi up` seeds it into the
+  # control-plane k8s Secret.
   - path_regex: secrets/forge_github_token\.enc\.yaml$
     key_groups:
-      - age: [*ci, *mainbox, *breakglass]
+      - age: [*ci, *breakglass]
 
-  # opencode auth.json — AgentRunner subscription credential. CI-readable since
-  # PR-6.5: seeded into the control-plane k8s Secret (human-approved widening).
+  # opencode auth.json — AgentRunner subscription credential. CI-readable: seeded
+  # into the control-plane k8s Secret.
   - path_regex: secrets/runner_opencode_auth_json\.enc\.yaml$
     key_groups:
-      - age: [*ci, *mainbox, *breakglass]
+      - age: [*ci, *breakglass]
 
-  # Shared fleet SSH identity (root on every box + operator laptop). Box-only.
+  # Shared fleet SSH identity. Vestigial post-k8s (no worker boxes to SSH into);
+  # kept recoverable via breakglass only until a follow-up removes it.
   - path_regex: secrets/ssh_tidepool_private_key\.enc\.yaml$
     key_groups:
-      - age: [*mainbox, *breakglass]
+      - age: [*breakglass]
 
-  # Hetzner Object Storage (S3) creds — Pulumi state backend + (PR-5b) CNPG
-  # backups. Pulumi-in-CI reads it, so CI-readable. Above the catch-all.
+  # Hetzner Object Storage (S3) creds — Pulumi state backend + CNPG backups.
+  # Pulumi-in-CI reads it, so CI-readable. Above the catch-all.
   - path_regex: secrets/hetzner_s3_credentials\.enc\.yaml$
     key_groups:
-      - age: [*ci, *mainbox, *breakglass]
+      - age: [*ci, *breakglass]
 
   # Pulumi config passphrase — encrypts the self-managed Pulumi state's secrets.
-  # Read ONLY by Pulumi-in-CI (not the box), so CI-only (least-priv, no mainbox).
+  # Read ONLY by Pulumi-in-CI, so CI + breakglass.
   - path_regex: secrets/pulumi_config_passphrase\.enc\.yaml$
     key_groups:
       - age: [*ci, *breakglass]
 
-  # Catch-all so any NEW secrets/*.enc.* file is at least sealed to box+breakglass
+  # Catch-all so any NEW secrets/*.enc.* file is at least sealed to ci+breakglass
   # until it gets its own explicit rule above. sops uses the FIRST matching rule,
   # so this MUST stay last.
   - path_regex: secrets/.*\.enc\.(yaml|json)$
     key_groups:
-      - age: [*mainbox, *breakglass]
+      - age: [*ci, *breakglass]
