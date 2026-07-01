@@ -45,17 +45,19 @@ jobs:
       - name: create workers namespace
         run: kubectl create namespace tidepool-workers
 
-      - name: start kubectl proxy
-        run: |
-          kubectl proxy --port=8001 &
-          for _ in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8001/healthz && break
-            sleep 1
-          done
-
-      - name: run the k8s e2e
+      # Proxy + test in ONE step: a `&` background process is not guaranteed to
+      # survive into a later step, so keep it alive for the whole test run here.
+      - name: run the k8s e2e (behind kubectl proxy)
         env:
           K8S_E2E: '1'
           K8S_API: http://127.0.0.1:8001
           E2E_IMAGE: tidepool-e2e-stub:e2e
-        run: bun --bun vitest run src/k8s-agent-worker.e2e.test.ts
+        run: |
+          kubectl proxy --port=8001 &
+          proxy=$!
+          trap 'kill $proxy 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8001/healthz && break
+            sleep 1
+          done
+          bun --bun vitest run src/k8s-agent-worker.e2e.test.ts
