@@ -1,6 +1,11 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit } from 'effect';
-import { OpencodeFailed, type OpencodePort, runSession } from './opencode-session.ts';
+import { Effect, Exit, Logger } from 'effect';
+import {
+  describeEvent,
+  OpencodeFailed,
+  type OpencodePort,
+  runSession,
+} from './opencode-session.ts';
 
 /**
  * `runSession` is the deep module over opencode: it owns the embedded server's
@@ -121,5 +126,144 @@ describe('runSession', () => {
     );
     // Scoped finalizer fired on timeout — the embedded server was torn down.
     assert.strictEqual(calls.stopped, 1);
+  });
+
+  it('logs a line per interesting opencode event as the session runs', async () => {
+    // Observability: while the agent works, the collector must surface each
+    // interesting event (tool calls, etc.) on the logger so `kubectl logs`
+    // shows what the pod is doing instead of going silent until completion.
+    const lines: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message }) =>
+        lines.push(Array.isArray(message) ? message.join(' ') : String(message)),
+      ),
+    );
+    const toolEvent = {
+      type: 'message.part.updated',
+      properties: { part: { type: 'tool', tool: 'bash', state: { status: 'running' } } },
+    };
+    const { port } = makeFake({
+      subscribeEvents: async function* () {
+        yield toolEvent;
+        yield idleFor('ses_fake');
+      },
+    });
+    await Effect.runPromise(
+      Effect.scoped(runSession(port, { dir: '/tmp/w', model: 'm', prompt: 'go' })).pipe(
+        Effect.provide(capture),
+      ),
+    );
+    assert.strictEqual(lines.includes('tool bash running'), true);
+  });
+});
+
+describe('describeEvent', () => {
+  it('summarizes a running tool call', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'message.part.updated',
+        properties: { part: { type: 'tool', tool: 'bash', state: { status: 'running' } } },
+      }),
+      'tool bash running',
+    );
+  });
+
+  it('appends the human-readable title when present', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: { type: 'tool', tool: 'bash', state: { status: 'running', title: 'ls -la' } },
+        },
+      }),
+      'tool bash running — ls -la',
+    );
+  });
+
+  it('includes the error message on a failed tool call', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: { type: 'tool', tool: 'bash', state: { status: 'error', error: 'exit 1' } },
+        },
+      }),
+      'tool bash error: exit 1',
+    );
+  });
+
+  it('skips streaming text parts (too noisy to log per token)', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'message.part.updated',
+        properties: { part: { type: 'text', text: 'hello' } },
+      }),
+      null,
+    );
+  });
+
+  it('summarizes todo progress', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'todo.updated',
+        properties: {
+          todos: [{ status: 'completed' }, { status: 'in_progress' }, { status: 'pending' }],
+        },
+      }),
+      'todos 1/3 done (1 in progress)',
+    );
+  });
+
+  it('reports an edited file', () => {
+    assert.strictEqual(
+      describeEvent({ type: 'file.edited', properties: { file: 'src/x.ts' } }),
+      'edited src/x.ts',
+    );
+  });
+
+  it('reports an executed command', () => {
+    assert.strictEqual(
+      describeEvent({ type: 'command.executed', properties: { name: 'build' } }),
+      'command build',
+    );
+  });
+
+  it('reports a retry status with the attempt number', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'session.status',
+        properties: { status: { type: 'retry', attempt: 2, message: 'rate limited' } },
+      }),
+      'status retry (attempt 2): rate limited',
+    );
+  });
+
+  it('reports a typed session error with its message', () => {
+    assert.strictEqual(
+      describeEvent({
+        type: 'session.error',
+        properties: { error: { name: 'ProviderAuthError', data: { message: 'bad key' } } },
+      }),
+      'session error: ProviderAuthError: bad key',
+    );
+  });
+
+  it('reports a permission request (a hang cause worth seeing)', () => {
+    assert.strictEqual(
+      describeEvent({ type: 'permission.updated', properties: { title: 'run rm -rf /' } }),
+      'permission requested: run rm -rf /',
+    );
+  });
+
+  it('returns null for session.idle (redundant with the completion log)', () => {
+    assert.strictEqual(describeEvent(idleFor('ses_fake')), null);
+  });
+
+  it('returns null for uninteresting or malformed events', () => {
+    assert.strictEqual(describeEvent({ type: 'lsp.updated', properties: {} }), null);
+    assert.strictEqual(describeEvent(null), null);
+    assert.strictEqual(describeEvent('nope'), null);
+    assert.strictEqual(describeEvent({}), null);
   });
 });

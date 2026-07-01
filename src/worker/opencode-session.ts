@@ -82,6 +82,69 @@ const isSessionIdle = (ev: unknown, sessionId: string): boolean =>
 
 const fail = (op: string) => (e: unknown) => new OpencodeFailed({ op, reason: String(e) });
 
+const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
+
+/**
+ * Reduce one opencode SSE event to a compact one-line summary, or `null` to
+ * skip it. This is the whole observability decision: which of opencode's 30+
+ * event types are worth a log line while the agent works, and what each says.
+ * We surface the high-signal ones — tool calls (pending→running→completed/error),
+ * todo progress, file edits, commands, retries, session errors, and permission
+ * prompts (a common hang cause) — and drop the noisy ones (per-token text and
+ * reasoning deltas, lsp chatter, idle — the latter is already logged as session
+ * completion). Pure and total over `unknown` so it's trivially testable and can
+ * never throw inside the collector.
+ */
+export const describeEvent = (ev: unknown): string | null => {
+  if (!isRecord(ev) || typeof ev.type !== 'string') return null;
+  const p = isRecord(ev.properties) ? ev.properties : {};
+  switch (ev.type) {
+    case 'message.part.updated': {
+      const part = isRecord(p.part) ? p.part : null;
+      if (!part || part.type !== 'tool') return null; // skip text/reasoning deltas
+      const tool = str(part.tool) ?? 'tool';
+      const state = isRecord(part.state) ? part.state : {};
+      const status = str(state.status) ?? 'pending';
+      if (status === 'error') return `tool ${tool} error: ${str(state.error) ?? 'unknown error'}`;
+      const title = str(state.title);
+      return `tool ${tool} ${status}${title ? ` — ${title}` : ''}`;
+    }
+    case 'todo.updated': {
+      const todos = Array.isArray(p.todos) ? p.todos : [];
+      const by = (s: string) => todos.filter((t) => isRecord(t) && t.status === s).length;
+      return `todos ${by('completed')}/${todos.length} done (${by('in_progress')} in progress)`;
+    }
+    case 'file.edited': {
+      const file = str(p.file);
+      return file ? `edited ${file}` : null;
+    }
+    case 'command.executed': {
+      const name = str(p.name);
+      return name ? `command ${name}` : null;
+    }
+    case 'session.status': {
+      const s = isRecord(p.status) ? p.status : {};
+      if (s.type === 'retry') {
+        const attempt = typeof s.attempt === 'number' ? s.attempt : '?';
+        const msg = str(s.message);
+        return `status retry (attempt ${attempt})${msg ? `: ${msg}` : ''}`;
+      }
+      return str(s.type) ? `status ${s.type}` : null;
+    }
+    case 'session.error': {
+      const err = isRecord(p.error) ? p.error : null;
+      if (!err) return 'session error';
+      const name = str(err.name) ?? 'error';
+      const message = isRecord(err.data) ? str(err.data.message) : null;
+      return `session error: ${name}${message ? `: ${message}` : ''}`;
+    }
+    case 'permission.updated':
+      return `permission requested: ${str(p.title) ?? '(untitled)'}`;
+    default:
+      return null;
+  }
+};
+
 /**
  * Forked collector: drain the event stream into `sink` until our session goes
  * idle (or the stream ends), then signal `done`. Stream errors are swallowed —
@@ -97,9 +160,19 @@ const collectEvents = (
   sink: Array<unknown>,
   done: Deferred.Deferred<void>,
 ): Effect.Effect<void> =>
-  Effect.tryPromise(async () => {
-    for await (const ev of port.subscribeEvents(server, dir)) {
+  Effect.gen(function* () {
+    // Pull the SSE stream one event at a time so each can be logged through the
+    // app logger (→ stderr → `kubectl logs`), turning the previously-silent
+    // agent session into a live play-by-play. The sink still accumulates every
+    // raw event for usage parsing; logging is additive.
+    const iterator = port.subscribeEvents(server, dir)[Symbol.asyncIterator]();
+    while (true) {
+      const next = yield* Effect.tryPromise(() => iterator.next());
+      if (next.done) break;
+      const ev = next.value;
       sink.push(ev);
+      const line = describeEvent(ev);
+      if (line !== null) yield* Effect.logInfo(line);
       if (isSessionIdle(ev, sessionId)) break;
     }
   }).pipe(Effect.ignore, Effect.ensuring(Deferred.succeed(done, undefined)));
