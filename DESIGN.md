@@ -271,6 +271,12 @@ everything upstream). Two levels:
 - Sequence: generate age keypairs → pubkeys to repo as sops recipients → the `ci` age privkey is the
   one GH Actions secret → CI `pulumi up` provisions the k8s cluster and decrypts sops → seeds every
   runtime secret into the in-cluster k8s Secret → the control-plane Deployment mounts it → alive.
+- **State-bucket seam (the one un-Pulumi'd resource).** Pulumi can't create the bucket its own
+  backend reads from (circular), so `tidepool-pulumi-state` is bootstrapped by an idempotent
+  `ensure-state-bucket.sh` step in the deploy job (before `pulumi up`), from the same sops-decrypted
+  S3 keys. A keys-only cold start — full teardown, then CI — rebuilds it hands-free; RGW-idempotent,
+  so a normal deploy no-ops. deploy job only (preview is read-only). Survivors of a scorched-earth
+  teardown = the two keys (hcloud API + S3) in sops; everything in the Hetzner project self-rebuilds.
 
 ### Spend guardrails (defense in depth — "$100k bill is impossible by construction")
 The cost nightmare (runaway box creation) must be blocked *outside* our code, then again inside.

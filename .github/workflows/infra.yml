@@ -209,6 +209,14 @@ jobs:
             echo "TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE=${cp}"
             echo "TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE=${aw}"
           } >>"$GITHUB_ENV"
+      - name: ensure Pulumi state bucket exists (bootstrap seam)
+        # Pulumi can't create its own backend (circular), so this idempotent step
+        # (re)creates tidepool-pulumi-state from the sops-decrypted S3 keys already in
+        # $GITHUB_ENV — making a keys-only cold start (scorched-earth → rebuild) fully
+        # hands-free. RGW-idempotent, so a normal deploy is a no-op. deploy job ONLY:
+        # preview is read-only and must never create a resource. AWS_REGION is the
+        # top-level env; AWS_ACCESS_KEY_ID/SECRET come from the decrypt step above.
+        run: bash infra/pulumi/cluster/ensure-state-bucket.sh
       - name: pulumi up
         uses: pulumi/actions@v6
         with:
