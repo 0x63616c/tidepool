@@ -1,15 +1,25 @@
 #!/usr/bin/env bun
 import { homedir } from 'node:os';
 import { Args, Command, Options } from '@effect/cli';
-import { FetchHttpClient } from '@effect/platform';
+import { FetchHttpClient, type FileSystem } from '@effect/platform';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
 import { Console, Effect, Either, Layer, Logger, Option, Schema } from 'effect';
 import {
+  type ClientConfig,
   type ClientConfigError,
+  type ClientContext,
+  clientConfigPath,
+  contextByName,
+  contextNames,
+  deleteContext,
+  describeContext,
   loadClientConfig,
   type PortForwardError,
   resolveBaseUrl,
   resolveContext,
+  setCurrentContext,
+  upsertContext,
+  writeClientConfig,
 } from './client-config.ts';
 import { renderDoctor, runDoctor } from './doctor.ts';
 import type { NewTicket, RunEvent, Ticket } from './domain.ts';
@@ -63,7 +73,7 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
  */
 const withQueue = <A, E>(
   flag: string | null,
-  effect: Effect.Effect<A, E, QueueControl>,
+  effect: Effect.Effect<A, E, QueueControl | BunContext.BunContext>,
 ): Effect.Effect<A, E | ClientConfigError | PortForwardError, BunContext.BunContext> =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -86,6 +96,15 @@ const withQueue = <A, E>(
 /** The `--context` override, shared by every ticket verb. */
 const contextOption = Options.text('context').pipe(Options.optional);
 const flagOf = (context: Option.Option<string>): string | null => Option.getOrNull(context);
+
+/** A one-line banner naming the backend a command is about to hit (AXI §9). */
+const contextLine = (
+  flag: string | null,
+): Effect.Effect<string, ClientConfigError, FileSystem.FileSystem> =>
+  loadClientConfig.pipe(
+    Effect.flatMap((c) => resolveContext(c, { flag })),
+    Effect.map((ctx) => `context: ${ctx.name} — ${describeContext(ctx)}`),
+  );
 
 // ── actions: thin Effects over QueueControl, returned as rendered strings so
 //    they are unit-testable without driving the CLI runtime or a real store ────
@@ -206,11 +225,17 @@ const listCommand = Command.make(
     limit: Options.integer('limit').pipe(Options.withDefault(50)),
     context: contextOption,
   },
-  ({ context, limit, target }) =>
-    withQueue(
-      flagOf(context),
-      listAction({ target: Option.getOrNull(target), limit }).pipe(Effect.flatMap(Console.log)),
-    ),
+  ({ context, limit, target }) => {
+    const flag = flagOf(context);
+    return withQueue(
+      flag,
+      Effect.gen(function* () {
+        const line = yield* contextLine(flag);
+        const body = yield* listAction({ target: Option.getOrNull(target), limit });
+        yield* Console.log(`${line}\n${body}`);
+      }),
+    );
+  },
 );
 
 const getCommand = Command.make(
@@ -352,6 +377,177 @@ const ticketCommand = Command.make('ticket', {}, () =>
   Command.withSubcommands([addCommand, listCommand, getCommand, logsCommand, transcriptCommand]),
 );
 
+// ── tp context: manage which backend tp drives (kubectl-style) ───────────────
+
+/** Resolve the active context (no per-invocation flag) for display. */
+const activeContext = Effect.gen(function* () {
+  const config = yield* loadClientConfig;
+  return { config, ctx: yield* resolveContext(config, { flag: null }) };
+});
+
+/** `tp context list` — all contexts + which is the current default. */
+const contextListCommand = Command.make('list', {}, () =>
+  activeContext.pipe(
+    Effect.flatMap(({ config, ctx }) => {
+      const rows = contextNames(config).map((name) => {
+        const c = contextByName(config, name);
+        const kind = c?.kind ?? 'sqlite';
+        const target = c ? describeContext(c) : 'sqlite (local store)';
+        return `  ${name},${kind},"${target}",${name === ctx.name ? '*' : ''}`;
+      });
+      return Console.log(
+        [
+          `contexts[${rows.length}]{name,kind,target,current}:`,
+          ...rows,
+          'help[2]:',
+          '  Run `tp context use <name>` to set the default backend',
+          '  Run `tp context set <name> --url <url>` (or --service/--namespace) to add/edit one',
+        ].join('\n'),
+      );
+    }),
+  ),
+);
+
+/** `tp context current` — the active backend and how it was resolved. */
+const contextCurrentCommand = Command.make('current', {}, () =>
+  activeContext.pipe(
+    Effect.flatMap(({ ctx }) => {
+      const source =
+        process.env.TIDEPOOL_API_URL !== undefined && process.env.TIDEPOOL_API_URL.length > 0
+          ? 'env TIDEPOOL_API_URL'
+          : process.env.TIDEPOOL_CONTEXT !== undefined
+            ? 'env TIDEPOOL_CONTEXT'
+            : `${clientConfigPath()} current-context (or built-in default)`;
+      return Console.log(
+        [
+          `context: ${ctx.name}`,
+          `  kind: ${ctx.kind}`,
+          `  target: ${describeContext(ctx)}`,
+          `  source: ${source}`,
+        ].join('\n'),
+      );
+    }),
+  ),
+);
+
+/** `tp context use <name>` — set the default context (idempotent). */
+const contextUseCommand = Command.make('use', { name: Args.text({ name: 'name' }) }, ({ name }) =>
+  loadClientConfig.pipe(
+    Effect.flatMap((config) => {
+      if (contextByName(config, name) === null)
+        return usageError(
+          `no such context: ${name}`,
+          'tp context list | tp context set <name> --url <url>',
+        );
+      if (config.currentContext === name)
+        return Console.log(`context: already defaulting to ${name} (no-op)`);
+      return writeClientConfig(setCurrentContext(config, name)).pipe(
+        Effect.zipRight(Console.log(`context: default set to ${name}`)),
+      );
+    }),
+  ),
+);
+
+/** `tp context set <name>` — create or edit a context. */
+const contextSetCommand = Command.make(
+  'set',
+  {
+    name: Args.text({ name: 'name' }),
+    kind: Options.choice('kind', ['http', 'sqlite']).pipe(Options.withDefault('http' as const)),
+    url: Options.text('url').pipe(Options.optional),
+    namespace: Options.text('namespace').pipe(Options.optional),
+    service: Options.text('service').pipe(Options.optional),
+    remotePort: Options.integer('remote-port').pipe(Options.withDefault(8080)),
+    localPort: Options.integer('local-port').pipe(Options.optional),
+  },
+  ({ kind, localPort, name, namespace, remotePort, service, url }) =>
+    loadClientConfig.pipe(
+      Effect.flatMap((config): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> => {
+        if (kind === 'sqlite') return writeSet(config, { name, kind: 'sqlite' }, name);
+        const lp = Option.getOrElse(localPort, () => remotePort);
+        if (Option.isSome(namespace) && Option.isSome(service)) {
+          const ctx: ClientContext = {
+            name,
+            kind: 'http',
+            url: Option.getOrElse(url, () => `http://127.0.0.1:${lp}`),
+            portForward: {
+              namespace: namespace.value,
+              service: service.value,
+              remotePort,
+              localPort: lp,
+            },
+          };
+          return writeSet(config, ctx, name);
+        }
+        if (Option.isSome(url))
+          return writeSet(config, { name, kind: 'http', url: url.value }, name);
+        return usageError(
+          'an http context needs --url, or --namespace + --service for a port-forward',
+          'tp context set prod --namespace core --service reconciler  |  tp context set staging --url http://host:8080',
+        );
+      }),
+    ),
+);
+
+/** Shared write-and-confirm for `context set`. */
+const writeSet = (
+  config: ClientConfig,
+  ctx: ClientContext,
+  name: string,
+): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> =>
+  writeClientConfig(upsertContext(config, ctx)).pipe(
+    Effect.zipRight(
+      Console.log(
+        [
+          `context: saved ${name} (${describeContext(ctx)})`,
+          'help[1]:',
+          `  Run \`tp context use ${name}\` to make it the default`,
+        ].join('\n'),
+      ),
+    ),
+  );
+
+/** `tp context delete <name>` — remove a context (idempotent). */
+const contextDeleteCommand = Command.make(
+  'delete',
+  { name: Args.text({ name: 'name' }) },
+  ({ name }) =>
+    loadClientConfig.pipe(
+      Effect.flatMap((config) => {
+        if (config.contexts[name] === undefined)
+          return Console.log(`context: ${name} not found (no-op)`);
+        const cleared = config.currentContext === name;
+        return writeClientConfig(deleteContext(config, name)).pipe(
+          Effect.zipRight(
+            Console.log(
+              cleared
+                ? `context: deleted ${name} (was the default — now falls back to built-in local)`
+                : `context: deleted ${name}`,
+            ),
+          ),
+        );
+      }),
+    ),
+);
+
+const contextCommand = Command.make('context', {}, () =>
+  Console.log(
+    [
+      'context: pick a subcommand',
+      'help[1]:',
+      '  list | current | use <name> | set <name> … | delete <name>',
+    ].join('\n'),
+  ),
+).pipe(
+  Command.withSubcommands([
+    contextListCommand,
+    contextCurrentCommand,
+    contextUseCommand,
+    contextSetCommand,
+    contextDeleteCommand,
+  ]),
+);
+
 /** `tp doctor` — the terminal health check. Exits 1 on FAIL so CI/agents can gate. */
 const doctorCommand = Command.make('doctor', {}, () =>
   Effect.scoped(
@@ -366,17 +562,29 @@ const doctorCommand = Command.make('doctor', {}, () =>
   ),
 );
 
-const homeView = withQueue(
-  null,
-  listAction({ target: null, limit: 50 }).pipe(
-    Effect.flatMap((tickets) =>
-      Console.log([`bin: ${binPath()}`, `description: ${DESCRIPTION}`, tickets].join('\n')),
-    ),
-  ),
-);
+/**
+ * No-args home view (AXI §8/§10): identify the tool, show the ACTIVE backend so
+ * it's obvious whether tp is driving local or prod, then the live backlog, then
+ * a few next-step hints — including how to switch context.
+ */
+const homeView = Effect.gen(function* () {
+  const { ctx } = yield* activeContext;
+  const tickets = yield* withQueue(null, listAction({ target: null, limit: 50 }));
+  yield* Console.log(
+    [
+      `bin: ${binPath()}`,
+      `description: ${DESCRIPTION}`,
+      `context: ${ctx.name} — ${describeContext(ctx)}`,
+      tickets,
+      'help[2]:',
+      '  Run `tp context list` to see backends; `tp context use <name>` to switch the default',
+      '  Add `--context <name>` to any command to target a backend for one call',
+    ].join('\n'),
+  );
+});
 
 const root = Command.make('tp', {}, () => homeView).pipe(
-  Command.withSubcommands([ticketCommand, doctorCommand]),
+  Command.withSubcommands([ticketCommand, contextCommand, doctorCommand]),
 );
 
 const cli = Command.run(root, { name: 'tp', version: '0.0.0' });

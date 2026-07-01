@@ -168,6 +168,93 @@ export const resolveContext = (
     return ctx;
   });
 
+// ── config management (kubectl-style: the CLI owns ~/.tidepool/config) ─────────
+
+/** Every context name known to the config plus the always-present built-in `local`. */
+export const contextNames = (config: ClientConfig): ReadonlyArray<string> => {
+  const names = new Set<string>([DEFAULT_CONTEXT.name, ...Object.keys(config.contexts)]);
+  return [...names].sort();
+};
+
+/** Look up a context by name, falling back to the built-in `local` (sqlite). */
+export const contextByName = (config: ClientConfig, name: string): ClientContext | null =>
+  config.contexts[name] ?? (name === DEFAULT_CONTEXT.name ? DEFAULT_CONTEXT : null);
+
+/** One-line human description of a context's backend target. */
+export const describeContext = (ctx: ClientContext): string =>
+  ctx.kind === 'sqlite'
+    ? 'sqlite (local store)'
+    : ctx.portForward !== undefined
+      ? `http → port-forward ${ctx.portForward.namespace}/${ctx.portForward.service}:${ctx.portForward.remotePort}`
+      : `http → ${ctx.url}`;
+
+/** Add or replace a context (edit is upsert-by-name). Pure. */
+export const upsertContext = (config: ClientConfig, ctx: ClientContext): ClientConfig => ({
+  ...config,
+  contexts: { ...config.contexts, [ctx.name]: ctx },
+});
+
+/**
+ * Remove a context. If it was the current default, the default is cleared (so
+ * resolution falls back to built-in `local`) rather than left dangling. Pure.
+ */
+export const deleteContext = (config: ClientConfig, name: string): ClientConfig => {
+  const { [name]: _removed, ...rest } = config.contexts;
+  return {
+    currentContext: config.currentContext === name ? null : config.currentContext,
+    contexts: rest,
+  };
+};
+
+/** Set the default context. Pure — the caller validates the name exists first. */
+export const setCurrentContext = (config: ClientConfig, name: string): ClientConfig => ({
+  ...config,
+  currentContext: name,
+});
+
+/** Serialize back to the on-disk format, round-trippable by `parseClientConfig`. */
+export const serializeClientConfig = (config: ClientConfig): string => {
+  const lines: string[] = [];
+  if (config.currentContext !== null)
+    lines.push(`current-context = "${config.currentContext}"`, '');
+  for (const name of Object.keys(config.contexts).sort()) {
+    const ctx = config.contexts[name];
+    if (ctx === undefined) continue;
+    lines.push(`[contexts.${name}]`, `kind = "${ctx.kind}"`);
+    if (ctx.kind === 'http') {
+      lines.push(`url = "${ctx.url}"`);
+      if (ctx.portForward !== undefined) {
+        lines.push(
+          `namespace = "${ctx.portForward.namespace}"`,
+          `service = "${ctx.portForward.service}"`,
+          `remote-port = ${ctx.portForward.remotePort}`,
+          `local-port = ${ctx.portForward.localPort}`,
+        );
+      }
+    }
+    lines.push('');
+  }
+  return `${lines.join('\n').trimEnd()}\n`;
+};
+
+/** The absolute path of the client config file (`~/.tidepool/config`). */
+export const clientConfigPath = (): string => join(homedir(), '.tidepool', 'config');
+
+/** Write the config to `~/.tidepool/config`, creating the directory if needed. */
+export const writeClientConfig = (
+  config: ClientConfig,
+): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const dir = join(homedir(), '.tidepool');
+    yield* fs
+      .makeDirectory(dir, { recursive: true })
+      .pipe(Effect.mapError((e) => new ClientConfigError({ message: String(e) })));
+    yield* fs
+      .writeFileString(clientConfigPath(), serializeClientConfig(config))
+      .pipe(Effect.mapError((e) => new ClientConfigError({ message: String(e) })));
+  });
+
 /**
  * Establish the base URL for an http context, opening an invisible
  * `kubectl port-forward` first when the context declares one — the operator never
