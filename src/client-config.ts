@@ -15,8 +15,8 @@ import { Data, Duration, Effect, Option, Schema, type Scope, Stream } from 'effe
  *   kind = "http"
  *   url = "http://127.0.0.1:8080"
  *   # optional: auto-open an invisible kubectl port-forward instead of a manual one
- *   namespace = "tidepool"
- *   service = "tidepool-control-plane"
+ *   namespace = "core"
+ *   service = "reconciler"
  *   remote-port = 8080
  *   local-port = 8080
  *   [contexts.local]
