@@ -39,12 +39,6 @@ creation_rules:
     key_groups:
       - age: [*ci, *breakglass]
 
-  # Shared fleet SSH identity. Vestigial post-k8s (no worker boxes to SSH into);
-  # kept recoverable via breakglass only until a follow-up removes it.
-  - path_regex: secrets/ssh_tidepool_private_key\.enc\.yaml$
-    key_groups:
-      - age: [*breakglass]
-
   # Hetzner Object Storage (S3) creds — Pulumi state backend + CNPG backups.
   # Pulumi-in-CI reads it, so CI-readable. Above the catch-all.
   - path_regex: secrets/hetzner_s3_credentials\.enc\.yaml$
