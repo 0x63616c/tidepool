@@ -70,8 +70,8 @@ export const commitMessage = (ticket: { readonly id: string; readonly title: str
 // ── opencode orchestration ───────────────────────────────────────────────────
 
 /** PR title/body are derived from the ticket so they're deterministic. */
-const workTitle = (ticket: Ticket): string => `feat: ${ticket.title} (${ticket.id})`;
-const workBody = (ticket: Ticket): string => ticket.goal;
+export const workTitle = (ticket: Ticket): string => `feat: ${ticket.title} (${ticket.id})`;
+export const workBody = (ticket: Ticket): string => ticket.goal;
 
 /** Split a `provider/model` config string into the SDK's `{providerID, modelID}`. */
 const splitModel = (model: string): { providerID: string; modelID: string } => {
@@ -84,7 +84,7 @@ const splitModel = (model: string): { providerID: string; modelID: string } => {
 const STANDARDS =
   'Follow the repo conventions. Make the smallest change that satisfies the goal and add/keep tests green. Do not touch CI or unrelated files.';
 
-const workPrompt = (ticket: Ticket): string =>
+export const workPrompt = (ticket: Ticket): string =>
   [
     `You are the work agent for ticket ${ticket.id}.`,
     `Goal: ${ticket.goal}`,
@@ -92,7 +92,7 @@ const workPrompt = (ticket: Ticket): string =>
     'Implement the goal directly in this repository. Do not commit or push — the harness handles git.',
   ].join('\n\n');
 
-const reviewPrompt = (ticket: Ticket, diff: string): string =>
+export const reviewPrompt = (ticket: Ticket, diff: string): string =>
   [
     `You are the review agent for ticket ${ticket.id}.`,
     `Goal: ${ticket.goal}`,
