@@ -322,6 +322,12 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   **outbound-only** (no public listen port). `tp ls/logs` over SSH tunnel. Small attack surface.
 - **v1.1:** **Tailscale** the main box → `tp` over the tailnet, drop public SSH. (You have it.)
 - Firewall is declarative (Pulumi).
+- **Operator kubectl access:** the cluster kubeconfig is a *secret output* of the
+  `tidepool-cluster` Pulumi stack; `bun run kube` (`infra/scripts/tp-kubeconfig.sh`) decrypts the
+  S3-state creds via sops, reads the output, and writes `~/.kube/tidepool.yaml` (0600). In this repo
+  `.envrc` layers that onto `KUBECONFIG` so `kubectl` defaults to `admin@tidepool` while other
+  clusters stay selectable; elsewhere your normal default is untouched. The apiserver `:6443` is
+  firewalled to the operator admin /32 (NordVPN dedicated static IP) — connect the VPN first.
 
 ---
 
