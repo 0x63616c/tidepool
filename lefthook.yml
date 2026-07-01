@@ -1,6 +1,11 @@
 pre-commit:
   parallel: true
   commands:
+    no-main-commit:
+      # Universal branch guard: never commit on `main` locally. All work lands via a worktree
+      # branch + PR (mirrors GitHub branch protection). Catches human, CLI, and any agent — the
+      # `.claude/` main-guard hook only sees Claude Code. Escape hatch: `LEFTHOOK=0 git commit ...`.
+      run: test "$(git branch --show-current)" != main
     biome:
       glob: '*.{ts,tsx,js,json,jsonc}'
       run: bunx biome check --write --no-errors-on-unmatched {staged_files}

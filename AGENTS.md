@@ -8,6 +8,26 @@
 Tidepool: an agentic-coding control plane. See `DESIGN.md` for the full design and `RESEARCH.md`
 for the researched facts/versions. Read `DESIGN.md` before making non-trivial changes.
 
+## Local vs remote dev
+
+Two execution contexts share this repo; worktree lifecycle is owned differently in each.
+
+- **Remote (the tidepool worker).** The reconciler dispatches an opencode runner that clones the
+  target repo, works its own `tp/<tckt_id>-<slug>` worktree/box, and opens the PR. Isolation is
+  handled by the worker — you do nothing. The `.claude/` hooks below never run here (opencode is
+  the runner, not Claude Code), and they self-disable in-cluster anyway (`KUBERNETES_SERVICE_HOST`).
+- **Local (Claude Code on the laptop).** Three `.claude/` hooks enforce the same isolation locally:
+  - `main-guard.sh` (PreToolUse) blocks `git commit`/`merge`/`push` while `HEAD == main`, pushing
+    you into a worktree. Run `EnterWorktree` (name it `calum/<slug>`) → native branch
+    `worktree-calum+<slug>`; commit there.
+  - `worktree-gc.sh` (SessionStart) removes clean `worktree-*` worktrees under `.claude/worktrees/`
+    once merged to `main` or their upstream branch is gone (squash-merge). Dirty/unpushed/other
+    trees are always kept.
+  - The lefthook `no-main-commit` gate is the universal backstop (see Local quality gates).
+
+  **Local branches are `worktree-*`; remote branches are `tp/*`.** That prefix is the local/remote
+  tell. Merges to `main` happen via PR only, never locally.
+
 ## Golden rules
 
 1. **Every change ships as a green, merged PR.** That is the definition of done — it is a system
@@ -65,7 +85,9 @@ a secret outside sops.
 - **Language/runtime:** TypeScript + Bun. One language across cli, reconciler, runner.
 - **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `pr_` + short lowercase base36
   suffix (`[0-9a-z]`), so ids satisfy their own commitlint/branch gate `tckt_[0-9a-z]+`.
-- **Branches:** `tp/<tckt_id>-<short-slug>` (e.g. `tp/tckt_a1b2c3-add-slugify`).
+- **Branches:** remote worker → `tp/<tckt_id>-<short-slug>` (e.g. `tp/tckt_a1b2c3-add-slugify`);
+  local Claude Code → `worktree-<slug>` (native `EnterWorktree`, e.g. `worktree-calum+add-slugify`).
+  Never commit on `main` (enforced locally by the lefthook `no-main-commit` gate + `main-guard.sh`).
 - **Commits:** subject **leads with the ticket**, then Conventional Commits:
   `#tckt_a1b2c3 feat(scope): subject`. Body optional. Footer: `Ticket: tckt_a1b2c3`.
 - **PR titles:** conventional + ticket id → `feat(reconciler): add claim loop (tckt_a1b2c3)`.
@@ -83,6 +105,9 @@ Run before pushing — git hooks run these automatically, CI re-runs them (never
 ```bash
 bun run check     # biome + lint:sh (shellcheck/shfmt) + typecheck + test
 ```
+
+The `no-main-commit` pre-commit gate fails any commit on `main` (human, CLI, or agent) — work on a
+worktree branch. Escape hatch for the rare legitimate case: `LEFTHOOK=0 git commit ...`.
 
 ## Secrets
 
