@@ -12,6 +12,26 @@ pre-commit:
       # are allowlisted in .gitleaks.toml. Requires `gitleaks` on PATH
       # (brew install gitleaks). CI re-runs the same scan as the authoritative gate.
       run: gitleaks protect --staged --redact --config .gitleaks.toml
+    shellcheck:
+      glob: '*.sh'
+      # Lint staged shell (the Claude Code hooks + infra scripts). Same config as CI.
+      run: shellcheck {staged_files}
+    shfmt:
+      glob: '*.sh'
+      run: shfmt -d -i 2 -ci {staged_files}
+    redaction-hashes:
+      # If a secret changed, VERIFY the committed hash list is in sync (read-only — no git-index
+      # mutation, safe under parallel). Stale → commit blocked: run `bun run seal:hashes` and stage
+      # the result. Skips if SOPS_AGE_KEY is unset (pre-push re-checks; see check-secrets below).
+      glob: 'secrets/*.enc.yaml'
+      run: bun run check:secrets
+
+pre-push:
+  commands:
+    check-secrets:
+      # Backstop: fail the push if the committed redaction hashes drifted from the sealed
+      # secrets, or a secret is below the entropy floor. Skips if SOPS_AGE_KEY is unset.
+      run: bun run check:secrets
 
 commit-msg:
   commands:

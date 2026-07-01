@@ -221,6 +221,17 @@ everything upstream). Two levels:
    keys' backup-only store; nothing reads it at runtime). 1Password access uses a vault-scoped service account.
 3. **Runtime state** — sqlite on the main box, never in git.
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
+- **Leak guards (defense-in-depth).** Claude Code hooks (`.claude/hooks/`, bash-3.2-safe): PreToolUse
+  `secret-command-guard` blocks/asks on commands that would print a secret (env-var echo, env dumps,
+  `sops -d` to stdout); PostToolUse `secret-redactor` masks secret *shapes* + our *exact* sealed values
+  (sha256 list in `.claude/redaction-hashes.json`, regenerated at seal time by `bun run seal:hashes`,
+  entropy-gated ≥80 bits, drift-checked at pre-push). Block-before-execution is primary; redaction is a
+  backstop (built-in tools require a *structured* `updatedToolOutput`, not a string — a plain string is
+  silently dropped).
+- **Post-quantum caveat (deferred, human-gated).** sops/age use **X25519** — Shor-breakable, so
+  secrets-at-rest are theoretically harvest-now-decrypt-later. Out of scope at personal/internal scale
+  (tenet 7), and everything rotates on compromise anyway; `CredentialBroker` is the seam if a PQ KEM
+  (ML-KEM) is ever wanted. (The redaction-hash list is sha256 — quantum-fine.)
 
 ### Provisioning / bootstrap
 - **Declarative layer = Pulumi (TS) + pulumi-hcloud provider**. Defines

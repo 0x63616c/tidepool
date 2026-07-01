@@ -11,11 +11,15 @@
   },
   "scripts": {
     "format": "biome format --write .",
+    "format:sh": "shfmt -w -i 2 -ci .claude/hooks/*.sh infra/scripts/*.sh infra/bootstrap/*.sh infra/worker/*.sh",
     "lint": "biome check .",
+    "lint:sh": "shellcheck .claude/hooks/*.sh infra/scripts/*.sh infra/bootstrap/*.sh infra/worker/*.sh && shfmt -d -i 2 -ci .claude/hooks/*.sh infra/scripts/*.sh infra/bootstrap/*.sh infra/worker/*.sh",
     "typecheck": "tsc --noEmit",
     "test": "bun --bun vitest run",
     "commitlint": "commitlint --last --verbose",
-    "check": "biome check . && bun run typecheck && bun run test",
+    "seal:hashes": "bash infra/scripts/redaction-hashes.sh",
+    "check:secrets": "bash infra/scripts/redaction-hashes.sh --check",
+    "check": "biome check . && bun run lint:sh && bun run typecheck && bun run test",
     "prepare": "lefthook install"
   },
   "dependencies": {
