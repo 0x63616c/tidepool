@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 import { addAction, getAction, listAction } from './cli.ts';
+import { AppConfig, type Config, defineConfig } from './config.ts';
 import { InMemoryTicketStore } from './fakes.ts';
 import { LocalQueueControl, QueueControl } from './queue-control.ts';
 
@@ -10,7 +11,17 @@ import { LocalQueueControl, QueueControl } from './queue-control.ts';
  * no CLI runtime, no live store. Proves the client-side wiring + rendering.
  */
 
-const qc = LocalQueueControl.pipe(Layer.provide(InMemoryTicketStore));
+const testConfig: Config = defineConfig({
+  targets: [{ repo: 't/repo', base: 'main', models: { work: 'm', review: 'm' } }],
+  models: { work: 'm', review: 'm' },
+  workers: { max: 1, idleTimeoutSec: 300, maxTtlSec: 3600 },
+  box: { type: 'cx23', locations: ['nbg1'] },
+  retries: 2,
+});
+
+const qc = LocalQueueControl.pipe(
+  Layer.provide(Layer.mergeAll(InMemoryTicketStore, Layer.succeed(AppConfig, testConfig))),
+);
 const run = <A, E>(eff: Effect.Effect<A, E, QueueControl>) => eff.pipe(Effect.provide(qc));
 
 describe('tp ticket add / list', () => {

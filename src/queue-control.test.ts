@@ -1,11 +1,27 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
+import { AppConfig, type Config, defineConfig } from './config.ts';
 import { InMemoryTicketStore } from './fakes.ts';
 import { LocalQueueControl, QueueControl } from './queue-control.ts';
 
-// Provide the local adapter over an in-memory store for every case.
+const testConfig: Config = defineConfig({
+  targets: [
+    { repo: 't/repo', base: 'main', models: { work: 'm', review: 'm' } },
+    { repo: 'owner/one', base: 'main', models: { work: 'm', review: 'm' } },
+    { repo: 'owner/two', base: 'main', models: { work: 'm', review: 'm' } },
+  ],
+  models: { work: 'm', review: 'm' },
+  workers: { max: 1, idleTimeoutSec: 300, maxTtlSec: 3600 },
+  box: { type: 'cx23', locations: ['nbg1'] },
+  retries: 2,
+});
+
+// Local adapter over an in-memory store + a controlled config, for every case.
 const withQC = <A, E>(eff: Effect.Effect<A, E, QueueControl>) =>
-  eff.pipe(Effect.provide(LocalQueueControl), Effect.provide(InMemoryTicketStore));
+  eff.pipe(
+    Effect.provide(LocalQueueControl),
+    Effect.provide(Layer.mergeAll(InMemoryTicketStore, Layer.succeed(AppConfig, testConfig))),
+  );
 
 describe('QueueControl.list', () => {
   it.effect('returns a {items,nextCursor} page, newest-first, honoring limit', () =>
@@ -59,6 +75,31 @@ describe('QueueControl.get / events', () => {
         });
         expect(Array.isArray(evs.items)).toBe(true);
         expect(evs).toHaveProperty('nextCursor');
+      }),
+    ),
+  );
+});
+
+describe('QueueControl.add validation', () => {
+  it.effect('rejects an unconfigured target with TargetNotConfigured', () =>
+    withQC(
+      Effect.gen(function* () {
+        const qc = yield* QueueControl;
+        const r = yield* Effect.either(
+          qc.add({ title: 'oops', goal: 'g', target: '0x63616c/tidepol' }),
+        );
+        expect(r._tag).toBe('Left');
+        if (r._tag === 'Left') expect(r.left._tag).toBe('TargetNotConfigured');
+      }),
+    ),
+  );
+
+  it.effect('accepts a configured target', () =>
+    withQC(
+      Effect.gen(function* () {
+        const qc = yield* QueueControl;
+        const t = yield* qc.add({ title: 'ok', goal: 'g', target: 't/repo' });
+        expect(t.target).toBe('t/repo');
       }),
     ),
   );

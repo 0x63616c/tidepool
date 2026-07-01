@@ -1,4 +1,5 @@
 import { Context, Data, Effect, Layer, Schema } from 'effect';
+import { AppConfig, configuredRepos } from './config.ts';
 import type { NewTicket, Run, Ticket, TicketNotFound } from './domain.ts';
 import { type RunEvent, RunSource } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
@@ -82,8 +83,13 @@ export const LocalQueueControl = Layer.effect(
   QueueControl,
   Effect.gen(function* () {
     const store = yield* TicketStore;
+    const config = yield* AppConfig;
+    const repos = configuredRepos(config);
     return {
-      add: (input) => store.add(input),
+      add: (input) =>
+        repos.includes(input.target)
+          ? store.add(input)
+          : Effect.fail(new TargetNotConfigured({ repo: input.target, configured: repos })),
       list: (q) =>
         store.list().pipe(
           Effect.map((ts) => {

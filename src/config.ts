@@ -81,6 +81,10 @@ export const baseFor = (config: Config, repo: string): string => {
   return target?.base ?? 'main';
 };
 
+/** The repos the system is allowed to work — the target universe (tenet 1). */
+export const configuredRepos = (config: Config): ReadonlyArray<string> =>
+  config.targets.map((t) => t.repo);
+
 /** The loaded config, provided as a service so the reconciler reads it via DI. */
 export class AppConfig extends Context.Tag('AppConfig')<AppConfig, Config>() {}
 

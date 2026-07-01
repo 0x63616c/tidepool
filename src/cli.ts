@@ -51,7 +51,12 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
  * local-vs-http selection is wired at the entrypoint in a later step.
  */
 const withQueue = <A, E>(effect: Effect.Effect<A, E, QueueControl>): Effect.Effect<A, E> =>
-  Effect.scoped(Effect.provide(effect, LocalQueueControl.pipe(Layer.provide(ticketStoreLive()))));
+  Effect.scoped(
+    Effect.provide(
+      effect,
+      LocalQueueControl.pipe(Layer.provide(Layer.merge(ticketStoreLive(), AppConfigLive))),
+    ),
+  );
 
 // ── actions: thin Effects over QueueControl, returned as rendered strings so
 //    they are unit-testable without driving the CLI runtime or a real store ────
