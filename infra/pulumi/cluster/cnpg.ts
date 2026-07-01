@@ -16,10 +16,13 @@ import { CNPG } from './config';
  *                 └─> Barman plugin ──┤          (objectstores.barmancloud.cnpg.io CRD)
  *                          S3 secret ─┼─> ObjectStore ─> Cluster ─> ScheduledBackup
  *
- * PREVIEW NOTE: like the rest of the program, the k8s provider's kubeconfig is
- * unknown until 5a is APPLIED, so `pulumi preview` renders these as dependent
- * creates without connecting. A *live* preview is only complete once 5a is applied
- * and the operator/plugin CRDs are registered — hence 5b holds until then.
+ * PREVIEW NOTE: `pulumi preview` runs fully offline — it never contacts the live
+ * apiserver. Helm releases and CRs preview from state; the one manifest that could
+ * force a live call, the Barman plugin, uses the classic `k8s.yaml.ConfigFile`
+ * (v1), which renders client-side from its compiled-in schema (see below). This
+ * matters because the PR preview runner's ephemeral IP is not in the Hetzner
+ * firewall allow-list, so any live apiserver reach (e.g. a v2 ConfigFile's OpenAPI
+ * schema fetch) would time out.
  */
 export function installCnpg(provider: k8s.Provider): void {
   const opts = { provider };
@@ -58,7 +61,11 @@ export function installCnpg(provider: k8s.Provider): void {
   );
 
   // ── Barman Cloud plugin (vendored manifest → objectstores CRD + controller) ────
-  const barmanPlugin = new k8s.yaml.v2.ConfigFile(
+  // classic ConfigFile (v1), not k8s.yaml.v2: v1 parses the manifest client-side
+  // from its compiled-in schema, so preview stays offline. v2 fetches the live
+  // cluster's /openapi/v2 to type the manifest — an apiserver call the firewalled
+  // preview runner can't make.
+  const barmanPlugin = new k8s.yaml.ConfigFile(
     'barman-cloud-plugin',
     {
       file: join(__dirname, 'manifests', `barman-cloud-plugin-${CNPG.barmanPluginVersion}.yaml`),
