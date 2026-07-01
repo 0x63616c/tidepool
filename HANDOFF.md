@@ -55,23 +55,16 @@ Done — Phase A, Phase B, and Phase C implementation complete:
   - `domain.ts` — branded ids, typed errors, Ticket/Run schemas (Effect Schema)
   - `config.ts` — Effect Schema Config + `AppConfig` Tag + `loadConfig`
   - `services.ts` — `TicketStore`, `Forge`, `BoxMaker`, `AgentRunner` Tags (interfaces)
-  - `ids.ts` — Stripe-style prefixed ids (tckt_/run_/box_/lease_/pr_)
+  - `ids.ts` — Stripe-style prefixed ids (tckt_/run_/box_/pr_)
   - `reconciler.ts` — state machine (`step`, `settle`) + all ticket transitions
   - `fakes.ts` — `FakeTicketStore`, `FakeForge`, `FakeBoxMaker`, `FakeAgentRunner`
   - `sqlite-store.ts` — `@effect/sql-sqlite-bun` backed `TicketStore` (real)
   - `forge.ts` — GitHub `Forge` via Octokit port + `GithubForgeLive` Layer
-  - `agent-runner.ts` — opencode `AgentRunner` (`@opencode-ai/sdk`) + SSH remote runner for
-    Hetzner workers + `OpencodeAgentRunnerLive`. Routes on `box.ip !== '127.0.0.1'`. `sshRun` passes
-    the remote command as a single arg; SSH uses `StrictHostKeyChecking=no` +
-    `UserKnownHostsFile=/dev/null` (recycled-IP ephemeral boxes). **TEMPORARY hotfix:** force-exits
-    (`process.exit(0)`) after push because the embedded opencode server keeps Bun's event loop alive
-    — stop-gap pending the Effect runner rewrite, not the intended shape.
-  - `hetzner-box.ts` — `HetznerBoxMaker`: Hetzner API, `acquireRelease`, reaper, type/location
-    fallback, cloud-init (installs `unzip`, sets `HOME=/root`, installs opencode via `bun add -g
-    opencode-ai`, sentinel `/tmp/.tp-ready`; **bootcmd disables apt-daily/unattended-upgrades** to
-    avoid a ~12-min apt-lock stall), boxes named `tp-worker-<ticket>-<id>` with a ticket label,
-    `HetznerBoxMakerLive`
-  - `local-box.ts` — `LocalBoxMaker` (degenerate localhost lease, kept for Phase B fallback)
+  - `agent-runner.ts` — the local opencode runner (`@opencode-ai/sdk`) behind the `AgentWorker`
+    seam (`makeOpencodeAgentRunner`). **TEMPORARY hotfix:** force-exits (`process.exit(0)`) after
+    push because the embedded opencode server keeps Bun's event loop alive — stop-gap pending the
+    Effect runner rewrite, not the intended shape. (The old SSH remote-work path for Hetzner boxes
+    was deleted in PR-7.)
   - `doctor.ts` — `runDoctor` / `renderDoctor` / `gatherDoctorFacts` (4 facts: slugify +
     fresh-clone test + non-zero tokens + latest work-run provider = `hetzner`)
   - `runtime.ts` — `LiveStack` Layer (sqlite + config + GitHub + opencode + **HetznerBoxMaker**)

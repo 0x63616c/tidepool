@@ -26,7 +26,6 @@ const branded = <P extends string, B extends string>(prefix: P, brand: B) => {
 const ticket = branded('tckt', 'TicketId');
 const run = branded('run', 'RunId');
 const box = branded('box', 'BoxId');
-const lease = branded('lease', 'LeaseId');
 const pr = branded('pr', 'PrId');
 
 export const TicketId = ticket.schema;
@@ -35,13 +34,10 @@ export const RunId = run.schema;
 export type RunId = typeof RunId.Type;
 export const BoxId = box.schema;
 export type BoxId = typeof BoxId.Type;
-export const LeaseId = lease.schema;
-export type LeaseId = typeof LeaseId.Type;
 export const PrId = pr.schema;
 export type PrId = typeof PrId.Type;
 
 export const newTicketId = ticket.make;
 export const newRunId = run.make;
 export const newBoxId = box.make;
-export const newLeaseId = lease.make;
 export const newPrId = pr.make;

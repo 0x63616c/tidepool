@@ -1,13 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import {
-  buildReviewRunnerBundle,
-  buildRunnerBundle,
-  commitMessage,
-  fetchPrDiff,
-  parseUsage,
-  parseVerdict,
-  sshArgv,
-} from './agent-runner.ts';
+import { commitMessage, fetchPrDiff, parseUsage, parseVerdict } from './agent-runner.ts';
 
 /**
  * Usage parsing is the proof-of-real-work signal (`tp doctor` asserts non-zero
@@ -113,60 +105,6 @@ describe('commitMessage', () => {
 });
 
 /**
- * `sshArgv` is the single source of truth for the worker SSH invocation. These
- * lock in two bugs that already bit us on real Hetzner workers:
- *   1. Recycled public IPs carry a stale host key → "HOST IDENTIFICATION
- *      CHANGED" unless we disable host-key pinning.
- *   2. Wrapping the command in `sh -c` re-splits it on spaces, so `test -f x`
- *      ran as bare `test`. The command must stay a single trailing arg.
- */
-describe('sshArgv', () => {
-  /** True iff `seq` appears as a consecutive run inside `argv`. */
-  const hasPair = (argv: readonly string[], a: string, b: string): boolean =>
-    argv.some((_v, i) => argv[i] === a && argv[i + 1] === b);
-
-  it('disables host-key pinning (recycled-IP "HOST IDENTIFICATION CHANGED" bug)', () => {
-    const argv = sshArgv('1.2.3.4', 'true');
-    assert.isTrue(hasPair(argv, '-o', 'StrictHostKeyChecking=no'));
-    assert.isTrue(hasPair(argv, '-o', 'UserKnownHostsFile=/dev/null'));
-  });
-
-  it('never wraps the command in `sh -c` (the quoting-mangle bug)', () => {
-    const argv = sshArgv('1.2.3.4', 'true');
-    assert.notInclude(argv, 'sh');
-    assert.notInclude(argv, '-c');
-  });
-
-  it('passes the command as exactly one trailing arg (old `sh -c` split it)', () => {
-    const cmd = 'test -f /tmp/.tp-ready';
-    const argv = sshArgv('1.2.3.4', cmd);
-    assert.strictEqual(argv.filter((a) => a === cmd).length, 1);
-    assert.strictEqual(argv.at(-1), cmd);
-  });
-
-  it('targets root@<ip> as the penultimate arg and leads with `ssh`', () => {
-    const argv = sshArgv('1.2.3.4', 'true');
-    assert.strictEqual(argv[0], 'ssh');
-    assert.strictEqual(argv.at(-2), 'root@1.2.3.4');
-  });
-
-  it('pins the tidepool key and batch/timeout opts', () => {
-    const argv = sshArgv('1.2.3.4', 'true');
-    const keyIdx = argv.indexOf('-i');
-    assert.notStrictEqual(keyIdx, -1);
-    assert.match(argv[keyIdx + 1] ?? '', /ssh-tidepool$/);
-    assert.isTrue(hasPair(argv, '-o', 'BatchMode=yes'));
-    assert.isTrue(hasPair(argv, '-o', 'ConnectTimeout=15'));
-  });
-
-  it('preserves shell metacharacters in the single command arg', () => {
-    const cmd = "cat > /tmp/x && echo 'hi'";
-    const argv = sshArgv('1.2.3.4', cmd);
-    assert.strictEqual(argv.at(-1), cmd);
-  });
-});
-
-/**
  * The review path must fetch the PR diff with the runner's OWN token over the
  * REST diff media type — never via `gh pr diff`. On the control box `gh`
  * authenticates through its GraphQL path and rejects the installation token that
@@ -208,27 +146,5 @@ describe('fetchPrDiff', () => {
     );
     assert.isDefined(err);
     assert.match(err ?? '', /401/);
-  });
-});
-
-describe('buildRunnerBundle', () => {
-  it('bundles the worker runner into one artifact and memoizes it', async () => {
-    const a = await buildRunnerBundle();
-    assert.strictEqual(a.length > 0, true);
-    // Bundled, not a module reference — sdk/effect are inlined into the artifact.
-    assert.strictEqual(a.includes('createOpencodeServer'), true);
-    const b = await buildRunnerBundle();
-    assert.strictEqual(a === b, true, 'second call returns the memoized bundle');
-  });
-});
-
-describe('buildReviewRunnerBundle', () => {
-  it('bundles the review runner (FIX 1) into one inlined artifact and memoizes it', async () => {
-    const a = await buildReviewRunnerBundle();
-    assert.strictEqual(a.length > 0, true);
-    // The opencode SDK is inlined so the leased box needs no install.
-    assert.strictEqual(a.includes('createOpencodeServer'), true);
-    const b = await buildReviewRunnerBundle();
-    assert.strictEqual(a === b, true, 'second call returns the memoized bundle');
   });
 });
