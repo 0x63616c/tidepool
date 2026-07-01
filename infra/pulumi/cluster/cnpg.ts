@@ -65,12 +65,49 @@ export function installCnpg(provider: k8s.Provider): void {
   // from its compiled-in schema, so preview stays offline. v2 fetches the live
   // cluster's /openapi/v2 to type the manifest — an apiserver call the firewalled
   // preview runner can't make.
+  //
+  // MIGRATION SAFETY (tckt_bmdbr) — the v2→v1 switch (PR #59) is a Pulumi *rename*,
+  // not an in-place edit: the component's type token changes from
+  // `kubernetes:yaml/v2:ConfigFile` to `kubernetes:yaml:ConfigFile`, which rewrites the
+  // URN of the component AND every child object (a child URN is `<parentURN>$type::name`).
+  // With no alias, Pulumi treats each new-URN child as a fresh CREATE and each old-URN
+  // child as an orphaned DELETE — and orphan deletes run *after* creates, so the merge-to-
+  // main apply hit the live cluster with "… already exists" on all 16 children (run
+  // 28536068245). `deleteBeforeReplace` ALONE does not fix this: it only sequences a
+  // resource Pulumi already sees as *replacing* one, and a pure create is not a replace, so
+  // it is a no-op there. The k8s provider's own error says exactly this: "Renaming a Pulumi
+  // resource: use an alias to preserve the identity, or use deleteBeforeReplace if the
+  // resource needs replacement." Fix = both halves:
+  //   1. `aliases: [{ type: 'kubernetes:yaml/v2:ConfigFile' }]` on the component re-
+  //      establishes identity across the rename. Pulumi auto-propagates a parent alias to
+  //      every child (children are parented under the ConfigFile), so each child's OLD v2
+  //      URN is found in state and the live object is ADOPTED in place — no create, no
+  //      collision. The vendored manifest is byte-identical to what v2 applied, so adoption
+  //      is a no-op/update, never a replace.
+  //   2. The `transformations` hook stamps `deleteBeforeReplace = true` on every child (a
+  //      component-level option does NOT propagate to children). Belt-and-suspenders: if a
+  //      child's v1-computed inputs ever DO force a replacement, it deletes-first so it still
+  //      cannot collide. DB data is disposable (backups/contents don't matter), so a
+  //      destructive replace of any barman child is acceptable — the only requirement is a
+  //      clean gated `pulumi up`.
+  // The `objectstores.barmancloud.cnpg.io` CRD is one of these children: adopted in place by
+  // the alias, so the live `pg-objectstore` CR below is NOT cascade-deleted and the CNPG
+  // chain (ObjectStore → Cluster → ScheduledBackup) needs no accompanying change.
   const barmanPlugin = new k8s.yaml.ConfigFile(
     'barman-cloud-plugin',
     {
       file: join(__dirname, 'manifests', `barman-cloud-plugin-${CNPG.barmanPluginVersion}.yaml`),
+      transformations: [
+        (_obj, childOpts) => {
+          childOpts.deleteBeforeReplace = true;
+        },
+      ],
     },
-    { ...opts, dependsOn: [certManager, cnpgSystemNs] },
+    {
+      ...opts,
+      dependsOn: [certManager, cnpgSystemNs],
+      aliases: [{ type: 'kubernetes:yaml/v2:ConfigFile' }],
+    },
   );
 
   // ── S3 credentials for backups (from the sops-decrypted env at apply) ──────────
