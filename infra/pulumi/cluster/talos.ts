@@ -156,7 +156,15 @@ export function createControlPlane(
     { dependsOn: [node] },
   );
 
-  const kube = talos.cluster.getKubeconfigOutput(
+  // Kubeconfig as a RESOURCE, not the `getKubeconfig` data source. An invoke re-runs
+  // on EVERY preview and — now that the cluster is live — eagerly dials the node's
+  // apid:50000 to fetch the config, which the PR `preview` runner can't reach through
+  // the firewall (only the `up` job injects its runner /32). A resource's network read
+  // is inert at preview: its output is unknown until applied, so k8s resources plan as
+  // creates against an unknown kubeconfig — the preview-safety the design intends.
+  // (The provider deprecation notice steers to this resource for the same reason.)
+  const kube = new talos.cluster.Kubeconfig(
+    'talos-kubeconfig',
     { clientConfiguration: secrets.clientConfiguration, node: cpIp.ipAddress },
     { dependsOn: [bootstrap] },
   );
