@@ -287,22 +287,20 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
 - Cost safety is a tenet-level concern: any change that could weaken L1–L6 needs human approval.
 
 ### Deploy & GitOps for the control plane itself
-- **First install = cloud-init (the only imperative first-touch).** CI `pulumi up` creates the main
-  box; cloud-init installs runtime (bun/node/git/sops/age), clones `tidepool` @ pinned ref, injects
-  the main-box age key (CI decrypts from sops → Pulumi config), `sops -d` secrets, `bun install
-  --frozen-lockfile`, writes `tidepool.service`, `systemctl enable --now`.
-- **Ongoing deploy = pull-based, two lanes:**
-  - *App/reconciler/config/secrets:* merge to `main` → box **self-update systemd timer** sees new SHA
-    → `git pull` + `bun install --frozen-lockfile` + graceful `systemctl restart`. Pull-based → **no
-    inbound access needed** (fits outbound-only box). Restart is safe mid-task (reattach handles +
-    persistent volume).
-  - *Infra (`infra/**`):* PR → CI `pulumi preview`; merge → CI `pulumi up`. Reprovision → cloud-init
-    reinstalls → resume from volume.
-- **Workers:** snapshot bakes heavy invariant runtime (bun/node/opencode binary); worker **clones
-  `tidepool` @ pinned ref at boot** and runs the runner from source → always-current, no
-  snapshot-rebuild pipeline in v1.
-- Net: cloud-init does first install; **systemd + `git pull` does every deploy after.** Same
-  machinery, no manual SSH-fiddle, resumable across restarts.
+> Post-migration the control plane is a k8s Deployment (Talos/Pulumi cluster), not a box. The
+> box/cloud-init/systemd deploy path below is retired; the k8s flow is authoritative.
+- **Ongoing deploy = push-based, fully automatic on merge to `main`:**
+  - *Images:* `images.yml` builds + pushes `control-plane` + `agent-worker` to ghcr, tagged `:${sha}`
+    (immutable per commit) + `:latest`.
+  - *Apply:* `infra.yml` up-job resolves **this commit's** freshly-built image to a digest
+    (polls ghcr, fails closed if absent) and `pulumi up`s with it (`config.ts` `pickImage` prefers the
+    `TIDEPOOL_DEPLOY_*_IMAGE` override over the git-pinned default, rejecting any non-`@sha256` ref).
+    The control-plane Deployment rerolls (RollingUpdate); in-flight worker Jobs are untouched; new
+    Jobs inherit the new agent-worker image via `TIDEPOOL_AGENT_WORKER_IMAGE`. No hand-editing a
+    pinned digest, no approval gate (personal scale; `environment: production` can re-add reviewers).
+  - *Infra changes (`infra/**`):* PR → `pulumi preview`; merge → the same up-job applies.
+- Control-plane state is in Postgres, so a reroll is a brief reconcile pause, not lost work; the
+  reconciler resumes polling existing work handles on restart.
 
 ### Surface & cost visibility
 - **CLI-first, AXI-compliant; no TUI in v1.** `tp add | ls | logs | transcript | trace | cost`. AXI

@@ -4,6 +4,7 @@ import {
   buildWorkerDriverRules,
   buildWorkerEgressPolicySpec,
   controlPortSourceCidrs,
+  pickImage,
 } from './guards';
 
 describe('assertAdminCidrsLocked (fail-closed firewall guard)', () => {
@@ -71,6 +72,23 @@ describe('buildWorkerEgressPolicySpec (tenet-9 wall)', () => {
       return ports?.some((p) => p.port === 53);
     });
     expect(dns).toBeDefined();
+  });
+});
+
+describe('pickImage (CI auto-deploy override, fail-closed on mutable tags)', () => {
+  const gitPinned = 'ghcr.io/0x63616c/tidepool-control-plane@sha256:aaa';
+  const ciResolved = 'ghcr.io/0x63616c/tidepool-control-plane@sha256:bbb';
+
+  it('uses the git-pinned config value when there is no CI override', () => {
+    expect(pickImage(undefined, gitPinned)).toBe(gitPinned);
+  });
+
+  it('prefers the CI-resolved digest override when present', () => {
+    expect(pickImage(ciResolved, gitPinned)).toBe(ciResolved);
+  });
+
+  it('rejects a mutable-tag override (must be @sha256-pinned, tenet 8)', () => {
+    expect(() => pickImage('ghcr.io/0x63616c/tidepool-control-plane:latest', gitPinned)).toThrow();
   });
 });
 
