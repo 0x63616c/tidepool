@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Command, type CommandExecutor, FileSystem } from '@effect/platform';
-import { Data, Duration, Effect, Option, Schema, type Scope, Stream } from 'effect';
+import { Data, Deferred, Duration, Effect, Schema, type Scope, Stream } from 'effect';
 
 /**
  * Client contexts — how `tp` (on a laptop) picks which backend to drive. This is
@@ -296,45 +296,48 @@ export const resolveBaseUrl = (
     `svc/${pf.service}`,
     `${pf.localPort}:${pf.remotePort}`,
   );
-  const ready = 'Forwarding from';
-  return Command.start(cmd).pipe(
-    Effect.mapError((e) => new PortForwardError({ message: String(e) })),
-    Effect.flatMap((proc) =>
-      proc.stdout.pipe(
+  const marker = 'Forwarding from';
+  return Effect.gen(function* () {
+    const proc = yield* Command.start(cmd).pipe(
+      Effect.mapError((e) => new PortForwardError({ message: String(e) })),
+    );
+    const ready = yield* Deferred.make<void>();
+    // CRITICAL: keep draining kubectl's stdout for the whole tunnel lifetime.
+    // kubectl logs a line per proxied connection ("Handling connection for …");
+    // if we stop reading, its stdout pipe fills / closes and kubectl dies with
+    // SIGPIPE exactly when the first request arrives ("socket closed
+    // unexpectedly"). A forked drain that never ends avoids that, and signals
+    // readiness on the "Forwarding from" line.
+    yield* proc.stdout
+      .pipe(
         Stream.decodeText(),
         Stream.splitLines,
-        Stream.takeUntil((l) => l.includes(ready)),
-        // The LAST line before the stream ends: the readiness line if the tunnel
-        // came up, or something else if kubectl died first (service missing, RBAC).
-        Stream.runLast,
-        Effect.timeoutFail({
-          duration: Duration.seconds(8),
-          onTimeout: () =>
-            new PortForwardError({ message: 'timed out opening kubectl port-forward' }),
-        }),
-        Effect.flatMap((last) =>
-          Option.match(last, {
-            onSome: (l) =>
-              l.includes(ready)
-                ? Effect.void
-                : Effect.fail(
-                    new PortForwardError({
-                      message: `kubectl port-forward exited before ready: ${l}`,
-                    }),
-                  ),
-            onNone: () =>
-              Effect.fail(
-                new PortForwardError({
-                  message: 'kubectl port-forward exited before the tunnel was ready',
-                }),
-              ),
-          }),
+        Stream.runForEach((l) =>
+          l.includes(marker) ? Deferred.succeed(ready, undefined) : Effect.void,
         ),
-        Effect.mapError((e) =>
-          e instanceof PortForwardError ? e : new PortForwardError({ message: String(e) }),
+      )
+      .pipe(Effect.forkScoped);
+    // Ready when the tunnel binds; fail fast if kubectl exits first (bad svc,
+    // RBAC, VPN down) or nothing binds within the deadline.
+    yield* Deferred.await(ready).pipe(
+      Effect.raceFirst(
+        proc.exitCode.pipe(
+          Effect.mapError((e) => new PortForwardError({ message: String(e) })),
+          Effect.flatMap((code) =>
+            Effect.fail(
+              new PortForwardError({
+                message: `kubectl port-forward exited (code ${code}) before the tunnel was ready — is the VPN up and the service present?`,
+              }),
+            ),
+          ),
         ),
       ),
-    ),
-    Effect.as(`http://127.0.0.1:${pf.localPort}`),
-  );
+      Effect.timeoutFail({
+        duration: Duration.seconds(10),
+        onTimeout: () =>
+          new PortForwardError({ message: 'timed out opening kubectl port-forward' }),
+      }),
+    );
+    return `http://127.0.0.1:${pf.localPort}`;
+  });
 };
