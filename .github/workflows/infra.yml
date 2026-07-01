@@ -1,10 +1,12 @@
-name: Infra
+name: infra
 
 # Tidepool Kubernetes cluster (Pulumi, infra/pulumi/cluster).
 #   PR   → `pulumi preview` (read-only: computes the plan, creates NOTHING).
 #   main → `pulumi up`, but the job runs in the `production` GitHub Environment,
 #          which requires a human (Calum) to click approve. So MERGING is safe —
 #          the live apply pauses for a human, never auto-spends (tenet 6).
+#          On success the job comments the deploy result on the merged PR — squash
+#          merges break GitHub's native PR↔deployment link, so we post it ourselves.
 #
 # Secrets flow: SOPS_AGE_KEY (the `ci` age key) is the ONLY GitHub Actions secret.
 # It decrypts the hcloud token, Hetzner S3 creds, and the Pulumi config passphrase
@@ -42,6 +44,8 @@ on:
 permissions:
   contents: read
   packages: read # deploy-job pulls the current commit's image digests from ghcr (auto-deploy)
+  pull-requests: write # deploy-job comments the deploy result on the merged PR (GitLab-style visibility)
+  deployments: read # deploy-job reads the environment deployment url for the PR comment
 
 # Never cancel an in-flight apply; previews are cheap enough to let run.
 concurrency:
@@ -235,3 +239,20 @@ jobs:
           # Auto-deploy: current-commit image digests → config.ts pickImage override.
           TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE: ${{ env.TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE }}
           TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE: ${{ env.TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE }}
+      - name: comment deploy result on the merged PR (GitLab-style PR visibility)
+        # GitHub's native `environment:` deployment auto-links to a PR only when the
+        # PR's head sha lands on main — which squash-merge (our default) never does,
+        # so the merged PR shows no deploy. Resolve the PR the merge commit closed and
+        # post the deploy result as a comment (the Vercel/Netlify pattern). Best-effort:
+        # a comment failure must never fail a green apply, hence `|| true`.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '.[0].number' 2>/dev/null || true)
+          [ -n "$pr" ] && [ "$pr" != "null" ] || { echo "no PR for ${{ github.sha }}; skipping comment"; exit 0; }
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          env_url="${{ github.server_url }}/${{ github.repository }}/deployments/production"
+          gh api "repos/${{ github.repository }}/issues/${pr}/comments" \
+            -f body="🚀 Deployed \`${{ github.sha }}\` to **production** — [run](${run_url}) · [environment](${env_url})" \
+            >/dev/null || true
