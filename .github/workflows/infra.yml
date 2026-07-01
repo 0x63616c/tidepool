@@ -130,13 +130,28 @@ jobs:
           aws_key=$(sops -d --extract '["access_key_id"]' secrets/hetzner_s3_credentials.enc.yaml)
           aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
           pulumi_passphrase=$(sops -d --extract '["pulumi_config_passphrase"]' secrets/pulumi_config_passphrase.enc.yaml)
+          # PR-6.5 (human-approved tenet-9 widening): the control-plane k8s Secret
+          # is seeded from these two. up-job ONLY — preview renders them empty.
+          forge_token=$(sops -d --extract '["forge_github_token"]' secrets/forge_github_token.enc.yaml)
+          opencode_auth=$(sops -d --extract '["runner_opencode_auth_json"]' secrets/runner_opencode_auth_json.enc.yaml)
           echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
-          echo "::add-mask::$pulumi_passphrase"
+          echo "::add-mask::$pulumi_passphrase"; echo "::add-mask::$forge_token"
+          # opencode auth is JSON and may be multi-line: mask line-by-line — a single
+          # `::add-mask::$multiline` would register only line 1 and PRINT the rest.
+          while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done <<<"$opencode_auth"
           {
             echo "HCLOUD_TOKEN=$hcloud_token"
             echo "AWS_ACCESS_KEY_ID=$aws_key"
             echo "AWS_SECRET_ACCESS_KEY=$aws_secret"
             echo "PULUMI_CONFIG_PASSPHRASE=$pulumi_passphrase"
+            echo "TIDEPOOL_FORGE_GITHUB_TOKEN=$forge_token"
+          } >>"$GITHUB_ENV"
+          # Multi-line-safe export (heredoc): a plain `NAME=$val` truncates JSON at
+          # the first newline and corrupts $GITHUB_ENV.
+          {
+            echo "TIDEPOOL_OPENCODE_AUTH_JSON<<TIDEPOOL_OC_EOF"
+            printf '%s\n' "$opencode_auth"
+            echo "TIDEPOOL_OC_EOF"
           } >>"$GITHUB_ENV"
       - name: compute this runner's egress IP (#4 JIT apiserver reachability)
         run: |
