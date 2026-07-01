@@ -1,0 +1,15 @@
+# Keep the build context lean and guarantee no host state / secret material is
+# ever baked into an image. Creds are handled at RUNTIME via a mounted /secrets
+# volume (see src/worker/agent-worker.ts), never copied in at build time.
+.git
+node_modules
+**/node_modules
+.claude
+.handoffs
+secrets
+**/*.enc.yaml
+scratchpad
+dist
+*.log
+.env
+.envrc
