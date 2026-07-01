@@ -174,6 +174,8 @@ jobs:
           # stale image. config.ts (pickImage) prefers these over the git-pinned
           # default and rejects a non-@sha256 ref.
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Diagnostics MUST go to stderr — stdout is captured as the resolved ref,
+          # so a "waiting..." line on stdout would poison $GITHUB_ENV (invalid format).
           resolve() {
             repo="$1"
             tries=0
@@ -181,16 +183,20 @@ jobs:
               tries=$((tries + 1))
               if [ "$tries" -ge 30 ]; then
                 echo "timed out waiting for ghcr.io/0x63616c/${repo}:${{ github.sha }}" >&2
-                exit 1
+                return 1
               fi
-              echo "waiting for ${repo}:${{ github.sha }} (attempt ${tries})..."
+              echo "waiting for ${repo}:${{ github.sha }} (attempt ${tries})..." >&2
               sleep 10
             done
             printf 'ghcr.io/0x63616c/%s@%s' "$repo" "$digest"
           }
+          # Assign first so `set -e` fails the step closed if a resolve times out,
+          # rather than writing an empty override.
+          cp=$(resolve tidepool-control-plane)
+          aw=$(resolve tidepool-agent-worker)
           {
-            echo "TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE=$(resolve tidepool-control-plane)"
-            echo "TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE=$(resolve tidepool-agent-worker)"
+            echo "TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE=${cp}"
+            echo "TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE=${aw}"
           } >>"$GITHUB_ENV"
       - name: pulumi up
         uses: pulumi/actions@v6
