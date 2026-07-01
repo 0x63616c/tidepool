@@ -15,6 +15,22 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Postgres service container so the parametrized TicketStore contract runs on
+    # pg in CI too, not just sqlite — the cutover's whole point, mechanically
+    # gate-enforced (tenet 5). The test skips this backing when the URL is unset
+    # (local `bun run check` needs no cluster); here we set it so pg is covered.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -27,6 +43,8 @@ jobs:
         run: bun run typecheck
       - name: test
         run: bun run test
+        env:
+          TIDEPOOL_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/postgres
 
   # Proves the worker install recipe (bake.sh) actually works on a clean box.
   # Runs the EXPORTED workerInstallScript() byte-for-byte inside a STOCK
