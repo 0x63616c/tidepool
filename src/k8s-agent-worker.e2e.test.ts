@@ -67,41 +67,45 @@ const workerLayer = makeK8sAgentWorker({
   genSuffix: () => Date.now().toString(36).slice(-6),
 }).pipe(Layer.provide(Layer.mergeAll(FetchHttpClient.layer, fakeBroker, configLayer)));
 
+// `it.live` (not `it.effect`): this drives a REAL cluster, so it needs the live
+// Clock — `it.effect`'s TestClock would freeze the poll `sleep`s (tenet 10: still
+// an Effect-native test, just with real time).
 describe.skipIf(!RUN_E2E)('K8sAgentWorker (kind e2e)', () => {
-  it('dispatches a Job, harvests its RunnerResult on success, then cancels', async () => {
-    const program = Effect.gen(function* () {
-      const worker = yield* AgentWorker;
+  it.live(
+    'dispatches a Job, harvests its RunnerResult on success, then cancels',
+    () =>
+      Effect.gen(function* () {
+        const worker = yield* AgentWorker;
 
-      const handle = yield* worker.dispatch(workInput);
-      expect(handle).toMatch(/^tp-work-tckt-e2e001-/);
+        const handle = yield* worker.dispatch(workInput);
+        expect(handle).toMatch(/^tp-work-tckt-e2e001-/);
 
-      // Poll until the Job leaves Running (stub finishes in seconds).
-      const waitDone = (): Effect.Effect<WorkStatus> =>
-        worker.poll(handle).pipe(
-          Effect.flatMap((s) =>
-            s._tag === 'Running'
-              ? Effect.sleep('2 seconds').pipe(Effect.flatMap(() => waitDone()))
-              : Effect.succeed(s),
-          ),
-          Effect.orDie,
-        );
-      const status = yield* waitDone().pipe(Effect.timeout('120 seconds'));
+        // Poll until the Job leaves Running (stub finishes in seconds).
+        const waitDone = (): Effect.Effect<WorkStatus> =>
+          worker.poll(handle).pipe(
+            Effect.flatMap((s) =>
+              s._tag === 'Running'
+                ? Effect.sleep('2 seconds').pipe(Effect.flatMap(() => waitDone()))
+                : Effect.succeed(s),
+            ),
+            Effect.orDie,
+          );
+        const status = yield* waitDone().pipe(Effect.timeout('120 seconds'));
 
-      expect(status._tag).toBe('Succeeded');
-      if (status._tag === 'Succeeded') {
-        expect(status.outcome._tag).toBe('Work');
-        if (status.outcome._tag === 'Work') {
-          expect(status.outcome.result.commitSha).toBe(STUB_COMMIT);
-          expect(status.outcome.result.title).toContain('tckt_e2e001');
+        expect(status._tag).toBe('Succeeded');
+        if (status._tag === 'Succeeded') {
+          expect(status.outcome._tag).toBe('Work');
+          if (status.outcome._tag === 'Work') {
+            expect(status.outcome.result.commitSha).toBe(STUB_COMMIT);
+            expect(status.outcome.result.title).toContain('tckt_e2e001');
+          }
         }
-      }
 
-      // Cancel is idempotent and cascades the owned Secret via ownerReference.
-      yield* worker.cancel(handle);
-      yield* worker.reap();
-      return handle;
-    }).pipe(Effect.provide(workerLayer));
-
-    await Effect.runPromise(program);
-  }, 180_000);
+        // Cancel is idempotent and cascades the owned Secret via ownerReference.
+        yield* worker.cancel(handle);
+        yield* worker.reap();
+        return handle;
+      }).pipe(Effect.provide(workerLayer)),
+    180_000,
+  );
 });

@@ -134,13 +134,79 @@ const workAnnotations = (input: DispatchInput): Record<string, string> =>
     ? { 'tidepool/pr-title': workTitle(input.ticket), 'tidepool/pr-body': workBody(input.ticket) }
     : {};
 
+interface VolumeMount {
+  readonly name: string;
+  readonly mountPath: string;
+  readonly subPath: string;
+  readonly readOnly: boolean;
+}
+
+/** Typed Job manifest — encodes the invariants (no cpu limit) in the type. */
+export interface JobManifest {
+  readonly apiVersion: 'batch/v1';
+  readonly kind: 'Job';
+  readonly metadata: {
+    readonly name: string;
+    readonly namespace: string;
+    readonly labels: Record<string, string>;
+    readonly annotations: Record<string, string>;
+  };
+  readonly spec: {
+    readonly backoffLimit: number;
+    readonly activeDeadlineSeconds: number;
+    readonly ttlSecondsAfterFinished: number;
+    readonly template: {
+      readonly metadata: { readonly labels: Record<string, string> };
+      readonly spec: {
+        readonly restartPolicy: 'Never';
+        readonly containers: ReadonlyArray<{
+          readonly name: string;
+          readonly image: string;
+          readonly workingDir: string;
+          readonly resources: {
+            readonly requests: { readonly cpu: string; readonly memory: string };
+            // No cpu limit by design (agents burst); `cpu?: never` documents it.
+            readonly limits: { readonly memory: string; readonly cpu?: never };
+          };
+          readonly volumeMounts: ReadonlyArray<VolumeMount>;
+        }>;
+        readonly volumes: ReadonlyArray<{
+          readonly name: string;
+          readonly secret: { readonly secretName: string; readonly defaultMode: number };
+        }>;
+      };
+    };
+  };
+}
+
+/** Typed per-Job Secret manifest. */
+export interface SecretManifest {
+  readonly apiVersion: 'v1';
+  readonly kind: 'Secret';
+  readonly type: 'Opaque';
+  readonly metadata: {
+    readonly name: string;
+    readonly namespace: string;
+    readonly labels: Record<string, string>;
+    readonly ownerReferences: ReadonlyArray<{
+      readonly apiVersion: string;
+      readonly kind: string;
+      readonly name: string;
+      readonly uid: string;
+      readonly controller: boolean;
+      readonly blockOwnerDeletion: boolean;
+    }>;
+  };
+  readonly stringData: { readonly 'config.json': string; readonly 'auth.json': string };
+}
+
 /** The namespaced `batch/v1` Job manifest. */
 export const buildJobManifest = (args: {
   readonly handle: string;
   readonly config: K8sWorkerConfig;
   readonly input: DispatchInput;
   readonly annotations?: Record<string, string>;
-}): unknown => {
+}): JobManifest => {
   const { handle, config, input } = args;
   const labels = jobLabels(input.kind, input.ticket.id);
   return {
@@ -206,7 +272,7 @@ export const buildSecretManifest = (args: {
   readonly configJson: string;
   readonly opencodeAuth: string;
   readonly labels: Record<string, string>;
-}): unknown => ({
+}): SecretManifest => ({
   apiVersion: 'v1',
   kind: 'Secret',
   type: 'Opaque',
@@ -230,17 +296,53 @@ export const buildSecretManifest = (args: {
 
 // ── Status + harvest (pure) ──────────────────────────────────────────────────
 
-interface JobStatus {
-  readonly active?: number;
-  readonly succeeded?: number;
-  readonly failed?: number;
-  readonly conditions?: ReadonlyArray<{
-    readonly type?: string;
-    readonly status?: string;
-    readonly reason?: string;
-    readonly message?: string;
-  }>;
-}
+// Inbound k8s responses are decoded with `@effect/schema` (tenet 10), same as
+// the harvest path — never hand-cast. Structs ignore unknown keys, so these list
+// only the handful of fields poll/dispatch actually read.
+const K8sRecord = Schema.Record({ key: Schema.String, value: Schema.String });
+
+const JobStatusSchema = Schema.Struct({
+  active: Schema.optional(Schema.Number),
+  succeeded: Schema.optional(Schema.Number),
+  failed: Schema.optional(Schema.Number),
+  conditions: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        type: Schema.optional(Schema.String),
+        status: Schema.optional(Schema.String),
+        reason: Schema.optional(Schema.String),
+        message: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
+});
+type JobStatus = Schema.Schema.Type<typeof JobStatusSchema>;
+
+const K8sMeta = Schema.Struct({
+  uid: Schema.optional(Schema.String),
+  labels: Schema.optional(K8sRecord),
+  annotations: Schema.optional(K8sRecord),
+});
+
+/** A created/read Job — only `.metadata` + `.status` are consumed. */
+const JobResource = Schema.Struct({
+  metadata: Schema.optional(K8sMeta),
+  status: Schema.optional(JobStatusSchema),
+});
+
+/** A pod list — only the first item's name is consumed. */
+const PodList = Schema.Struct({
+  items: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        metadata: Schema.optional(Schema.Struct({ name: Schema.optional(Schema.String) })),
+      }),
+    ),
+  ),
+});
+
+/** A k8s `Status` error body — only `.message` is surfaced. */
+const ErrorBody = Schema.Struct({ message: Schema.optional(Schema.String) });
 
 /** Fold a k8s Job `.status` into a coarse phase (+ a reason for failures). */
 export const classifyJobStatus = (
@@ -255,11 +357,28 @@ export const classifyJobStatus = (
   return { phase: 'running', reason: '' };
 };
 
-const lastJsonLine = (logs: string): string | undefined =>
-  logs
+/**
+ * Decode the LAST line of `logs` that parses as `schema`. The worker writes its
+ * result as the final stdout line, but a later log/warning could also start with
+ * `{`; scanning newest-first for the first VALID decode is robust to that.
+ */
+const decodeLastResult = <A, I>(
+  logs: string,
+  schema: Schema.Schema<A, I>,
+): Effect.Effect<A, AgentFailed> => {
+  const candidates = logs
     .split('\n')
     .map((l) => l.trim())
-    .findLast((l) => l.startsWith('{'));
+    .filter((l) => l.startsWith('{'))
+    .reverse();
+  const noLine = new AgentFailed({
+    reason: `no valid result line in worker logs. tail: ${logs.slice(-300)}`,
+  });
+  if (candidates.length === 0) return Effect.fail(noLine);
+  return Effect.firstSuccessOf(
+    candidates.map((c) => Schema.decode(Schema.parseJson(schema))(c)),
+  ).pipe(Effect.mapError(() => noLine));
+};
 
 /**
  * Turn a succeeded Job's pod logs into a `DispatchOutcome`. Work runs emit a
@@ -273,18 +392,8 @@ export const harvestOutcome = (args: {
   readonly annotations: Record<string, string>;
 }): Effect.Effect<DispatchOutcome, AgentFailed> =>
   Effect.gen(function* () {
-    const line = lastJsonLine(args.logs);
-    if (line === undefined)
-      return yield* Effect.fail(
-        new AgentFailed({
-          reason: `no result line in worker logs. tail: ${args.logs.slice(-300)}`,
-        }),
-      );
-    const decodeFail = (e: unknown) => new AgentFailed({ reason: `decode worker result: ${e}` });
     if (args.kind === 'work') {
-      const { commitSha, usage } = yield* Schema.decode(Schema.parseJson(RunnerResult))(line).pipe(
-        Effect.mapError(decodeFail),
-      );
+      const { commitSha, usage } = yield* decodeLastResult(args.logs, RunnerResult);
       return DispatchOutcome.Work({
         result: {
           title: args.annotations['tidepool/pr-title'] ?? '',
@@ -294,9 +403,7 @@ export const harvestOutcome = (args: {
         },
       });
     }
-    const { text, usage } = yield* Schema.decode(Schema.parseJson(ReviewRunnerResult))(line).pipe(
-      Effect.mapError(decodeFail),
-    );
+    const { text, usage } = yield* decodeLastResult(args.logs, ReviewRunnerResult);
     return DispatchOutcome.Review({ result: { verdict: parseVerdict(text), usage } });
   });
 
@@ -309,7 +416,11 @@ const k8sHeaders = (token: string): Record<string, string> => ({
 
 const isOk = (status: number): boolean => status >= 200 && status < 300;
 
-/** Fold a transport/decode failure into `AgentFailed` (rate-cap aware). */
+/**
+ * Fold a transport/decode failure into `AgentFailed`. (A 429 is mapped to
+ * `RateCapped` inline at the dispatch call site from the response status;
+ * everything reaching here is a transport/decode error, hence always AgentFailed.)
+ */
 const httpFail = (e: HttpClientError.HttpClientError): Effect.Effect<never, AgentFailed> =>
   Effect.fail(new AgentFailed({ reason: String(e) }));
 
@@ -342,12 +453,21 @@ export const makeK8sAgentWorker = (
       const jobsUrl = `${cfg.apiBaseUrl}/apis/batch/v1/namespaces/${cfg.namespace}/jobs`;
       const secretsUrl = `${cfg.apiBaseUrl}/api/v1/namespaces/${cfg.namespace}/secrets`;
       const podsUrl = `${cfg.apiBaseUrl}/api/v1/namespaces/${cfg.namespace}/pods`;
+      // TODO(PR-6): apply `cfg.caCert` to the HttpClient for in-cluster TLS trust.
+      // The caller provides the HttpClient layer (kind CI uses a plain-http proxy),
+      // so the CA is carried in config but not yet wired into the transport here.
       const headers = k8sHeaders(cfg.token);
       const post = (url: string, body: unknown) =>
         client.post(url, {
           headers,
           body: HttpBody.raw(JSON.stringify(body), { contentType: 'application/json' }),
         });
+      const deleteJob = (handle: string) =>
+        client.del(`${jobsUrl}/${handle}?propagationPolicy=Background`, { headers });
+      const decodeJson = <A, I>(schema: Schema.Schema<A, I>, value: unknown, ctx: string) =>
+        Schema.decodeUnknown(schema)(value).pipe(
+          Effect.mapError((e) => new AgentFailed({ reason: `decode k8s ${ctx}: ${e}` })),
+        );
 
       const dispatch: (
         input: DispatchInput,
@@ -377,18 +497,29 @@ export const makeK8sAgentWorker = (
             jobsUrl,
             buildJobManifest({ handle, config: cfg, input, annotations: workAnnotations(input) }),
           );
-          const jobBody = (yield* jobRes.json) as {
-            readonly metadata?: { readonly uid?: string };
-            readonly message?: string;
-          };
           if (!isOk(jobRes.status)) {
+            const body = yield* decodeJson(ErrorBody, yield* jobRes.json, 'create Job error');
             return yield* jobRes.status === 429
               ? Effect.fail(new RateCapped({}))
               : Effect.fail(
                   new AgentFailed({
-                    reason: `k8s create Job ${jobRes.status}: ${jobBody.message ?? 'unknown'}`,
+                    reason: `k8s create Job ${jobRes.status}: ${body.message ?? 'unknown'}`,
                   }),
                 );
+          }
+          const job = yield* decodeJson(JobResource, yield* jobRes.json, 'create Job');
+          const jobUid = job.metadata?.uid;
+          // The Secret's ownerReference (→ GC that cascades creds when the Job is
+          // deleted) is meaningless without the Job's uid. An empty uid would
+          // silently orphan the Secret so creds outlive the run (tenet 9) — fail
+          // hard rather than default to '' and mount stale creds.
+          if (!jobUid) {
+            yield* deleteJob(handle).pipe(Effect.ignore);
+            return yield* Effect.fail(
+              new AgentFailed({
+                reason: `k8s create Job ${handle}: no uid returned (ownerRef GC)`,
+              }),
+            );
           }
 
           const secretRes = yield* post(
@@ -396,14 +527,18 @@ export const makeK8sAgentWorker = (
             buildSecretManifest({
               handle,
               namespace: cfg.namespace,
-              jobUid: jobBody.metadata?.uid ?? '',
+              jobUid,
               configJson,
               opencodeAuth: creds.opencodeAuth,
               labels: jobLabels(input.kind, input.ticket.id),
             }),
           );
           if (!isOk(secretRes.status)) {
-            const body = (yield* secretRes.json) as { readonly message?: string };
+            const body = yield* decodeJson(ErrorBody, yield* secretRes.json, 'create Secret error');
+            // dispatch is non-atomic: the Job exists but has no creds Secret, so
+            // its pod would hang until `activeDeadlineSeconds`. Best-effort delete
+            // the orphan before surfacing the failure (the reconciler re-dispatches).
+            yield* deleteJob(handle).pipe(Effect.ignore);
             return yield* Effect.fail(
               new AgentFailed({
                 reason: `k8s create Secret ${secretRes.status}: ${body.message ?? 'unknown'}`,
@@ -416,15 +551,19 @@ export const makeK8sAgentWorker = (
       const poll: (handle: WorkHandle) => Effect.Effect<WorkStatus, AgentFailed> = (handle) =>
         Effect.gen(function* () {
           const jobRes = yield* client.get(`${jobsUrl}/${handle}`, { headers });
-          const job = (yield* jobRes.json) as {
-            readonly status?: JobStatus;
-            readonly metadata?: {
-              readonly labels?: Record<string, string>;
-              readonly annotations?: Record<string, string>;
-            };
-          };
+          // A 404 here is the ttl-vs-cadence race: once a finished Job's
+          // `ttlSecondsAfterFinished` elapses, k8s GCs it (and its logs), so a poll
+          // that lands after GC can no longer read the outcome. Report a clear
+          // terminal Failed rather than a confusing generic AgentFailed.
+          // TODO(PR-6): wire `ttlSecondsAfterFinished` >> the reconciler poll
+          // interval so a completed Job is always harvested before it is reaped.
+          if (jobRes.status === 404)
+            return WorkStatus.Failed({
+              reason: `Job ${handle} not found (never created, or ttl-reaped before harvest)`,
+            });
           if (!isOk(jobRes.status))
             return yield* Effect.fail(new AgentFailed({ reason: `k8s get Job ${jobRes.status}` }));
+          const job = yield* decodeJson(JobResource, yield* jobRes.json, 'get Job');
 
           const { phase, reason } = classifyJobStatus(job.status ?? {});
           if (phase === 'running') return WorkStatus.Running();
@@ -435,15 +574,13 @@ export const makeK8sAgentWorker = (
             `${podsUrl}?labelSelector=${encodeURIComponent(`job-name=${handle}`)}`,
             { headers },
           );
-          const pods = (yield* podRes.json) as {
-            readonly items?: ReadonlyArray<{ readonly metadata?: { readonly name?: string } }>;
-          };
+          const pods = yield* decodeJson(PodList, yield* podRes.json, 'list pods');
           const podName = pods.items?.[0]?.metadata?.name;
           if (podName === undefined)
             return WorkStatus.Failed({ reason: `no pod for succeeded Job ${handle}` });
           const logRes = yield* client.get(`${podsUrl}/${podName}/log`, { headers });
           const logs = yield* logRes.text;
-          const kind = (job.metadata?.labels?.['tidepool/kind'] ?? 'work') as 'work' | 'review';
+          const kind = job.metadata?.labels?.['tidepool/kind'] === 'review' ? 'review' : 'work';
           const outcome = yield* harvestOutcome({
             kind,
             logs,
@@ -452,20 +589,29 @@ export const makeK8sAgentWorker = (
           return WorkStatus.Succeeded({ outcome });
         }).pipe(Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }));
 
+      // `cancel` is `Effect<void>` by the seam (a gone worker IS success), so it
+      // cannot propagate a delete failure. Still, don't blanket-swallow: a real
+      // failure (500 / network) means the Job keeps spending — log it loudly.
+      // Only 404/2xx are silent success.
       const cancel: (handle: WorkHandle) => Effect.Effect<void> = (handle) =>
-        client
-          .del(`${jobsUrl}/${handle}?propagationPolicy=Background`, { headers })
-          // Cancel is idempotent: a gone Job (404) or any transport hiccup is fine.
-          .pipe(Effect.asVoid, Effect.ignore);
+        deleteJob(handle).pipe(
+          Effect.flatMap((res) =>
+            isOk(res.status) || res.status === 404
+              ? Effect.void
+              : Effect.logError(`k8s cancel Job ${handle} → ${res.status} (not deleted)`),
+          ),
+          Effect.catchAll((e) => Effect.logError(`k8s cancel Job ${handle} transport error: ${e}`)),
+        );
 
       const reap: () => Effect.Effect<{ readonly cancelled: readonly WorkHandle[] }> = () =>
         client
           .get(`${jobsUrl}?labelSelector=${encodeURIComponent(WORKER_SELECTOR)}`, { headers })
           // Listing proves reachability; actual deletion of finished Jobs (and
-          // their owned Secrets) is handled by `ttlSecondsAfterFinished`.
+          // their owned Secrets) is handled by `ttlSecondsAfterFinished`. A list
+          // failure is non-fatal to a sweep — log it rather than swallow silently.
           .pipe(
             Effect.asVoid,
-            Effect.ignore,
+            Effect.catchAll((e) => Effect.logError(`k8s reap list error: ${e}`)),
             Effect.as({ cancelled: [] as readonly WorkHandle[] }),
           );
 

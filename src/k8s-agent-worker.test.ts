@@ -1,6 +1,7 @@
+import { FetchHttpClient } from '@effect/platform';
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit } from 'effect';
-import { AgentFailed, type Ticket } from './domain.ts';
+import { Effect, Exit, Layer, Logger } from 'effect';
+import type { Ticket } from './domain.ts';
 import {
   buildAgentWorkerConfig,
   buildJobManifest,
@@ -9,9 +10,11 @@ import {
   harvestOutcome,
   type K8sWorkerConfig,
   k8sName,
+  k8sWorkerConfigLayer,
+  makeK8sAgentWorker,
   workHandleFor,
 } from './k8s-agent-worker.ts';
-import { DispatchOutcome } from './services.ts';
+import { AgentWorker, type AgentWorkerApi, CredentialBroker } from './services.ts';
 
 /**
  * K8sAgentWorker — unit tests over the pure manifest/mapping helpers. No cluster:
@@ -50,6 +53,13 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
 });
 
 const creds = { opencodeAuth: '{"openai":"auth"}', githubToken: 'ghs_tok' };
+
+/** First element or throw — narrows away `T | undefined` from indexed access. */
+const first = <T>(arr: ReadonlyArray<T>): T => {
+  const [x] = arr;
+  if (x === undefined) throw new Error('expected a non-empty array');
+  return x;
+};
 
 const workInput = {
   kind: 'work' as const,
@@ -129,7 +139,7 @@ describe('buildJobManifest', () => {
     config: CFG,
     input: workInput,
     annotations: { 'tidepool/pr-title': 'feat: x', 'tidepool/pr-body': 'goal' },
-  }) as any;
+  });
 
   it('is a batch/v1 Job named after the handle in the workers namespace', () => {
     assert.strictEqual(manifest.apiVersion, 'batch/v1');
@@ -162,7 +172,7 @@ describe('buildJobManifest', () => {
   });
 
   it('requests CPU with NO cpu limit; memory request == limit (OOM cap)', () => {
-    const res = manifest.spec.template.spec.containers[0].resources;
+    const res = first(manifest.spec.template.spec.containers).resources;
     assert.strictEqual(res.requests.cpu, '2');
     assert.strictEqual(res.requests.memory, '2Gi');
     assert.strictEqual(res.limits.memory, '2Gi');
@@ -170,12 +180,12 @@ describe('buildJobManifest', () => {
   });
 
   it('runs the configured image', () => {
-    assert.strictEqual(manifest.spec.template.spec.containers[0].image, CFG.image);
+    assert.strictEqual(first(manifest.spec.template.spec.containers).image, CFG.image);
   });
 
   it('mounts creds: auth.json at /secrets, config.json in the working dir', () => {
-    const c = manifest.spec.template.spec.containers[0];
-    const mounts = c.volumeMounts as Array<{ mountPath: string; subPath: string }>;
+    const c = first(manifest.spec.template.spec.containers);
+    const mounts = c.volumeMounts;
     const auth = mounts.find((m) => m.mountPath === '/secrets/auth.json');
     const conf = mounts.find((m) => m.subPath === 'config.json');
     assert.isDefined(auth);
@@ -183,7 +193,7 @@ describe('buildJobManifest', () => {
     assert.isDefined(conf);
     assert.strictEqual(conf?.mountPath, `${c.workingDir}/config.json`);
     // the secret is projected by name == handle
-    assert.strictEqual(manifest.spec.template.spec.volumes[0].secret.secretName, handle);
+    assert.strictEqual(first(manifest.spec.template.spec.volumes).secret.secretName, handle);
   });
 
   it('does not bake any secret value into the manifest', () => {
@@ -200,7 +210,7 @@ describe('buildSecretManifest', () => {
     configJson: '{"kind":"work"}',
     opencodeAuth: '{"openai":"auth"}',
     labels: { 'tidepool/ticket': 'tckt_ab12cd' },
-  }) as any;
+  });
 
   it('is an Opaque v1 Secret named after the handle with both keys', () => {
     assert.strictEqual(secret.apiVersion, 'v1');
@@ -212,7 +222,7 @@ describe('buildSecretManifest', () => {
   });
 
   it('is owned by the Job so k8s GC removes it on Job deletion', () => {
-    const owner = secret.metadata.ownerReferences[0];
+    const owner = first(secret.metadata.ownerReferences);
     assert.strictEqual(owner.kind, 'Job');
     assert.strictEqual(owner.uid, 'uid-123');
     assert.strictEqual(owner.name, 'tp-work-tckt-ab12cd-x7q2');
@@ -291,6 +301,20 @@ describe('harvestOutcome', () => {
     assert.strictEqual(outcome._tag === 'Work' && outcome.result.commitSha, 'deadbeef');
   });
 
+  it('skips a trailing invalid-JSON line and uses the last VALID result line', () => {
+    // A later log line can also start with `{` but not be a RunnerResult; the
+    // newest VALID decode wins, not merely the newest `{`-prefixed line.
+    const logs = `${runnerLine}\n{ not valid json`;
+    const outcome = Effect.runSync(
+      harvestOutcome({
+        kind: 'work',
+        logs,
+        annotations: { 'tidepool/pr-title': 't', 'tidepool/pr-body': 'b' },
+      }),
+    );
+    assert.strictEqual(outcome._tag === 'Work' && outcome.result.commitSha, 'deadbeef');
+  });
+
   it('fails with AgentFailed when no result line is present', () => {
     const exit = Effect.runSyncExit(
       harvestOutcome({ kind: 'work', logs: 'no json here\njust logs', annotations: {} }),
@@ -303,6 +327,130 @@ function runnerLineUsage() {
   return { model: 'm', tokensIn: 1, tokensOut: 1, wallTimeSec: 1 };
 }
 
-// Referenced to keep the import used even if a matcher above is trimmed.
-void DispatchOutcome;
-void AgentFailed;
+/**
+ * Wire tests over the real `@effect/platform` Fetch client with `globalThis.fetch`
+ * stubbed per-test (same pattern as `hetzner-box.test.ts`) — exercises the
+ * dispatch/poll/cancel error paths without a cluster.
+ */
+describe('K8sAgentWorker (wire)', () => {
+  const wireCfg: K8sWorkerConfig = { ...CFG, apiBaseUrl: 'https://k8s.test' };
+  const fakeBroker = Layer.succeed(CredentialBroker, {
+    credsFor: () => Effect.succeed({ opencodeAuth: '{"a":1}', githubToken: 'ghs_tok' }),
+  });
+  const workerLayer = makeK8sAgentWorker({ genSuffix: () => 'sfx1' }).pipe(
+    Layer.provide(Layer.mergeAll(FetchHttpClient.layer, fakeBroker, k8sWorkerConfigLayer(wireCfg))),
+  );
+  const runWorker = <A, E>(f: (w: AgentWorkerApi) => Effect.Effect<A, E>) =>
+    AgentWorker.pipe(Effect.flatMap(f), Effect.provide(workerLayer), Effect.runPromiseExit);
+  // Capture logs so cancel's "log, don't swallow" behavior is assertable.
+  const runWorkerCapturing = <A, E>(f: (w: AgentWorkerApi) => Effect.Effect<A, E>) => {
+    const logs: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message }) => {
+        logs.push(String(message));
+      }),
+    );
+    return AgentWorker.pipe(
+      Effect.flatMap(f),
+      Effect.provide(workerLayer),
+      Effect.provide(capture),
+      Effect.runPromiseExit,
+    ).then((exit) => ({ exit, logs }));
+  };
+
+  const HANDLE = 'tp-work-tckt-ab12cd-sfx1';
+  const method = (init?: { method?: string }) => init?.method ?? 'GET';
+
+  const stub = (
+    handler: (url: string, m: string) => Response,
+    calls: string[],
+  ): typeof globalThis.fetch =>
+    ((url: string | URL, init?: RequestInit) => {
+      const m = method(init as { method?: string });
+      calls.push(`${m} ${String(url)}`);
+      return Promise.resolve(handler(String(url), m));
+    }) as typeof fetch;
+
+  it('dispatch fails hard AND deletes the Job when the created Job has no uid', async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = stub((_url, m) => {
+      if (m === 'POST') return new Response(JSON.stringify({ metadata: {} }), { status: 201 });
+      return new Response('{}', { status: 200 });
+    }, calls);
+    const exit = await runWorker((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isFailure(exit));
+    // No Secret was created; the orphan Job was deleted.
+    assert.isFalse(calls.some((c) => c.includes('/secrets')));
+    assert.isTrue(calls.some((c) => c.startsWith(`DELETE https://k8s.test`) && c.includes(HANDLE)));
+  });
+
+  it('dispatch deletes the orphan Job when the Secret create fails', async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = stub((url, m) => {
+      if (m === 'POST' && url.includes('/jobs'))
+        return new Response(JSON.stringify({ metadata: { uid: 'u1' } }), { status: 201 });
+      if (m === 'POST' && url.includes('/secrets'))
+        return new Response(JSON.stringify({ message: 'boom' }), { status: 500 });
+      return new Response('{}', { status: 200 });
+    }, calls);
+    const exit = await runWorker((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isFailure(exit));
+    assert.isTrue(calls.some((c) => c.startsWith('DELETE') && c.includes(HANDLE)));
+  });
+
+  it('dispatch returns the handle when Job + Secret both create', async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = stub((url, m) => {
+      if (m === 'POST' && url.includes('/jobs'))
+        return new Response(JSON.stringify({ metadata: { uid: 'u1' } }), { status: 201 });
+      return new Response('{}', { status: 201 });
+    }, calls);
+    const exit = await runWorker((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isSuccess(exit));
+    if (Exit.isSuccess(exit)) assert.strictEqual(exit.value, HANDLE);
+  });
+
+  it('poll maps a 404 Job to terminal Failed (ttl-reap race), not AgentFailed', async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = stub(() => new Response('{}', { status: 404 }), calls);
+    const exit = await runWorker((w) =>
+      w.poll(workHandleFor('work', 'tckt_ab12cd', 'sfx1') as never),
+    );
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isSuccess(exit));
+    if (Exit.isSuccess(exit)) {
+      assert.strictEqual(exit.value._tag, 'Failed');
+      if (exit.value._tag === 'Failed') assert.include(exit.value.reason, 'not found');
+    }
+  });
+
+  it('cancel: void-success on both 404 and 500, but a 500 is LOGGED (not silently swallowed)', async () => {
+    const orig = globalThis.fetch;
+
+    globalThis.fetch = stub(() => new Response('{}', { status: 404 }), []);
+    const gone = await runWorkerCapturing((w) => w.cancel(HANDLE as never));
+
+    globalThis.fetch = stub(() => new Response('{}', { status: 500 }), []);
+    const failed = await runWorkerCapturing((w) => w.cancel(HANDLE as never));
+    globalThis.fetch = orig;
+
+    // Both are void-success (the seam has no error channel for cancel)...
+    assert.isTrue(Exit.isSuccess(gone.exit));
+    assert.isTrue(Exit.isSuccess(failed.exit));
+    // ...but a gone Job (404) is silent while a real failure (500) is surfaced.
+    assert.isFalse(gone.logs.some((l) => l.includes(HANDLE)));
+    assert.isTrue(failed.logs.some((l) => l.includes(HANDLE)));
+  });
+});
