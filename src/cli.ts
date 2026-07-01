@@ -11,7 +11,7 @@ import type { RunEvent, Ticket } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
 import { initStateBucket } from './object-storage.ts';
 import { reconcileForever, settle } from './reconciler.ts';
-import { AppConfigLive, LiveStack, SqliteTicketStore } from './runtime.ts';
+import { AppConfigLive, liveStack, ticketStoreLive } from './runtime.ts';
 import { type AgentWorker, type Forge, TicketStore } from './services.ts';
 import { costReport, traceReport } from './trace.ts';
 import { BunCommandRunner, DEFAULT_BOOTSTRAP_DIR, up } from './up.ts';
@@ -57,7 +57,7 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
 
 /** Provide the durable store (scoped) to a store-only command. */
 const withStore = <A, E>(effect: Effect.Effect<A, E, TicketStore>): Effect.Effect<A, E> =>
-  Effect.scoped(Effect.provide(effect, SqliteTicketStore));
+  Effect.scoped(Effect.provide(effect, ticketStoreLive()));
 
 const lsCommand = Command.make('ls', {}, () =>
   withStore(
@@ -140,7 +140,7 @@ export const runProgram = (
 const runCommand = Command.make('run', { watch: Options.boolean('watch') }, ({ watch }) =>
   Effect.scoped(
     runProgram(watch).pipe(
-      Effect.provide(LiveStack),
+      Effect.provide(liveStack()),
       Effect.catchAll((e) =>
         Console.log(`error: tp run failed\n  reason: ${String(e)}`).pipe(
           Effect.zipRight(Effect.sync(() => process.exit(1))),
@@ -194,7 +194,7 @@ const bucketInitCommand = Command.make('bucket-init', {}, () =>
 const doctorCommand = Command.make('doctor', {}, () =>
   Effect.scoped(
     runDoctor.pipe(
-      Effect.provide(Layer.merge(SqliteTicketStore, AppConfigLive)),
+      Effect.provide(Layer.merge(ticketStoreLive(), AppConfigLive)),
       Effect.flatMap((verdict) =>
         Console.log(renderDoctor(verdict)).pipe(
           Effect.zipRight(verdict.ok ? Effect.void : Effect.sync(() => process.exit(1))),

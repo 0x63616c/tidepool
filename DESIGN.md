@@ -49,6 +49,19 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
 > merge. The **Postgres/CNPG** datastore (PR-5b) and the reconciler cutover (PR-6) follow and swap in
 > as Layers with no reconciler change. Sections below that still describe the box model are updated
 > incrementally as those PRs land.
+>
+> **Cutover wiring (PR-6).** Both swaps are Layer selections gated by env, so flipping to production is
+> a deployment toggle, not a code change (and the default keeps local dev + `bun run check` on sqlite +
+> the in-process worker — green with no cluster): `TIDEPOOL_DB_DRIVER=sqlite|pg` picks the durable
+> `TicketStore` backing, `TIDEPOOL_AGENT_WORKER=local|k8s` picks the worker. The `TicketStore` query
+> layer is shared across both backings behind the one `@effect/sql` seam (`store-sql.ts`); only the
+> driver, the insertion-order column, and schema setup differ. Under Postgres the schema is applied by
+> **`PgMigrator` on control-plane boot** (`replicas:1 Recreate` ⇒ exactly one migrator, self-locking,
+> fail-fast → CrashLoopBackOff rather than a half-applied schema); the reconciler loop starts only after
+> it succeeds. Existing sqlite state is carried over once by a **throwaway, idempotent sqlite→Postgres
+> data-move Job** (`pg-data-move.ts`) that reads through the domain types and hard-fails on any
+> source/dest row-count mismatch (tenet 8), then is deleted. The pg DSN
+> (`tidepool-pg-rw.tidepool.svc:5432`) + creds are runtime config (`Redacted`), never hardcoded.
 
 ---
 
