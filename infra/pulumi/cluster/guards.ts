@@ -38,6 +38,32 @@ export function controlPortSourceCidrs(
   return runner ? [...adminCidrs, runner] : [...adminCidrs];
 }
 
+/** One RBAC PolicyRule (pure shape; workloads.ts maps it to the @pulumi type). */
+export interface WorkerDriverRule {
+  readonly apiGroups: readonly string[];
+  readonly resources: readonly string[];
+  readonly verbs: readonly string[];
+}
+
+/**
+ * Least-privilege RBAC the reconciler SA (in `tidepool`) needs to drive worker
+ * Jobs in the untrusted `tidepool-workers` namespace — and nothing more:
+ *  - jobs: full lifecycle (dispatch/poll/cancel/reap).
+ *  - pods + pods/log: read-only, to stream worker output.
+ *  - secrets: CREATE ONLY — the per-Job creds Secret (opencode auth + git token).
+ *    It carries an ownerReference→Job, so k8s GC cascades it on Job teardown;
+ *    the SA never needs get/list/delete on secrets (tenet 9 least-privilege).
+ * Kept pure so the grant is asserted under vitest (tenet 12).
+ */
+export function buildWorkerDriverRules(): readonly WorkerDriverRule[] {
+  return [
+    { apiGroups: ['batch'], resources: ['jobs'], verbs: ['create', 'get', 'list', 'watch', 'delete'] },
+    { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch'] },
+    { apiGroups: [''], resources: ['pods/log'], verbs: ['get'] },
+    { apiGroups: [''], resources: ['secrets'], verbs: ['create'] },
+  ];
+}
+
 /** The cluster-internal ranges that untrusted worker egress must NOT reach. */
 export function clusterInternalCidrs(
   podCidr: string,
