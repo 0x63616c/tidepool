@@ -20,6 +20,8 @@ export const NETWORK_ZONE = cfg.get('networkZone') ?? 'eu-central';
 // worker pool both use it (workers repack to cpx42 later to amortise cold-start).
 export const CONTROL_PLANE_TYPE = cfg.get('controlPlaneType') ?? 'cpx32';
 export const WORKER_TYPE = cfg.get('workerType') ?? 'cpx32';
+// DEFERRED: capacity-fallback node groups (cpx32→cpx42, nbg1→hel1) for when a type
+// or location is sold out — a follow-up once the single-pool cluster is proven.
 /** Autoscaler worker pool bounds. min=0 is the whole point (scale-to-zero, tenet 7). */
 export const WORKER_MIN = cfg.getNumber('workerMin') ?? 0;
 export const WORKER_MAX = cfg.getNumber('workerMax') ?? 3;
@@ -41,29 +43,29 @@ export const ADMIN_CIDRS = (cfg.get('adminCidrs') ?? '0.0.0.0/0')
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
 
-// ── Versions (pinned) ────────────────────────────────────────────────────────────
-export const TALOS_VERSION = cfg.get('talosVersion') ?? 'v1.9.2';
-export const KUBERNETES_VERSION = cfg.get('kubernetesVersion') ?? 'v1.32.2';
+// ── Versions (pinned to the SPIKE-PROVEN set — tenet 8, proven not guessed) ──────
+export const TALOS_VERSION = cfg.get('talosVersion') ?? 'v1.13.5';
+export const KUBERNETES_VERSION = cfg.get('kubernetesVersion') ?? 'v1.33.1';
 
 /** Helm charts. Repo URLs + versions pinned; bumpable at the gated apply. */
 export const CHARTS = {
   ccm: {
     repo: 'https://charts.hetzner.cloud',
     chart: 'hcloud-cloud-controller-manager',
-    version: '1.24.0',
+    version: '1.33.0',
   },
   csi: {
     repo: 'https://charts.hetzner.cloud',
     chart: 'hcloud-csi',
-    version: '2.13.0',
+    version: '2.21.2',
   },
   autoscaler: {
     repo: 'https://kubernetes.github.io/autoscaler',
     chart: 'cluster-autoscaler',
     version: '9.46.0',
-    // Autoscaler image must be >= the min the spike proved (v1.32.x registers the
-    // hetzner cloudprovider + honours min=0).
-    imageTag: 'v1.32.0',
+    // Autoscaler image the spike proved registers the hetzner cloudprovider +
+    // honours min=0.
+    imageTag: 'v1.32.1',
   },
 } as const;
 

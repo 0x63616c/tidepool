@@ -1,6 +1,5 @@
 import * as k8s from '@pulumi/kubernetes';
-import * as pulumi from '@pulumi/pulumi';
-import { CHARTS, POD_CIDR, WORKER_MAX, WORKER_MIN, WORKER_TYPE, LOCATION } from './config';
+import { CHARTS, LOCATION, POD_CIDR, WORKER_MAX, WORKER_MIN, WORKER_TYPE } from './config';
 import type { ClusterNetwork } from './network';
 import type { TalosControlPlane } from './talos';
 

@@ -114,8 +114,9 @@ export function createControlPlane(
             podSubnets: [POD_CIDR],
             serviceSubnets: [SERVICE_CIDR],
           },
-          // CCM ships the CNI/routes; disable Talos' default so they don't fight.
-          proxy: {},
+          // Keep Talos' default CNI (Flannel) + kube-proxy; the Hetzner CCM is the
+          // external cloud provider (node lifecycle + LB), NOT the CNI, so they
+          // don't overlap.
         },
       }),
     ],

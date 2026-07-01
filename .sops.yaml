@@ -3,7 +3,7 @@
 # decrypt a secret, edit that secret's rule and run `sops updatekeys <file>`.
 #
 #   mainbox    — the always-on control plane (private key lives ONLY on the box)
-#   ci         — GitHub Actions (Pulumi-in-CI; currently only hcloud_api_token)
+#   ci         — GitHub Actions (Pulumi-in-CI; hcloud_api_token + hetzner_s3_credentials)
 #   breakglass — Calum's offline recovery key (recipient of EVERY secret)
 #
 # Holds NO secret values (those live in secrets/*.enc.yaml, encrypted). Tenet 9:

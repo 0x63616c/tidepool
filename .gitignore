@@ -16,6 +16,8 @@ secrets/*.dec.*
 
 # Pulumi
 infra/**/Pulumi.*.yaml
+# ...except the cluster's production stack config (non-secret; needed by CI apply).
+!infra/pulumi/cluster/Pulumi.production.yaml
 infra/**/.pulumi/
 infra/pulumi/**/bin/
 

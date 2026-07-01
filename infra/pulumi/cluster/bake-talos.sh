@@ -48,13 +48,15 @@ fi
 # 3) Bake. hcloud-upload-image creates + destroys the throwaway server itself.
 IMAGE_URL="https://factory.talos.dev/image/${SCHEMATIC_ID}/${TALOS_VERSION}/hcloud-amd64.raw.xz"
 log "baking snapshot from ${IMAGE_URL} (this creates a THROWAWAY server, ~2 min) ..."
+# --labels takes the SAME comma-separated key=value form that --selector queries,
+# so the bake labels and the reuse/emit lookups round-trip exactly.
 hcloud-upload-image upload \
 	--image-url "${IMAGE_URL}" \
 	--architecture "${ARCH}" \
 	--compression xz \
 	--location "${LOCATION}" \
 	--description "talos-${TALOS_VERSION}-${SHORT}" \
-	--labels "${SELECTOR//,/ }" >&2
+	--labels "${SELECTOR}" >&2
 
 # 4) Emit the resulting snapshot id.
 SNAP=$(hcloud image list --type snapshot --selector "${SELECTOR}" \

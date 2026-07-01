@@ -1,4 +1,6 @@
 import * as k8s from '@pulumi/kubernetes';
+import { NODE_SUBNET_CIDR, POD_CIDR, SERVICE_CIDR } from './config';
+import { buildWorkerEgressPolicySpec } from './guards';
 
 /**
  * Namespaces + the security wall (tenet 6/9). The agent-worker namespace is
@@ -38,30 +40,17 @@ export function createWorkloads(provider: k8s.Provider): void {
     { ...opts, dependsOn: [workerNs] },
   );
 
-  // Allow ONLY: DNS (to kube-dns) + outbound HTTPS (git clone / opencode / model
-  // APIs). No ingress is ever allowed — workers accept nothing inbound.
+  // Allow ONLY: DNS (to kube-dns) + outbound HTTPS to the INTERNET (git clone /
+  // opencode / model APIs). The :443 rule excepts the pod/service/node ranges, so
+  // workers cannot reach the apiserver or any in-cluster service. No ingress is
+  // ever allowed — workers accept nothing inbound. Spec built by a pure, tested
+  // helper (guards.ts) so the excepts are asserted under vitest.
   new k8s.networking.v1.NetworkPolicy(
     'workers-allow-egress',
     {
       metadata: { name: 'allow-dns-and-https-egress', namespace: workerNs.metadata.name },
-      spec: {
-        podSelector: {},
-        policyTypes: ['Egress'],
-        egress: [
-          {
-            // Cluster DNS.
-            to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } } }],
-            ports: [
-              { protocol: 'UDP', port: 53 },
-              { protocol: 'TCP', port: 53 },
-            ],
-          },
-          {
-            // Outbound HTTPS to the internet.
-            ports: [{ protocol: 'TCP', port: 443 }],
-          },
-        ],
-      },
+      // Cast: guards.ts stays @pulumi-free (unit-testable); its shape is asserted in tests.
+      spec: buildWorkerEgressPolicySpec(POD_CIDR, SERVICE_CIDR, NODE_SUBNET_CIDR) as unknown as k8s.types.input.networking.v1.NetworkPolicySpec,
     },
     { ...opts, dependsOn: [workerNs] },
   );

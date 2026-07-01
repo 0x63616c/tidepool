@@ -1,4 +1,7 @@
 import * as hcloud from '@pulumi/hcloud';
+import * as pulumi from '@pulumi/pulumi';
+import { ADMIN_CIDRS } from './config';
+import { assertAdminCidrsLocked } from './guards';
 import { createNetwork } from './network';
 import { installPlatform } from './platform';
 import { createControlPlane } from './talos';
@@ -23,6 +26,11 @@ const token = process.env.HCLOUD_TOKEN;
 if (!token) {
   throw new Error('HCLOUD_TOKEN is required (export it before `pulumi preview`/`up`)');
 }
+
+// Fail-closed: never apply with the control ports (6443/50000) open to the world.
+// Passes at preview (isDryRun) so a first plan renders with the permissive default.
+assertAdminCidrsLocked(ADMIN_CIDRS, !pulumi.runtime.isDryRun());
+
 const provider = new hcloud.Provider('hcloud', { token });
 
 const net = createNetwork(provider);

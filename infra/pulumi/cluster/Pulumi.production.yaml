@@ -1,0 +1,12 @@
+# Production stack config (committed — config, NOT secret; the gitignore carries an
+# exception for this one file). Values here are declared intent; the live apply is
+# human-gated.
+#
+# adminCidrs locks the Talos apid (50000) + kube-apiserver (6443) to the operator.
+# The value below is an RFC 5737 documentation placeholder — REPLACE with Calum's
+# real /32(s) before apply. The fail-closed guard (guards.ts) rejects 0.0.0.0/0 at
+# apply, and the CI runner's own IP is injected transiently by the up-job (see the
+# #4 apiserver-reachability decision), so it is deliberately NOT listed here.
+config:
+  tidepool-cluster:location: nbg1
+  tidepool-cluster:adminCidrs: 192.0.2.10/32
