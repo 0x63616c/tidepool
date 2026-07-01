@@ -7,11 +7,12 @@
 
 ## What Tidepool is (10-second version)
 
-A personal agentic-coding control plane. A thin always-on Hetzner box runs a TS+Bun reconciler loop +
-a **sqlite ticket store** (single source of truth). Tickets spin ephemeral Hetzner workers that drive
-coding agents (opencode SDK, on Calum's Codex subscription) against a target repo: `branch → PR →
-review → auto-merge-on-green`. Declarative infra (Pulumi in CI), secrets sops+age, driven by `tp`.
-Full rationale in `DESIGN.md`.
+A personal agentic-coding control plane. The control plane runs as a Kubernetes Deployment
+(`tidepool-control-plane`, ns `tidepool`) on a Talos/Hetzner cluster: a TS+Bun reconciler loop over a
+**Postgres ticket store** (CloudNativePG, single source of truth). Tickets dispatch ephemeral k8s Jobs
+that drive coding agents (opencode SDK, on Calum's Codex subscription) against a target repo:
+`branch → PR → review → auto-merge-on-green`. Declarative infra (Pulumi in CI), secrets sops+age,
+driven by `tp`. Full rationale in `DESIGN.md`.
 
 ## How you (the lead) operate this project
 
@@ -25,15 +26,19 @@ work by **dispatching parallel agent teams + validators** (Workflow tool, Opus),
 
 ## Spend is authorized
 
-Calum authorized real spend — **no permission needed** for `pulumi up` / Hetzner boxes. The controls
-are the **guardrails** (5-box project limit, reaper, Effect `Scope` teardown, max-TTL), not a gate.
-Respect them: ≤5 boxes, every box deleted, N=1.
+Calum authorized real spend — **no permission needed** for `pulumi up` / cluster capacity. The controls
+are the **guardrails** (concurrent worker-Job cap, reaper, Effect `Scope` teardown, max-TTL), not a
+gate. Respect them: bounded concurrent worker Jobs, every Job cleaned up, N=1.
 
-The ONLY thing still needing Calum: a **Pulumi Cloud account + access token** (Phase D, the always-on
-main box). Not required for the mission — workers are Hetzner-API cattle; the reconciler can run
-locally to drive the Phase C cloud-worker run.
+The k8s/Postgres control plane is **live** — the Phase D bootstrap (always-on control plane, Pulumi
+state) is **done**: Pulumi state is self-managed on Hetzner S3 (no Pulumi Cloud account needed), and the
+old always-on Hetzner main box is gone. Nothing further is blocked on Calum here.
 
-## Current repo state (2026-06-27)
+## Repo state snapshot (2026-06-27, pre-migration — superseded)
+
+> Historical: this snapshot predates the k8s + Postgres migration (completed 2026-07-01) and the
+> old-box teardown. It describes the sqlite/`BoxMaker`/Hetzner-worker shape that has since been
+> replaced — see "What Tidepool is" above and `DESIGN.md §1` for current reality. Kept as history.
 
 Done — Phase A, Phase B, and Phase C implementation complete:
 - Docs: `DESIGN.md`, `RESEARCH.md`, `AGENTS.md`+`CLAUDE.md`, `GOALS.md`, `SKILLS.md`, `HANDOFF.md`.

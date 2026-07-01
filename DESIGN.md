@@ -10,58 +10,59 @@ It is the source of truth for *why* the system is shaped the way it is.
 
 ## 1. One-paragraph shape
 
-A thin, always-on Hetzner box (the **control plane** / "main box") runs a TypeScript + Bun
-**reconciler loop** and a sqlite ticket store (the single source of truth for tickets). When tickets
-exist, the reconciler spins **ephemeral Hetzner worker boxes** (elastic 0→3, self-destruct on
-idle). Each worker runs a TS **runner** that embeds the **opencode TypeScript SDK** to drive
-coding agents against a target GitHub repo: `branch → PR → review-agent → auto-merge-on-green`.
-Models run via a **ChatGPT/Codex subscription** (OAuth, not metered API) through opencode's
-`openai` provider. Infra is **declarative via Pulumi** applied in **GitHub Actions CI**.
+The **control plane** runs as a Kubernetes **Deployment** (`tidepool-control-plane`, namespace
+`tidepool`) on a Talos/Hetzner cluster — a TypeScript + Bun **reconciler loop** over a **Postgres**
+ticket store (CloudNativePG cluster `tidepool-pg`, the single source of truth for tickets). When
+tickets exist, the reconciler **dispatches ephemeral k8s Jobs** (agent-workers) through the async
+**`K8sAgentWorker`** seam. Each Job runs a TS **runner** that embeds the **opencode TypeScript SDK**
+to drive coding agents against a target GitHub repo: `branch → PR → review-agent →
+auto-merge-on-green`. Models run via a **ChatGPT/Codex subscription** (OAuth, not metered API)
+through opencode's `openai` provider. Infra is **declarative via Pulumi** applied in **GitHub Actions
+CI** (merge to main auto-builds images and rerolls the Deployment to the current commit's digests).
 Secrets via **sops + age**. You drive it with the **`tp`** CLI.
 
 ```
-laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main box (always-on, thin)
-                                                         │  reconciler + sqlite + transcripts
+laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── control plane (k8s Deployment)
+                                                         │  reconciler + Postgres (CNPG) + transcripts
   tp ticket list/get/logs ──(port-forward; later Tailscale)▶ │
-                                                         │ tickets queued & capacity<cap
+                                                         │ tickets queued
                                                          ▼
-                                          BoxMaker → ephemeral worker (0→3, self-destruct)
+                                    K8sAgentWorker → dispatch ephemeral Job (poll workHandle)
                                                          │  TS runner + opencode SDK
                                                          ▼  clone target repo, work worktree
                                           work agent → branch → PR → review agent → auto-merge
 ```
 
-> **Migration in progress — k8s / AgentWorker (see `.handoffs/`).** The diagram above shows the
-> original synchronous, one-box-per-ticket model. That is being replaced: the reconciler no longer
-> leases a box and blocks on the agent. Instead it **dispatches** an *agent-worker* (work or review)
-> through the **`AgentWorker`** seam, stores an opaque **`workHandle`** + `dispatchedAt` on the ticket,
-> moves it to a new **`running`** state, and **polls** the handle each tick — `Succeeded` harvests the
-> result, `Failed` retries/rate-caps, and a worker past its deadline is reaped (`cancel`). `BoxMaker`
-> is gone. Today the live `AgentWorker` is **`LocalAgentWorker`** (runs opencode on the control-plane,
-> preserving current behavior behind the async seam). Worker creds now flow through the
-> **`CredentialBroker`** seam (`credsFor(job) → { opencodeAuth, githubToken }`) — a passthrough today
-> (reads the existing PAT + opencode auth), the one-module swap point for future GitHub App tokens /
-> auto-rotation, so the dispatch path never reads a secret directly (tenet 9). The real
-> **`K8sAgentWorker`** seam has landed; the **Talos/Pulumi Kubernetes cluster** is now defined in
-> `infra/pulumi/cluster/` (PR-5a) — a baked Talos snapshot, dedicated Hetzner network + firewall, a
-> cpx32 control plane, CCM/CSI/cluster-autoscaler (min=0), and the namespace/NetworkPolicy/RBAC wall;
-> the live `pulumi up` is human-gated (a GitHub Environment approval), so nothing is provisioned on
-> merge. The **Postgres/CNPG** datastore (PR-5b) and the reconciler cutover (PR-6) follow and swap in
-> as Layers with no reconciler change. Sections below that still describe the box model are updated
-> incrementally as those PRs land.
+> **How we got here — the async AgentWorker / k8s migration (completed 2026-07-01; see
+> `.handoffs/`).** The system originally ran as a thin always-on Hetzner box with a sqlite store that
+> **spun ephemeral Hetzner worker boxes** synchronously (one box per ticket, blocking on the agent).
+> That is done and gone. The reconciler no longer leases a box and blocks: it **dispatches** an
+> *agent-worker* (work or review) through the **`AgentWorker`** seam, stores an opaque **`workHandle`**
+> + `dispatchedAt` on the ticket, moves it to the **`running`** state, and **polls** the handle each
+> tick — `Succeeded` harvests the result, `Failed` retries/rate-caps, and a worker past its deadline is
+> reaped (`cancel`). `BoxMaker` is gone. The live `AgentWorker` is **`K8sAgentWorker`** (dispatches
+> ephemeral k8s Jobs); a **`LocalAgentWorker`** remains for local dev (runs opencode in-process).
+> Worker creds flow through the **`CredentialBroker`** seam
+> (`credsFor(job) → { opencodeAuth, githubToken }`) — a passthrough today (reads the existing PAT +
+> opencode auth), the one-module swap point for future GitHub App tokens / auto-rotation, so the
+> dispatch path never reads a secret directly (tenet 9). The **Talos/Pulumi Kubernetes cluster** is
+> defined in `infra/pulumi/cluster/` (PR-5a) — a baked Talos snapshot, dedicated Hetzner network +
+> firewall, a cpx32 control plane, CCM/CSI/cluster-autoscaler (min=0), and the
+> namespace/NetworkPolicy/RBAC wall — with the **Postgres/CNPG** datastore (PR-5b) and the reconciler
+> cutover (PR-6) swapping in as Layers with no reconciler change.
 >
-> **Cutover wiring (PR-6).** Both swaps are Layer selections gated by env, so flipping to production is
-> a deployment toggle, not a code change (and the default keeps local dev + `bun run check` on sqlite +
+> **Cutover wiring (PR-6).** Both swaps are Layer selections gated by env, so switching backings is a
+> deployment toggle, not a code change (and the default keeps local dev + `bun run check` on sqlite +
 > the in-process worker — green with no cluster): `TIDEPOOL_DB_DRIVER=sqlite|pg` picks the durable
-> `TicketStore` backing, `TIDEPOOL_AGENT_WORKER=local|k8s` picks the worker. The `TicketStore` query
-> layer is shared across both backings behind the one `@effect/sql` seam (`store-sql.ts`); only the
-> driver, the insertion-order column, and schema setup differ. Under Postgres the schema is applied by
-> **`PgMigrator` on control-plane boot** (`replicas:1 Recreate` ⇒ exactly one migrator, self-locking,
-> fail-fast → CrashLoopBackOff rather than a half-applied schema); the reconciler loop starts only after
-> it succeeds. Existing sqlite state is carried over once by a **throwaway, idempotent sqlite→Postgres
-> data-move Job** (`pg-data-move.ts`) that reads through the domain types and hard-fails on any
-> source/dest row-count mismatch (tenet 8), then is deleted. The pg DSN
-> (`tidepool-pg-rw.tidepool.svc:5432`) + creds are runtime config (`Redacted`), never hardcoded.
+> `TicketStore` backing, `TIDEPOOL_AGENT_WORKER=local|k8s` picks the worker. Production runs `pg` +
+> `k8s`. The `TicketStore` query layer is shared across both backings behind the one `@effect/sql` seam
+> (`store-sql.ts`); only the driver, the insertion-order column, and schema setup differ. Under
+> Postgres the schema is applied by **`PgMigrator` on control-plane boot** (`replicas:1 Recreate` ⇒
+> exactly one migrator, self-locking, fail-fast → CrashLoopBackOff rather than a half-applied schema);
+> the reconciler loop starts only after it succeeds. Existing sqlite state was carried over once by a
+> **throwaway, idempotent sqlite→Postgres data-move Job** (`pg-data-move.ts`) that read through the
+> domain types and hard-failed on any source/dest row-count mismatch (tenet 8), then was deleted. The
+> pg DSN (`tidepool-pg-rw.tidepool.svc:5432`) + creds are runtime config (`Redacted`), never hardcoded.
 
 ---
 
@@ -239,20 +240,22 @@ everything upstream). Two levels:
    changed via PR. Holds targets, worker cap/box specs, models, retries, idle timeout.
 2. **Secrets** — **sops + age**, encrypted in git, **one file per secret** so each secret's
    recipient set is an independently-tunable dial (`.sops.yaml` is the access-control matrix;
-   change audience = edit one rule + `sops updatekeys`). Recipients: main-box pubkey + break-glass
-   pubkey (+ CI where a secret must be CI-readable). **Private key lives on the main box only.**
-   Workers get JIT-decrypted creds over the lease's SSH — the master key never leaves the main box.
+   change audience = edit one rule + `sops updatekeys`). Recipients: the **CI** pubkey (where a secret
+   must be CI-readable) + the **break-glass** pubkey. **CI decrypts with the `ci` key at deploy time
+   and seeds each runtime secret into the in-cluster k8s Secret** that the control-plane Deployment
+   mounts — no age private key lives on a long-running host. (The old `mainbox` recipient was dropped
+   when the Hetzner control-plane box was torn down.)
    *Local dev:* `.envrc` (direnv) caches the break-glass key in the macOS login keychain and exports
    `SOPS_AGE_KEY`, so `sops -d` is promptless after a one-time per-machine seed from 1Password (the
    keys' backup-only store; nothing reads it at runtime). 1Password access uses a vault-scoped service account.
-3. **Runtime state** — sqlite on the main box, never in git.
+3. **Runtime state** — Postgres (CloudNativePG) in the cluster, never in git.
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
 - **Leak guard.** Claude Code hook (`.claude/hooks/`, bash-3.2-safe): PostToolUse `secret-redactor`
   masks secret *shapes* + our *exact* sealed values (sha256 list in `.claude/redaction-hashes.json`,
   regenerated at seal time by `bun run seal:hashes`, entropy-gated ≥80 bits, drift-checked at
   pre-push) in tool *output* before the model sees it (built-in tools require a *structured*
   `updatedToolOutput`, not a string — a plain string is silently dropped). It fails OPEN by design;
-  real containment is the outbound-only box + least privilege + rotation on compromise, not the hook.
+  real containment is the outbound-only cluster + least privilege + rotation on compromise, not the hook.
 - **Post-quantum caveat (deferred, human-gated).** sops/age use **X25519** — Shor-breakable, so
   secrets-at-rest are theoretically harvest-now-decrypt-later. Out of scope at personal/internal scale
   (tenet 7), and everything rotates on compromise anyway; `CredentialBroker` is the seam if a PQ KEM
@@ -262,12 +265,12 @@ everything upstream). Two levels:
 - **Declarative layer = Pulumi (TS) + pulumi-hcloud provider**. Defines
   only persistent stuff (~50 lines). State backend = **Hetzner Object Storage (S3)**. *(Pending
   research confirms.)*
-- **Bootstrap root of trust = GitHub Actions secrets** (Hetzner token + main-box age private key).
-  Everything else flows from sops afterward. One clean handoff: GH Actions secrets = bootstrap,
+- **Bootstrap root of trust = one GitHub Actions secret** (the `ci` age private key).
+  Everything else flows from sops afterward. One clean handoff: GH Actions secret = bootstrap,
   sops = steady state.
-- Sequence: generate age keypairs → pubkey to repo as sops recipient → GH Actions secrets hold
-  Hetzner token + age privkey → CI `pulumi up` creates main box → cloud-init installs bun, clones
-  tidepool, injects age privkey, starts reconciler → main box decrypts sops → alive.
+- Sequence: generate age keypairs → pubkeys to repo as sops recipients → the `ci` age privkey is the
+  one GH Actions secret → CI `pulumi up` provisions the k8s cluster and decrypts sops → seeds every
+  runtime secret into the in-cluster k8s Secret → the control-plane Deployment mounts it → alive.
 
 ### Spend guardrails (defense in depth — "$100k bill is impossible by construction")
 The cost nightmare (runaway box creation) must be blocked *outside* our code, then again inside.
