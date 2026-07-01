@@ -68,7 +68,17 @@ export const k8sWorkerConfigLayer = (config: K8sWorkerConfig): Layer.Layer<K8sCo
 // ── Naming ───────────────────────────────────────────────────────────────────
 
 const PART_OF = 'app.kubernetes.io/part-of';
+// The Job's ephemeral workspace: the repo is cloned here and config.json is
+// mounted here, so the container runs with this as its cwd.
 const WORKDIR = '/work';
+// Absolute in-image path of the worker binary. The agent-worker image copies the
+// source to /app (its Dockerfile WORKDIR) and declares a *relative* ENTRYPOINT;
+// because the Job overrides workingDir to WORKDIR (/work), a relative invocation
+// would resolve to /work/src/... and fail `Module not found`. Pinning an absolute
+// command here keeps the binary path independent of the workspace cwd. Must track
+// the agent-worker Dockerfile's WORKDIR (/app).
+const WORKER_APP_DIR = '/app';
+const WORKER_COMMAND = ['bun', 'run', `${WORKER_APP_DIR}/src/worker/agent-worker.ts`];
 
 /** Coerce an arbitrary id into a DNS-1123 label fragment (`_`→`-`, lowercased). */
 export const k8sName = (s: string): string =>
@@ -160,6 +170,7 @@ export interface JobManifest {
         readonly containers: ReadonlyArray<{
           readonly name: string;
           readonly image: string;
+          readonly command: ReadonlyArray<string>;
           readonly workingDir: string;
           readonly resources: {
             readonly requests: { readonly cpu: string; readonly memory: string };
@@ -229,6 +240,7 @@ export const buildJobManifest = (args: {
             {
               name: 'agent-worker',
               image: config.image,
+              command: WORKER_COMMAND,
               workingDir: WORKDIR,
               resources: {
                 // CPU request but NO cpu limit (agents burst); mem request==limit.

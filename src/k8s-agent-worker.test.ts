@@ -200,6 +200,18 @@ describe('buildJobManifest', () => {
     assert.notInclude(JSON.stringify(manifest), 'ghs_tok');
     assert.notInclude(JSON.stringify(manifest), creds.opencodeAuth);
   });
+
+  it('invokes the worker by ABSOLUTE path, robust to the workingDir override', () => {
+    // The image ENTRYPOINT is relative (`bun run src/worker/agent-worker.ts`) but
+    // the Job overrides workingDir to the /work workspace (where the repo is cloned
+    // and config.json is mounted). A relative entrypoint then resolves to
+    // /work/src/... which does not exist → `Module not found` and silent dispatch
+    // death. So the Job pins an absolute command that ignores cwd.
+    const c = first(manifest.spec.template.spec.containers);
+    assert.deepStrictEqual(c.command, ['bun', 'run', '/app/src/worker/agent-worker.ts']);
+    // The command must NOT live under the working dir it would be resolved against.
+    assert.isFalse(c.command?.[2]?.startsWith(c.workingDir));
+  });
 });
 
 describe('buildSecretManifest', () => {
