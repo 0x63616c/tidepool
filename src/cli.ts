@@ -1,10 +1,19 @@
 #!/usr/bin/env bun
 import { homedir } from 'node:os';
 import { Args, Command, Options } from '@effect/cli';
+import { FetchHttpClient } from '@effect/platform';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
 import { Console, Effect, Either, Layer, Logger, Option, Schema } from 'effect';
+import {
+  type ClientConfigError,
+  loadClientConfig,
+  type PortForwardError,
+  resolveBaseUrl,
+  resolveContext,
+} from './client-config.ts';
 import { renderDoctor, runDoctor } from './doctor.ts';
 import type { NewTicket, RunEvent, Ticket } from './domain.ts';
+import { HttpQueueControl } from './http-queue-control.ts';
 import { RunId, TicketId } from './ids.ts';
 import { LocalQueueControl, QueueControl, type TargetNotConfigured } from './queue-control.ts';
 import { AppConfigLive, ticketStoreLive } from './runtime.ts';
@@ -46,17 +55,37 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
 };
 
 /**
- * Provide the `QueueControl` adapter (scoped) to a ticket command. For now this is
- * always the local in-process adapter over the durable store; the context-driven
- * local-vs-http selection is wired at the entrypoint in a later step.
+ * Provide the `QueueControl` adapter (scoped) selected by the active client
+ * context (`--context` flag > env > `~/.tidepool/config` > built-in `local`):
+ * `sqlite` → the in-process store (dev); `http` → the daemon over HTTP, opening
+ * an invisible `kubectl port-forward` first if the context declares one. The CLI
+ * command never knows which adapter it got (deep module, tenet 4).
  */
-const withQueue = <A, E>(effect: Effect.Effect<A, E, QueueControl>): Effect.Effect<A, E> =>
+const withQueue = <A, E>(
+  flag: string | null,
+  effect: Effect.Effect<A, E, QueueControl>,
+): Effect.Effect<A, E | ClientConfigError | PortForwardError, BunContext.BunContext> =>
   Effect.scoped(
-    Effect.provide(
-      effect,
-      LocalQueueControl.pipe(Layer.provide(Layer.merge(ticketStoreLive(), AppConfigLive))),
-    ),
+    Effect.gen(function* () {
+      const config = yield* loadClientConfig;
+      const ctx = yield* resolveContext(config, { flag });
+      if (ctx.kind === 'sqlite') {
+        return yield* effect.pipe(
+          Effect.provide(
+            LocalQueueControl.pipe(Layer.provide(Layer.merge(ticketStoreLive(), AppConfigLive))),
+          ),
+        );
+      }
+      const url = yield* resolveBaseUrl(ctx);
+      return yield* effect.pipe(
+        Effect.provide(HttpQueueControl(url).pipe(Layer.provide(FetchHttpClient.layer))),
+      );
+    }),
   );
+
+/** The `--context` override, shared by every ticket verb. */
+const contextOption = Options.text('context').pipe(Options.optional);
+const flagOf = (context: Option.Option<string>): string | null => Option.getOrNull(context);
 
 // ── actions: thin Effects over QueueControl, returned as rendered strings so
 //    they are unit-testable without driving the CLI runtime or a real store ────
@@ -151,9 +180,11 @@ const addCommand = Command.make(
     title: Options.text('title'),
     goal: Options.text('goal'),
     target: Options.text('target'),
+    context: contextOption,
   },
-  ({ goal, target, title }) =>
+  ({ context, goal, target, title }) =>
     withQueue(
+      flagOf(context),
       addAction({ title, goal, target }).pipe(
         Effect.flatMap(Console.log),
         Effect.catchTag('TargetNotConfigured', (e) =>
@@ -173,25 +204,31 @@ const listCommand = Command.make(
   {
     target: Options.text('target').pipe(Options.optional),
     limit: Options.integer('limit').pipe(Options.withDefault(50)),
+    context: contextOption,
   },
-  ({ limit, target }) =>
+  ({ context, limit, target }) =>
     withQueue(
+      flagOf(context),
       listAction({ target: Option.getOrNull(target), limit }).pipe(Effect.flatMap(Console.log)),
     ),
 );
 
-const getCommand = Command.make('get', { ticket: Args.text({ name: 'ticket' }) }, ({ ticket }) =>
-  withQueue(
-    Effect.gen(function* () {
-      const decoded = decodeTicketId(ticket);
-      if (Either.isLeft(decoded))
-        return yield* usageError(`not a ticket id: ${ticket}`, 'tp ticket get tckt_…');
-      return yield* getAction(decoded.right).pipe(
-        Effect.flatMap(Console.log),
-        Effect.catchTag('TicketNotFound', () => notFound(`ticket ${ticket}`, 'tp ticket list')),
-      );
-    }),
-  ),
+const getCommand = Command.make(
+  'get',
+  { ticket: Args.text({ name: 'ticket' }), context: contextOption },
+  ({ context, ticket }) =>
+    withQueue(
+      flagOf(context),
+      Effect.gen(function* () {
+        const decoded = decodeTicketId(ticket);
+        if (Either.isLeft(decoded))
+          return yield* usageError(`not a ticket id: ${ticket}`, 'tp ticket get tckt_…');
+        return yield* getAction(decoded.right).pipe(
+          Effect.flatMap(Console.log),
+          Effect.catchTag('TicketNotFound', () => notFound(`ticket ${ticket}`, 'tp ticket list')),
+        );
+      }),
+    ),
 );
 
 /**
@@ -204,9 +241,11 @@ const logsCommand = Command.make(
   {
     ticket: Args.text({ name: 'ticket' }).pipe(Args.optional),
     run: Options.text('run').pipe(Options.optional),
+    context: contextOption,
   },
-  ({ run, ticket }) =>
+  ({ context, run, ticket }) =>
     withQueue(
+      flagOf(context),
       Effect.gen(function* () {
         const qc = yield* QueueControl;
         if (Option.isSome(run)) {
@@ -267,9 +306,10 @@ const logsCommand = Command.make(
 /** `tp ticket transcript <run_id>` — parse the opencode capture for a run and pretty-print it. */
 const transcriptCommand = Command.make(
   'transcript',
-  { run: Args.text({ name: 'run_id' }) },
-  ({ run }) =>
+  { run: Args.text({ name: 'run_id' }), context: contextOption },
+  ({ context, run }) =>
     withQueue(
+      flagOf(context),
       Effect.gen(function* () {
         const qc = yield* QueueControl;
         const decoded = decodeRunId(run);
@@ -320,6 +360,7 @@ const doctorCommand = Command.make('doctor', {}, () =>
 );
 
 const homeView = withQueue(
+  null,
   listAction({ target: null, limit: 50 }).pipe(
     Effect.flatMap((tickets) =>
       Console.log([`bin: ${binPath()}`, `description: ${DESCRIPTION}`, tickets].join('\n')),
