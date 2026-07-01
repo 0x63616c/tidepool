@@ -15,7 +15,15 @@ name: Infra
 on:
   push:
     branches: [main]
+    # App-source paths are included so a CODE change (baked into the control-plane +
+    # agent-worker images) auto-deploys: the up-job resolves the new image digest and
+    # rerolls. Kept OFF pull_request below so code PRs don't run the (barman-red,
+    # secret-touching) infra preview — deploy happens only on merge.
     paths:
+      - 'src/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'infra/docker/**'
       - 'infra/pulumi/cluster/**'
       - '.github/workflows/infra.yml'
       - 'secrets/hcloud_api_token.enc.yaml'
