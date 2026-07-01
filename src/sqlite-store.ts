@@ -21,7 +21,7 @@ const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
 
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
-  'id, title, goal, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason';
+  'id, title, goal, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
 
 interface EventRow {
   readonly ticketId: string;
@@ -103,6 +103,12 @@ export const makeSqliteStore = (
     // Migration: add reason column to existing ticket tables (no-op if already present).
     yield* sql`ALTER TABLE tickets ADD COLUMN reason TEXT`.pipe(Effect.ignore);
 
+    // Migration: async dispatch+poll columns (no-op if already present). DDL authored
+    // against the current sqlite client; re-verify types at the PR-6 Postgres swap
+    // (TEXT→text, INTEGER→bigint for the epoch-ms `dispatched_at`).
+    yield* sql`ALTER TABLE tickets ADD COLUMN work_handle TEXT`.pipe(Effect.ignore);
+    yield* sql`ALTER TABLE tickets ADD COLUMN dispatched_at INTEGER`.pipe(Effect.ignore);
+
     yield* sql`
       CREATE TABLE IF NOT EXISTS run_events (
         ticket_id TEXT NOT NULL,
@@ -121,8 +127,8 @@ export const makeSqliteStore = (
 
     const insertTicket = (t: Ticket) =>
       sql`
-        INSERT INTO tickets (id, title, goal, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason)
-        VALUES (${t.id}, ${t.title}, ${t.goal}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason})
+        INSERT INTO tickets (id, title, goal, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
+        VALUES (${t.id}, ${t.title}, ${t.goal}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
       `.pipe(Effect.orDie);
 
     const findById = (id: TicketId) =>
@@ -152,6 +158,8 @@ export const makeSqliteStore = (
             attempts: 0,
             workedAttempt: null,
             reason: null,
+            workHandle: null,
+            dispatchedAt: null,
           });
           yield* insertTicket(ticket);
           return ticket;
@@ -175,7 +183,9 @@ export const makeSqliteStore = (
               merge_sha = ${updated.mergeSha},
               attempts = ${updated.attempts},
               worked_attempt = ${updated.workedAttempt},
-              reason = ${updated.reason}
+              reason = ${updated.reason},
+              work_handle = ${updated.workHandle},
+              dispatched_at = ${updated.dispatchedAt}
             WHERE id = ${id}
           `.pipe(Effect.orDie);
           return updated;

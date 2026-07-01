@@ -62,6 +62,8 @@ const validTicket = {
   attempts: 0,
   workedAttempt: null,
   reason: null,
+  workHandle: null,
+  dispatchedAt: null,
 };
 
 describe('Ticket schema', () => {

@@ -2,7 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 import { AppConfig, type Config, defineConfig } from './config.ts';
 import { ForgeError } from './domain.ts';
-import { fakeAgentRunner, fakeBoxMaker, fakeForge, makeInMemoryStore } from './fakes.ts';
+import { fakeAgentWorker, fakeForge, makeInMemoryStore } from './fakes.ts';
 import { newPrId } from './ids.ts';
 import { settle, step } from './reconciler.ts';
 import { Forge, TicketStore, type TicketStoreApi } from './services.ts';
@@ -46,8 +46,7 @@ describe('reconciler failure branches', () => {
       const env = Layer.mergeAll(
         baseLayers(store),
         fakeForge({ ci: 'green' }),
-        fakeAgentRunner({ failWork: 'rate' }),
-        fakeBoxMaker(),
+        fakeAgentWorker({ failWork: 'rate' }),
       );
 
       yield* settle().pipe(Effect.provide(env));
@@ -66,15 +65,17 @@ describe('reconciler failure branches', () => {
       const env = Layer.mergeAll(
         baseLayers(store),
         fakeForge({ ci: 'green', failMerge: true }),
-        fakeAgentRunner({ verdict: 'approve' }),
-        fakeBoxMaker(),
+        fakeAgentWorker({ verdict: 'approve' }),
       );
 
-      yield* step.pipe(Effect.provide(env));
+      // step 1: review → dispatch review → running. step 2: poll approve → merge → conflict.
+      // One built env so the fake worker's dispatched outcome survives across ticks.
+      yield* Effect.forEach([0, 1], () => step, { discard: true }).pipe(Effect.provide(env));
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'in_progress');
       assert.isNull(final.mergeSha);
+      assert.isNull(final.workHandle);
     }),
   );
 
@@ -86,8 +87,7 @@ describe('reconciler failure branches', () => {
       const env = Layer.mergeAll(
         baseLayers(store),
         fakeForge({ ci: 'green' }),
-        fakeAgentRunner({ verdict: 'request_changes' }),
-        fakeBoxMaker(),
+        fakeAgentWorker({ verdict: 'request_changes' }),
       );
 
       yield* settle().pipe(Effect.provide(env));
@@ -116,8 +116,7 @@ describe('reconciler failure branches', () => {
       const env = Layer.mergeAll(
         baseLayers(store),
         flakyForge,
-        fakeAgentRunner({ verdict: 'approve' }),
-        fakeBoxMaker(),
+        fakeAgentWorker({ verdict: 'approve' }),
       );
 
       yield* step.pipe(Effect.provide(env));
