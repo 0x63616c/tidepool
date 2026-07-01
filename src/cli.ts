@@ -618,10 +618,38 @@ const root = Command.make('tp', {}, () => homeView).pipe(
 
 const cli = Command.run(root, { name: 'tp', version: '0.0.0' });
 
+/** Render a clean AXI failure on stdout and exit 1 (never leak a raw stack). */
+const renderFailure = (label: string, help: string) =>
+  Console.log([`error: ${label}`, `help: ${help}`].join('\n')).pipe(
+    Effect.zipRight(Effect.sync(() => process.exit(1))),
+  );
+
 // Guard the runMain side effect so the module is importable by unit tests without
 // launching the CLI.
 if (import.meta.main) {
-  const program = cli(process.argv).pipe(Effect.provide(BunContext.layer));
+  const guarded = cli(process.argv).pipe(
+    // Domain errors that escaped a command → actionable one-liners, not stacks.
+    Effect.catchTags({
+      PortForwardError: (e) =>
+        renderFailure(
+          `port-forward failed: ${e.message}`,
+          'check the VPN + `tp context current`, or use `tp --context local`',
+        ),
+      ClientConfigError: (e) =>
+        renderFailure(
+          `config error: ${e.message}`,
+          'inspect ~/.tidepool/config or run `tp context list`',
+        ),
+    }),
+    // Transport/connection failures reach here as defects — render them cleanly.
+    Effect.catchAllDefect((d) =>
+      renderFailure(
+        `cannot reach the backend (${String(d).split('\n')[0]})`,
+        'is the daemon deployed and the tunnel/VPN up? try `tp --context local`',
+      ),
+    ),
+  );
+  const program = guarded.pipe(Effect.provide(BunContext.layer));
   // Structured JSON logs when not attached to a terminal; pretty logger otherwise.
   if (process.stdout.isTTY) {
     BunRuntime.runMain(program);
