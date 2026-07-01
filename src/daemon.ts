@@ -51,11 +51,18 @@ const apiServerLive = () => {
 };
 
 if (import.meta.main) {
-  // Run the reconcile loop and the HTTP API concurrently over the live stack.
+  // The reconcile loop is the primary process (the only mover, tenet 3). The
+  // HTTP API is a forked child whose failure is LOGGED, never propagated — a
+  // flaky queue API must not interrupt the reconciler. If the loop itself exits,
+  // the scope closes and the server is torn down with it.
   const program = Effect.scoped(
-    Effect.all([Layer.launch(apiServerLive()), makeDaemon().pipe(Effect.provide(liveStack()))], {
-      concurrency: 'unbounded',
-      discard: true,
+    Effect.gen(function* () {
+      yield* Effect.forkScoped(
+        Layer.launch(apiServerLive()).pipe(
+          Effect.catchAllCause((cause) => Effect.logError('queue API server stopped', cause)),
+        ),
+      );
+      yield* makeDaemon().pipe(Effect.provide(liveStack()));
     }),
   ).pipe(Effect.provide(BunContext.layer), Effect.provide(Logger.json));
   BunRuntime.runMain(program, { disablePrettyLogger: true });

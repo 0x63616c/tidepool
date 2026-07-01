@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Command, type CommandExecutor, FileSystem } from '@effect/platform';
-import { Data, Duration, Effect, Schema, type Scope, Stream } from 'effect';
+import { Data, Duration, Effect, Option, Schema, type Scope, Stream } from 'effect';
 
 /**
  * Client contexts — how `tp` (on a laptop) picks which backend to drive. This is
@@ -60,6 +60,12 @@ export class PortForwardError extends Data.TaggedError('PortForwardError')<{
 
 const stripQuotes = (v: string): string => v.replace(/^["']|["']$/g, '');
 
+/** Parse a port field, falling back on missing/non-numeric input (no silent NaN). */
+const portNum = (v: string | undefined, fallback: number): number => {
+  const n = Number(v);
+  return v !== undefined && Number.isFinite(n) ? n : fallback;
+};
+
 /**
  * Parse the minimal `current-context` + `[contexts.<name>]` INI/TOML subset we
  * support. Deliberately tiny (no dependency) — only the keys above. Unknown keys
@@ -101,8 +107,8 @@ export const parseClientConfig = (text: string): ClientConfig => {
           ? {
               namespace: fields.namespace,
               service: fields.service,
-              remotePort: Number(fields['remote-port'] ?? '8080'),
-              localPort: Number(fields['local-port'] ?? fields['remote-port'] ?? '8080'),
+              remotePort: portNum(fields['remote-port'], 8080),
+              localPort: portNum(fields['local-port'] ?? fields['remote-port'], 8080),
             }
           : undefined;
       contexts[name] = { name, kind: 'http', url: fields.url, ...(pf ? { portForward: pf } : {}) };
@@ -182,19 +188,40 @@ export const resolveBaseUrl = (
     `svc/${pf.service}`,
     `${pf.localPort}:${pf.remotePort}`,
   );
+  const ready = 'Forwarding from';
   return Command.start(cmd).pipe(
     Effect.mapError((e) => new PortForwardError({ message: String(e) })),
     Effect.flatMap((proc) =>
       proc.stdout.pipe(
         Stream.decodeText(),
         Stream.splitLines,
-        Stream.takeUntil((l) => l.includes('Forwarding from')),
-        Stream.runDrain,
+        Stream.takeUntil((l) => l.includes(ready)),
+        // The LAST line before the stream ends: the readiness line if the tunnel
+        // came up, or something else if kubectl died first (service missing, RBAC).
+        Stream.runLast,
         Effect.timeoutFail({
           duration: Duration.seconds(8),
           onTimeout: () =>
             new PortForwardError({ message: 'timed out opening kubectl port-forward' }),
         }),
+        Effect.flatMap((last) =>
+          Option.match(last, {
+            onSome: (l) =>
+              l.includes(ready)
+                ? Effect.void
+                : Effect.fail(
+                    new PortForwardError({
+                      message: `kubectl port-forward exited before ready: ${l}`,
+                    }),
+                  ),
+            onNone: () =>
+              Effect.fail(
+                new PortForwardError({
+                  message: 'kubectl port-forward exited before the tunnel was ready',
+                }),
+              ),
+          }),
+        ),
         Effect.mapError((e) =>
           e instanceof PortForwardError ? e : new PortForwardError({ message: String(e) }),
         ),

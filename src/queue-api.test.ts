@@ -69,6 +69,12 @@ describe('queue HTTP contract', () => {
     ),
   );
 
+  it('rejects a malformed events query param with a 4xx, not a 500', async () => {
+    const res = await handler(new Request('http://tp.test/events?ticketId=not-a-valid-id'));
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+  });
+
   it.effect('get of an unknown id maps to TicketNotFound', () =>
     withClient(
       Effect.gen(function* () {

@@ -325,7 +325,14 @@ const transcriptCommand = Command.make(
         if (page.items.length === 0)
           return yield* Console.log(`transcript: 0 transcript events found for run ${run}`);
         const blocks = page.items.map((e) => {
-          const parsed: unknown = JSON.parse(e.line);
+          // A capture line should be JSON, but a truncated/plain line must not
+          // crash the whole command — fall back to printing it raw.
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(e.line);
+          } catch {
+            return [`transcript: run ${run} (unparseable line)`, e.line].join('\n');
+          }
           const entries = Array.isArray(parsed) ? parsed.length : 1;
           return [
             `transcript: run ${run} (${entries} entries)`,

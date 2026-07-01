@@ -1,7 +1,7 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from '@effect/platform';
 import { Schema } from 'effect';
-import { NewTicket, Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
-import { TicketId } from './ids.ts';
+import { NewTicket, Run, RunEvent, RunSource, Ticket, TicketNotFound } from './domain.ts';
+import { RunId, TicketId } from './ids.ts';
 import { Page, TargetNotConfigured } from './queue-control.ts';
 
 /**
@@ -21,11 +21,16 @@ const ListParams = Schema.Struct({
   target: Schema.optional(Schema.String),
 });
 
-/** `events` narrows — ticket OR run scope, both optional (run-scoped has no ticket). */
+/**
+ * `events` narrows — ticket OR run scope, both optional (run-scoped has no
+ * ticket). Branded id/source schemas so the platform decodes + rejects a
+ * malformed param as a typed 4xx (matching the `get`/`runs` path params), rather
+ * than the handler throwing on a bad value → 500.
+ */
 const EventsParams = Schema.Struct({
-  ticketId: Schema.optional(Schema.String),
-  runId: Schema.optional(Schema.String),
-  source: Schema.optional(Schema.String),
+  ticketId: Schema.optional(TicketId),
+  runId: Schema.optional(RunId),
+  source: Schema.optional(RunSource),
   limit: Schema.optional(Schema.NumberFromString),
   cursor: Schema.optional(Schema.String),
 });
