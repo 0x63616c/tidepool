@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Layer } from 'effect';
+import { Cause, Effect, Exit, Layer, Option } from 'effect';
 import type { OpencodeRunner } from './agent-runner.ts';
 import type { Ticket } from './domain.ts';
 import { fakeCredentialBroker } from './fakes.ts';
@@ -137,6 +137,35 @@ describe('LocalAgentWorker dispatch routes creds through the broker', () => {
       assert.strictEqual(status._tag, 'Succeeded');
       if (status._tag !== 'Succeeded') return;
       assert.strictEqual(status.outcome._tag, 'Review');
+    }).pipe(Effect.provide(worker));
+  });
+
+  it.effect('a credsFor failure dies (orDie) — a missing cred is a config defect', () => {
+    const broker = fakeCredentialBroker({ fail: 'no creds' });
+    const worker = makeLocalAgentWorker(spyRunner({})).pipe(Layer.provide(broker));
+
+    return Effect.gen(function* () {
+      const agent = yield* AgentWorker;
+      const exit = yield* Effect.exit(
+        agent.dispatch({
+          kind: 'work',
+          ticket: testTicket(),
+          repo: 'o/r',
+          base: 'main',
+          branch: 'tp/x',
+          model: 'm',
+        }),
+      );
+      // orDie turns the CredentialError into a defect, not a typed failure — so
+      // `dispatch`'s error channel stays `AgentFailed | RateCapped` and a missing
+      // cred crashes loudly (config defect) rather than looking like a retry.
+      assert.strictEqual(Exit.isFailure(exit), true);
+      if (!Exit.isFailure(exit)) return;
+      const die = Cause.dieOption(exit.cause);
+      assert.strictEqual(Option.isSome(die), true);
+      if (Option.isSome(die)) {
+        assert.strictEqual((die.value as { readonly _tag: string })._tag, 'CredentialError');
+      }
     }).pipe(Effect.provide(worker));
   });
 });
