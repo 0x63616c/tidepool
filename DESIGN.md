@@ -31,6 +31,18 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
                                           work agent → branch → PR → review agent → auto-merge
 ```
 
+> **Migration in progress — k8s / AgentWorker (see `.handoffs/`).** The diagram above shows the
+> original synchronous, one-box-per-ticket model. That is being replaced: the reconciler no longer
+> leases a box and blocks on the agent. Instead it **dispatches** an *agent-worker* (work or review)
+> through the **`AgentWorker`** seam, stores an opaque **`workHandle`** + `dispatchedAt` on the ticket,
+> moves it to a new **`running`** state, and **polls** the handle each tick — `Succeeded` harvests the
+> result, `Failed` retries/rate-caps, and a worker past its deadline is reaped (`cancel`). `BoxMaker`
+> is gone. Today the live `AgentWorker` is **`LocalAgentWorker`** (runs opencode on the control-plane,
+> preserving current behavior behind the async seam); the real **`K8sAgentWorker`**, Talos/Pulumi
+> infra, the **`CredentialBroker`**, and the **Postgres/CNPG** datastore land in later PRs and swap in
+> as Layers with no reconciler change. Sections below that still describe the box model are updated
+> incrementally as those PRs land.
+
 ---
 
 ## 2. Locked decisions
@@ -65,6 +77,11 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
   durability and the audit log in one.
 
 ### Compute
+> **Superseded by the AgentWorker migration (see the note under §Architecture).** `BoxMaker` is
+> removed; compute + agent execution now sit behind the async **`AgentWorker`** seam
+> (`dispatch`/`poll`/`cancel`/`reap`). The v0 Hetzner box-maker text below is retained for context
+> until the `K8sAgentWorker` + Talos/Pulumi PRs land; the spend guardrail is now the deadline reaper
+> (`now - dispatchedAt > deadline → cancel`) + k8s scale-to-zero, not `acquireRelease`-on-scope-close.
 - **Box-maker behind a `BoxMaker` interface.** v0 impl = **direct Hetzner Cloud API** (`POST
   /v1/servers` from a prebaked snapshot + cloud-init; worker self-`DELETE`s on idle via metadata).
   **Crabbox dropped** — research verdict GREEN for direct: Tidepool already builds the governance
@@ -161,8 +178,12 @@ everything upstream). Two levels:
   creation record — git = inbox, sqlite = store. State never lives in git. `tickets/*.md` in this
   repo are demoted to **seed fixtures** (example inputs the loop ingests), not the runtime store.
 - **Transcripts/usage** also sqlite + files on the main-box volume, never git.
-- **Lifecycle:** `backlog → in_progress (work agent → branch → PR) → review (review agent grades
-  diff vs goal) → [approve AND CI green → auto-merge → done] | [changes OR red CI → in_progress]`.
+- **Lifecycle (async dispatch+poll):** `backlog → in_progress (dispatch work agent-worker) →
+  running (poll; Succeeded → open PR) → review (CI green → dispatch review agent-worker) →
+  running (poll the verdict) → [approve AND CI green → auto-merge → done] | [changes OR red CI →
+  in_progress/review]`. `running` carries the `workHandle` + `dispatchedAt`; a poll `Failed` maps to
+  retry (or `rate_capped`) and `now - dispatchedAt > deadline` reaps the worker (`cancel`). The
+  reconciler is still the only mover and resumable — the handle on the ticket is the reattach point.
   Bounded retries → then `failed` / `rate_capped` (surfaced, requeued, never crash).
 - **Auto-merge in v1.** No human gate. Escalates to a human only on repeated failure.
 
@@ -176,8 +197,9 @@ everything upstream). Two levels:
 - **Quality rails are mechanical + shared via GIT hooks** (husky: prettier, tsc, commitlint,
   vitest) so the *same* gate covers human + opencode + codex + claude. CI re-runs the same gates
   (never trust local). Agents physically can't merge messy code.
-- **No leaky abstractions.** `BoxMaker`, `Forge`, `TicketStore`, `AgentRunner` are deep modules:
-  fat behind, narrow in front, impl fully hidden (Crabbox/Hetzner/GitHub never leak through).
+- **No leaky abstractions.** `AgentWorker`, `Forge`, `TicketStore` are deep modules: fat behind,
+  narrow in front, impl fully hidden (Hetzner/GitHub/opencode/k8s never leak through). (`BoxMaker`
+  was removed — the async `AgentWorker` seam subsumes both compute provisioning and agent execution.)
 
 ### Config & secrets (three stores, never mixed)
 1. **Declarative config** — typed `tidepool.config.ts` (`defineConfig`, zod-validated), in git,
