@@ -86,7 +86,7 @@ bun run check     # biome + lint:sh (shellcheck/shfmt) + typecheck + test
 
 ## Secrets
 
-sops + age, one file per secret (`secrets/*.enc.yaml`); 1Password is backup-only. Local: `.envrc` caches the break-glass key in the macOS keychain → `SOPS_AGE_KEY`. Detail: `DESIGN.md`.
+sops + age, one file per secret (`secrets/*.enc.yaml`); 1Password is backup-only. Local: `.envrc` caches the break-glass key in the macOS keychain → `SOPS_AGE_KEY`. Detail: `DESIGN.md`. **Who can decrypt each secret is defined once, in `.sops.yaml`'s creation rules** (the access-control matrix) — the `ci` recipient is intentionally minimal; it was widened to `forge_github_token` + `runner_opencode_auth_json` in PR-6.5 (human-approved) so `pulumi up` can seed the control-plane k8s Secret.
 
 Resolve a credential via sops before concluding it's absent — don't infer absence from a filesystem search (a missing `~/.ssh` file ≠ no key; check `secrets/*.enc.yaml`).
 

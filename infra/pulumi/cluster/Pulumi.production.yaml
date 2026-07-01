@@ -10,3 +10,8 @@
 config:
   tidepool-cluster:location: nbg1
   tidepool-cluster:adminCidrs: 135.196.84.115/32
+  # Digest-pinned application images (PR-6.5). Immutable `@sha256:` refs — never a
+  # mutable tag — so the control-plane rollout is reproducible. Bump deliberately
+  # when cutting a release (get the digest from the images.yml ghcr push).
+  tidepool-cluster:controlPlaneImage: ghcr.io/0x63616c/tidepool-control-plane@sha256:9743f970be9d09f1ff68037bc7b0fbe696fbb6e189326744a46a3fa427d2f2da
+  tidepool-cluster:agentWorkerImage: ghcr.io/0x63616c/tidepool-agent-worker@sha256:d4199a0c901179913a6a039fe77c04963342b221c0882a39d9b805e27e15efa1

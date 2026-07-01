@@ -1,6 +1,24 @@
 import * as k8s from '@pulumi/kubernetes';
-import { NODE_SUBNET_CIDR, POD_CIDR, SERVICE_CIDR } from './config';
+import { CNPG, NODE_SUBNET_CIDR, POD_CIDR, SERVICE_CIDR } from './config';
+import {
+  buildControlPlaneDeploymentSpec,
+  CONTROL_PLANE_SA,
+  CONTROL_PLANE_SECRET,
+  type ControlPlaneImages,
+  GITHUB_TOKEN_KEY,
+  OPENCODE_SECRET_KEY,
+  PG_APP_SECRET,
+} from './control-plane-deployment';
 import { buildWorkerEgressPolicySpec } from './guards';
+
+// The CNPG-generated app secret the Deployment references (`<cluster>-app`) MUST
+// track the cluster cnpg.ts creates — assert it here rather than keep a second
+// literal (tenet 1). The pure builder stays @pulumi-free, so the tie lives here.
+if (PG_APP_SECRET !== `${CNPG.clusterName}-app`) {
+  throw new Error(
+    `PG_APP_SECRET (${PG_APP_SECRET}) must equal <cluster>-app for ${CNPG.clusterName}`,
+  );
+}
 
 /**
  * Namespaces + the security wall (tenet 6/9). The agent-worker namespace is
@@ -11,7 +29,7 @@ import { buildWorkerEgressPolicySpec } from './guards';
  *
  * CNPG's own namespaces (cnpg-system, cert-manager) land in PR-5b.
  */
-export function createWorkloads(provider: k8s.Provider): void {
+export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImages): void {
   const opts = { provider };
 
   const cpNs = new k8s.core.v1.Namespace(
@@ -96,5 +114,43 @@ export function createWorkloads(provider: k8s.Provider): void {
       ],
     },
     { ...opts, dependsOn: [workerRole, reconcilerSa] },
+  );
+
+  // ── Control-plane runtime secrets (tenet 9) ──────────────────────────────────────
+  // The reconciler's OWN creds: the GitHub token (forge + git push) and the
+  // opencode auth blob it injects into worker Jobs. Delivered sops → env in the
+  // infra.yml up-job → this k8s Secret (the platform.ts hcloud pattern). Values
+  // come from the ambient env at APPLY, never hardcoded and never in git; empty
+  // at preview so the plan renders without a live cluster. Requires the `ci` age
+  // key to decrypt these two secrets — a human-approved tenet-9 widening (PR-6.5).
+  const cpSecret = new k8s.core.v1.Secret(
+    'control-plane-secrets',
+    {
+      metadata: { name: CONTROL_PLANE_SECRET, namespace: cpNs.metadata.name },
+      stringData: {
+        [GITHUB_TOKEN_KEY]: process.env.TIDEPOOL_FORGE_GITHUB_TOKEN ?? '',
+        [OPENCODE_SECRET_KEY]: process.env.TIDEPOOL_OPENCODE_AUTH_JSON ?? '',
+      },
+    },
+    { ...opts, dependsOn: [cpNs] },
+  );
+
+  // ── THE LIVE FLIP: the singleton reconciler on Postgres + the k8s agent-worker ──
+  // Spec built by the pure, unit-tested helper. `replicas:1 + Recreate` keeps it a
+  // singleton (tenet 3 + one PgMigrator). It also references the CNPG-managed
+  // `tidepool-pg-app` secret (created by installCnpg); if that isn't present yet
+  // the pod simply waits and starts once CNPG creates it — no cross-module
+  // dependsOn (createWorkloads doesn't see the cnpg resources).
+  new k8s.apps.v1.Deployment(
+    'control-plane',
+    {
+      metadata: {
+        name: CONTROL_PLANE_SA,
+        namespace: cpNs.metadata.name,
+        labels: { 'app.kubernetes.io/part-of': 'tidepool' },
+      },
+      spec: buildControlPlaneDeploymentSpec(images) as unknown as k8s.types.input.apps.v1.DeploymentSpec,
+    },
+    { ...opts, dependsOn: [cpSecret, reconcilerSa] },
   );
 }
