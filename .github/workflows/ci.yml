@@ -63,6 +63,28 @@ jobs:
             command -v opencode
           "
 
+  # Shell lint/format for the Claude Code secret hooks + infra scripts (same as the lefthook
+  # pre-commit shellcheck/shfmt). shellcheck is preinstalled on ubuntu-latest; shfmt is fetched.
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - name: install shfmt
+        run: |
+          curl -sSfL https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64 -o /usr/local/bin/shfmt
+          chmod +x /usr/local/bin/shfmt
+      - name: shellcheck + shfmt
+        run: bun run lint:sh
+      - name: validate redaction-hashes.json
+        # CI can't decrypt to verify hash CONTENT (no age key — tenet 9), but it can enforce the file
+        # is present, non-empty, and well-formed sha256 digests, so a corrupt/blank list can't merge.
+        run: |
+          jq -e '.algo == "sha256" and (.hashes | type == "array") and (.hashes | length > 0)
+                 and (all(.hashes[]; test("^[0-9a-f]{64}$")))' .claude/redaction-hashes.json > /dev/null
+
   # Mechanical leak guardrail (same scan as the lefthook pre-commit hook).
   # Full-history scan; encrypted secrets/*.enc.* are allowlisted in .gitleaks.toml.
   # Add `gitleaks` to main's required status checks once this lands.
