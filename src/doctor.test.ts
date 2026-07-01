@@ -37,15 +37,23 @@ describe('doctorVerdict', () => {
     assert.match(v.reason ?? '', /token/i);
   });
 
-  it('null box provider → fail naming hetzner (Phase C proof)', () => {
-    const v = doctorVerdict({ ...pass, latestWorkRunBoxProvider: null });
-    assert.isFalse(v.ok);
-    assert.match(v.reason ?? '', /hetzner/i);
+  it('null box provider (a k8s worker run) → ok (a real remote run, not a local fake)', () => {
+    assert.deepStrictEqual(doctorVerdict({ ...pass, latestWorkRunBoxProvider: null }), {
+      ok: true,
+      reason: null,
+    });
   });
 
-  it('local box provider → fail naming hetzner (LocalBoxMaker not a real proof)', () => {
+  it('hetzner box provider (legacy real worker) → ok', () => {
+    assert.deepStrictEqual(doctorVerdict({ ...pass, latestWorkRunBoxProvider: 'hetzner' }), {
+      ok: true,
+      reason: null,
+    });
+  });
+
+  it('local box provider → fail naming local (LocalBoxMaker is not a real remote worker)', () => {
     const v = doctorVerdict({ ...pass, latestWorkRunBoxProvider: 'local' });
     assert.isFalse(v.ok);
-    assert.match(v.reason ?? '', /hetzner/i);
+    assert.match(v.reason ?? '', /local/i);
   });
 });

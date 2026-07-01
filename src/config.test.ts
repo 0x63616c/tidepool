@@ -14,7 +14,6 @@ const valid = {
   ],
   models: { work: 'small', review: 'small' },
   workers: { max: 1, idleTimeoutSec: 300, maxTtlSec: 3600 },
-  box: { type: 'cpx11', locations: ['nbg1'] },
   retries: 2,
 };
 
@@ -29,28 +28,6 @@ describe('defineConfig', () => {
 
   it('throws when targets is empty', () => {
     assert.throws(() => defineConfig({ ...valid, targets: [] }));
-  });
-
-  it('throws when box.locations is empty', () => {
-    assert.throws(() => defineConfig({ ...valid, box: { type: 'cpx11', locations: [] } }));
-  });
-
-  it('defaults box.imageId to undefined (stock ubuntu)', () => {
-    assert.strictEqual(defineConfig(valid).box.imageId, undefined);
-  });
-
-  it('accepts a box.imageId snapshot id', () => {
-    const cfg = defineConfig({ ...valid, box: { ...valid.box, imageId: 234_567_890 } });
-    assert.strictEqual(cfg.box.imageId, 234_567_890);
-  });
-
-  it('defaults state to undefined (no management volume bound yet)', () => {
-    assert.strictEqual(defineConfig(valid).state, undefined);
-  });
-
-  it('accepts a state.volumeId binding the management-state volume', () => {
-    const cfg = defineConfig({ ...valid, state: { volumeId: 4711 } });
-    assert.strictEqual(cfg.state?.volumeId, 4711);
   });
 });
 
