@@ -38,10 +38,13 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
 > moves it to a new **`running`** state, and **polls** the handle each tick — `Succeeded` harvests the
 > result, `Failed` retries/rate-caps, and a worker past its deadline is reaped (`cancel`). `BoxMaker`
 > is gone. Today the live `AgentWorker` is **`LocalAgentWorker`** (runs opencode on the control-plane,
-> preserving current behavior behind the async seam); the real **`K8sAgentWorker`**, Talos/Pulumi
-> infra, the **`CredentialBroker`**, and the **Postgres/CNPG** datastore land in later PRs and swap in
-> as Layers with no reconciler change. Sections below that still describe the box model are updated
-> incrementally as those PRs land.
+> preserving current behavior behind the async seam). Worker creds now flow through the
+> **`CredentialBroker`** seam (`credsFor(job) → { opencodeAuth, githubToken }`) — a passthrough today
+> (reads the existing PAT + opencode auth), the one-module swap point for future GitHub App tokens /
+> auto-rotation, so the dispatch path never reads a secret directly (tenet 9). The real
+> **`K8sAgentWorker`**, Talos/Pulumi infra, and the **Postgres/CNPG** datastore land in later PRs and
+> swap in as Layers with no reconciler change. Sections below that still describe the box model are
+> updated incrementally as those PRs land.
 
 ---
 

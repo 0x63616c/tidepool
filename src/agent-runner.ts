@@ -8,7 +8,7 @@ import { $ } from 'bun';
 import { Effect, Schema } from 'effect';
 import { AgentFailed, RateCapped, type ReviewVerdict, type Ticket, type Usage } from './domain.ts';
 import { parseRepo } from './forge.ts';
-import type { ReviewResult, WorkResult } from './services.ts';
+import type { ReviewResult, WorkerCredentials, WorkResult } from './services.ts';
 
 /**
  * The local opencode driver, behind the `AgentWorker` seam (not a `Context.Tag`
@@ -296,15 +296,20 @@ type RemoteWorkInput = {
  * The runner is a single pre-bundled `runner.js` (sdk + Effect inlined), so the
  * box needs no `bun install` and no `package.json` — it just runs the artifact.
  */
-const remoteWork = async (input: RemoteWorkInput, token: string): Promise<WorkResult> => {
+const remoteWork = async (
+  input: RemoteWorkInput,
+  token: string,
+  opencodeAuth: string,
+): Promise<WorkResult> => {
   const { ip } = input.box;
   const runDir = `/tmp/tp-${input.ticket.id}`;
   const workDir = `/tmp/tp-work-${input.ticket.id}`;
 
   await waitForReady(ip);
 
-  // Deliver auth.json JIT over SSH into the standard opencode path (never on disk unencrypted)
-  const authJson = readFileSync(join(homedir(), '.tidepool/bootstrap/opencode-auth.json'), 'utf8');
+  // Deliver auth.json JIT over SSH into the standard opencode path (never on disk unencrypted).
+  // The blob comes from the CredentialBroker at dispatch — the runner never reads sops itself.
+  const authJson = opencodeAuth;
   await sshPipe(
     ip,
     'mkdir -p /root/.local/share/opencode && cat > /root/.local/share/opencode/auth.json && chmod 600 /root/.local/share/opencode/auth.json',
@@ -361,6 +366,7 @@ type RemoteReviewInput = {
 const remoteReview = async (
   input: RemoteReviewInput,
   token: string,
+  opencodeAuth: string,
 ): Promise<{ readonly verdict: ReviewVerdict; readonly usage: Usage }> => {
   const { ip } = input.box;
   const runDir = `/tmp/tp-review-${input.ticket.id}`;
@@ -368,8 +374,9 @@ const remoteReview = async (
 
   await waitForReady(ip);
 
-  // Deliver auth.json JIT over SSH into the standard opencode path (never on disk unencrypted)
-  const authJson = readFileSync(join(homedir(), '.tidepool/bootstrap/opencode-auth.json'), 'utf8');
+  // Deliver auth.json JIT over SSH into the standard opencode path (never on disk unencrypted).
+  // The blob comes from the CredentialBroker at dispatch — the runner never reads sops itself.
+  const authJson = opencodeAuth;
   await sshPipe(
     ip,
     'mkdir -p /root/.local/share/opencode && cat > /root/.local/share/opencode/auth.json && chmod 600 /root/.local/share/opencode/auth.json',
@@ -443,8 +450,14 @@ const runAgent = async (params: {
   }
 };
 
-/** Build the local opencode `OpencodeRunner` over a GitHub push token. */
-export const makeOpencodeAgentRunner = (token: string): OpencodeRunner => {
+/**
+ * Build the local opencode `OpencodeRunner` over broker-provided creds. The
+ * `githubToken` clones/pushes/fetches diffs; `opencodeAuth` is injected into the
+ * remote worker's opencode path. Creds arrive from the `CredentialBroker` at
+ * dispatch — the runner never reads sops/disk itself (tenet 9).
+ */
+export const makeOpencodeAgentRunner = (creds: WorkerCredentials): OpencodeRunner => {
+  const { githubToken: token, opencodeAuth } = creds;
   const cloneUrl = (repo: string) => `https://x-access-token:${token}@github.com/${repo}.git`;
   return {
     work: (input) =>
@@ -452,7 +465,7 @@ export const makeOpencodeAgentRunner = (token: string): OpencodeRunner => {
         try: async (): Promise<WorkResult> => {
           // Phase C: run on real Hetzner worker; Phase B fallback: run locally
           if (input.box.ip !== '127.0.0.1') {
-            return remoteWork(input, token);
+            return remoteWork(input, token, opencodeAuth);
           }
 
           const dir = await mkdtemp(join(tmpdir(), 'tp-work-'));
@@ -506,7 +519,7 @@ export const makeOpencodeAgentRunner = (token: string): OpencodeRunner => {
           // Phase C: run review on the leased Hetzner worker (FIX 1); Phase B
           // fallback: run locally (only when the box is the loopback stand-in).
           if (input.box.ip !== '127.0.0.1') {
-            return remoteReview(input, token);
+            return remoteReview(input, token, opencodeAuth);
           }
 
           const diff = await fetchPrDiff({ token, repo: input.repo, prNumber: input.prNumber });

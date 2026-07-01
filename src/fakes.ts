@@ -2,6 +2,7 @@ import { Effect, Layer, Ref } from 'effect';
 import {
   AgentFailed,
   type CIStatus,
+  CredentialError,
   MergeConflict,
   makeWorkHandle,
   RateCapped,
@@ -15,6 +16,8 @@ import {
 import { newPrId, newTicketId, type TicketId } from './ids.ts';
 import {
   AgentWorker,
+  CredentialBroker,
+  type CredentialRequest,
   DispatchOutcome,
   Forge,
   TicketStore,
@@ -131,6 +134,36 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
       };
     }),
   );
+
+// ── FakeCredentialBroker — scripted creds, no sops/disk ──────────────────────
+
+export interface FakeCredentialBrokerOptions {
+  readonly opencodeAuth?: string;
+  readonly githubToken?: string;
+  /** Make `credsFor` fail (drives the dispatch-time cred-resolution failure path). */
+  readonly fail?: string;
+  /** Spy hook: called with each `credsFor` request (assert the dispatch keyed it right). */
+  readonly onCall?: (job: CredentialRequest) => void;
+}
+
+/**
+ * Scripted `CredentialBroker` for tests — returns canned creds with no sops or
+ * disk read, so nothing decrypts a real secret. `onCall` records the request the
+ * dispatch path made, proving creds are resolved via the broker (not inline).
+ */
+export const fakeCredentialBroker = (
+  opts: FakeCredentialBrokerOptions = {},
+): Layer.Layer<CredentialBroker> =>
+  Layer.succeed(CredentialBroker, {
+    credsFor: (job) => {
+      opts.onCall?.(job);
+      if (opts.fail !== undefined) return Effect.fail(new CredentialError({ reason: opts.fail }));
+      return Effect.succeed({
+        opencodeAuth: opts.opencodeAuth ?? 'fake-opencode-auth',
+        githubToken: opts.githubToken ?? 'fake-gh-token',
+      });
+    },
+  });
 
 // ── FakeAgentWorker — scripted dispatch+poll, no real agent ──────────────────
 

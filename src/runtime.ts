@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { Effect, Layer } from 'effect';
 import { AppConfig, loadConfig } from './config.ts';
+import { LocalCredentialBroker } from './credential-broker.ts';
 import { GithubForgeLive } from './forge.ts';
 import { LocalAgentWorker } from './local-agent-worker.ts';
 import { TicketStore } from './services.ts';
@@ -49,11 +50,12 @@ export const AppConfigLive = Layer.effect(
  * The full real stack: durable store + GitHub + the local opencode agent-worker.
  * Until k8s lands (PR-4/6) `LocalAgentWorker` runs work/review on this machine
  * behind the async `AgentWorker` seam; the `K8sAgentWorker` Layer swaps in later
- * with zero reconciler change.
+ * with zero reconciler change. The worker's creds come from `LocalCredentialBroker`,
+ * provided into it here so the broker stays internal to the seam (never in the app env).
  */
 export const LiveStack = Layer.mergeAll(
   SqliteTicketStore,
   AppConfigLive,
   GithubForgeLive,
-  LocalAgentWorker,
+  LocalAgentWorker.pipe(Layer.provide(LocalCredentialBroker)),
 );
