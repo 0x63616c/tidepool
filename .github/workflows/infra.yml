@@ -126,6 +126,16 @@ jobs:
             echo "AWS_ACCESS_KEY_ID=$aws_key"
             echo "AWS_SECRET_ACCESS_KEY=$aws_secret"
           } >>"$GITHUB_ENV"
+      - name: compute this runner's egress IP (#4 JIT apiserver reachability)
+        run: |
+          # The firewall opens 6443+50000 to admin /32(s) + THIS runner /32, applied
+          # THROUGH pulumi (no out-of-band drift). Fail if the IP can't be resolved —
+          # a missing runner IP would otherwise apply with the ports admin-only and
+          # the bootstrap/apply steps would hang.
+          ip=$(curl -fsSL https://api.ipify.org)
+          [ -n "$ip" ] || { echo "could not resolve runner IP"; exit 1; }
+          echo "::add-mask::$ip"
+          echo "TIDEPOOL_CI_RUNNER_CIDR=${ip}/32" >>"$GITHUB_ENV"
       - name: pulumi up
         uses: pulumi/actions@v6
         with:
@@ -135,3 +145,6 @@ jobs:
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
         env:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          # Consumed by config.ts → firewall control-port allow-list (self-healing;
+          # next apply overwrites this /32 with the new runner IP).
+          TIDEPOOL_CI_RUNNER_CIDR: ${{ env.TIDEPOOL_CI_RUNNER_CIDR }}

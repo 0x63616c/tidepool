@@ -2,12 +2,14 @@ import * as hcloud from '@pulumi/hcloud';
 import type * as pulumi from '@pulumi/pulumi';
 import {
   ADMIN_CIDRS,
+  CI_RUNNER_CIDR,
   LABELS,
   NETWORK_CIDR,
   NETWORK_ZONE,
   NODE_SUBNET_CIDR,
   POD_CIDR,
 } from './config';
+import { controlPortSourceCidrs } from './guards';
 
 /**
  * Dedicated cluster network + firewall.
@@ -46,10 +48,11 @@ export function createNetwork(provider: hcloud.Provider): ClusterNetwork {
 
   // Firewall (tenet 9: no broad public inbound). Hetzner firewalls are inbound
   // allow-lists — unmatched inbound is dropped, outbound stays open.
-  //   - 6443  kube-apiserver   → admin /32 only
-  //   - 50000 Talos apid       → admin /32 only (config apply / bootstrap)
+  //   - 6443  kube-apiserver   → admin /32(s) + (during CI apply) the runner /32
+  //   - 50000 Talos apid       → admin /32(s) + (during CI apply) the runner /32
   //   - intra-network traffic  → open within NETWORK_CIDR (node<->node, kubelet,
   //                              etcd, CNI) and from the pod CIDR.
+  const controlPortSources = controlPortSourceCidrs(ADMIN_CIDRS, CI_RUNNER_CIDR);
   const firewall = new hcloud.Firewall(
     'tidepool-cluster-fw',
     {
@@ -60,15 +63,15 @@ export function createNetwork(provider: hcloud.Provider): ClusterNetwork {
           direction: 'in',
           protocol: 'tcp',
           port: '6443',
-          sourceIps: ADMIN_CIDRS,
-          description: 'kube-apiserver (admin only)',
+          sourceIps: controlPortSources,
+          description: 'kube-apiserver (admin + CI-apply runner)',
         },
         {
           direction: 'in',
           protocol: 'tcp',
           port: '50000',
-          sourceIps: ADMIN_CIDRS,
-          description: 'Talos apid (admin only)',
+          sourceIps: controlPortSources,
+          description: 'Talos apid (admin + CI-apply runner)',
         },
         {
           direction: 'in',

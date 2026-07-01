@@ -43,6 +43,15 @@ export const ADMIN_CIDRS = (cfg.get('adminCidrs') ?? '0.0.0.0/0')
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
 
+// CI apiserver reachability (#4): the up-job passes ITS ephemeral runner /32 here,
+// so the firewall opens 6443+50000 to it THROUGH pulumi (managed state, no
+// out-of-band drift) — access exists the instant the firewall is created, which is
+// before Talos bootstrap (:50000) + Helm/CR apply (:6443) need it. Empty at preview
+// and on operator-run applies. `adminCidrs` stays operator-only + fail-closed;
+// residual: one ephemeral runner /32 lingers in state until the next apply
+// overwrites it with the new runner IP (self-healing, GitHub-owned, cert-gated).
+export const CI_RUNNER_CIDR = process.env.TIDEPOOL_CI_RUNNER_CIDR?.trim() || undefined;
+
 // ── Versions (pinned to the SPIKE-PROVEN set — tenet 8, proven not guessed) ──────
 export const TALOS_VERSION = cfg.get('talosVersion') ?? 'v1.13.5';
 export const KUBERNETES_VERSION = cfg.get('kubernetesVersion') ?? 'v1.33.1';

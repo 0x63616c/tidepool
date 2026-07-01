@@ -25,6 +25,19 @@ export function assertAdminCidrsLocked(adminCidrs: readonly string[], isApply: b
   }
 }
 
+/**
+ * Source allow-list for the control ports (kube-apiserver 6443 + Talos apid 50000):
+ * the operator adminCidrs plus, when set, the CI runner's ephemeral /32 (#4). Kept
+ * pure so the combination is asserted under vitest.
+ */
+export function controlPortSourceCidrs(
+  adminCidrs: readonly string[],
+  ciRunnerCidr?: string,
+): string[] {
+  const runner = ciRunnerCidr?.trim();
+  return runner ? [...adminCidrs, runner] : [...adminCidrs];
+}
+
 /** The cluster-internal ranges that untrusted worker egress must NOT reach. */
 export function clusterInternalCidrs(
   podCidr: string,

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { assertAdminCidrsLocked, buildWorkerEgressPolicySpec } from './guards';
+import {
+  assertAdminCidrsLocked,
+  buildWorkerEgressPolicySpec,
+  controlPortSourceCidrs,
+} from './guards';
 
 describe('assertAdminCidrsLocked (fail-closed firewall guard)', () => {
   it('throws at apply when adminCidrs contains 0.0.0.0/0', () => {
@@ -16,6 +20,23 @@ describe('assertAdminCidrsLocked (fail-closed firewall guard)', () => {
 
   it('does NOT throw at apply when locked to a /32', () => {
     expect(() => assertAdminCidrsLocked(['192.0.2.10/32'], true)).not.toThrow();
+  });
+});
+
+describe('controlPortSourceCidrs (#4 JIT CI reachability)', () => {
+  it('is admin-only when no CI runner cidr is set', () => {
+    expect(controlPortSourceCidrs(['192.0.2.10/32'])).toEqual(['192.0.2.10/32']);
+  });
+
+  it('appends the CI runner /32 when set', () => {
+    expect(controlPortSourceCidrs(['192.0.2.10/32'], '198.51.100.7/32')).toEqual([
+      '192.0.2.10/32',
+      '198.51.100.7/32',
+    ]);
+  });
+
+  it('ignores an empty/whitespace runner cidr', () => {
+    expect(controlPortSourceCidrs(['192.0.2.10/32'], '   ')).toEqual(['192.0.2.10/32']);
   });
 });
 
