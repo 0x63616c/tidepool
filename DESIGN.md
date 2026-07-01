@@ -239,20 +239,22 @@ everything upstream). Two levels:
    changed via PR. Holds targets, worker cap/box specs, models, retries, idle timeout.
 2. **Secrets** — **sops + age**, encrypted in git, **one file per secret** so each secret's
    recipient set is an independently-tunable dial (`.sops.yaml` is the access-control matrix;
-   change audience = edit one rule + `sops updatekeys`). Recipients: main-box pubkey + break-glass
-   pubkey (+ CI where a secret must be CI-readable). **Private key lives on the main box only.**
-   Workers get JIT-decrypted creds over the lease's SSH — the master key never leaves the main box.
+   change audience = edit one rule + `sops updatekeys`). Recipients: the **CI** pubkey (where a secret
+   must be CI-readable) + the **break-glass** pubkey. **CI decrypts with the `ci` key at deploy time
+   and seeds each runtime secret into the in-cluster k8s Secret** that the control-plane Deployment
+   mounts — no age private key lives on a long-running host. (The old `mainbox` recipient was dropped
+   when the Hetzner control-plane box was torn down.)
    *Local dev:* `.envrc` (direnv) caches the break-glass key in the macOS login keychain and exports
    `SOPS_AGE_KEY`, so `sops -d` is promptless after a one-time per-machine seed from 1Password (the
    keys' backup-only store; nothing reads it at runtime). 1Password access uses a vault-scoped service account.
-3. **Runtime state** — sqlite on the main box, never in git.
+3. **Runtime state** — Postgres (CloudNativePG) in the cluster, never in git.
 - Rule: a thing lives in exactly one store. Config never holds a secret; state never holds config.
 - **Leak guard.** Claude Code hook (`.claude/hooks/`, bash-3.2-safe): PostToolUse `secret-redactor`
   masks secret *shapes* + our *exact* sealed values (sha256 list in `.claude/redaction-hashes.json`,
   regenerated at seal time by `bun run seal:hashes`, entropy-gated ≥80 bits, drift-checked at
   pre-push) in tool *output* before the model sees it (built-in tools require a *structured*
   `updatedToolOutput`, not a string — a plain string is silently dropped). It fails OPEN by design;
-  real containment is the outbound-only box + least privilege + rotation on compromise, not the hook.
+  real containment is the outbound-only cluster + least privilege + rotation on compromise, not the hook.
 - **Post-quantum caveat (deferred, human-gated).** sops/age use **X25519** — Shor-breakable, so
   secrets-at-rest are theoretically harvest-now-decrypt-later. Out of scope at personal/internal scale
   (tenet 7), and everything rotates on compromise anyway; `CredentialBroker` is the seam if a PQ KEM
@@ -262,12 +264,12 @@ everything upstream). Two levels:
 - **Declarative layer = Pulumi (TS) + pulumi-hcloud provider**. Defines
   only persistent stuff (~50 lines). State backend = **Hetzner Object Storage (S3)**. *(Pending
   research confirms.)*
-- **Bootstrap root of trust = GitHub Actions secrets** (Hetzner token + main-box age private key).
-  Everything else flows from sops afterward. One clean handoff: GH Actions secrets = bootstrap,
+- **Bootstrap root of trust = one GitHub Actions secret** (the `ci` age private key).
+  Everything else flows from sops afterward. One clean handoff: GH Actions secret = bootstrap,
   sops = steady state.
-- Sequence: generate age keypairs → pubkey to repo as sops recipient → GH Actions secrets hold
-  Hetzner token + age privkey → CI `pulumi up` creates main box → cloud-init installs bun, clones
-  tidepool, injects age privkey, starts reconciler → main box decrypts sops → alive.
+- Sequence: generate age keypairs → pubkeys to repo as sops recipients → the `ci` age privkey is the
+  one GH Actions secret → CI `pulumi up` provisions the k8s cluster and decrypts sops → seeds every
+  runtime secret into the in-cluster k8s Secret → the control-plane Deployment mounts it → alive.
 
 ### Spend guardrails (defense in depth — "$100k bill is impossible by construction")
 The cost nightmare (runaway box creation) must be blocked *outside* our code, then again inside.
