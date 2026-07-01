@@ -83,6 +83,9 @@ jobs:
         with:
           command: preview
           stack-name: ${{ env.STACK }}
+          # Create `production` in the fresh S3 backend if absent (stack select
+          # --create); no-op selecting the existing stack on later runs.
+          upsert: true
           work-dir: ${{ env.WORK_DIR }}
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
         # PULUMI_CONFIG_PASSPHRASE is exported to $GITHUB_ENV from sops above.
@@ -150,6 +153,9 @@ jobs:
         with:
           command: up
           stack-name: ${{ env.STACK }}
+          # Create `production` in the fresh S3 backend if absent (stack select
+          # --create); no-op selecting the existing stack on later runs.
+          upsert: true
           work-dir: ${{ env.WORK_DIR }}
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
         env:
