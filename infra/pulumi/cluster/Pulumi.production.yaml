@@ -9,4 +9,4 @@
 # #4 apiserver-reachability decision), so it is deliberately NOT listed here.
 config:
   tidepool-cluster:location: nbg1
-  tidepool-cluster:adminCidrs: 192.0.2.10/32
+  tidepool-cluster:adminCidrs: 135.196.84.115/32
