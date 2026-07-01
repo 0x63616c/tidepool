@@ -27,7 +27,9 @@ Any change that **crosses or weakens a tenet requires explicit human approval**:
 one line, do not implement it.
 
 1. **Single source of truth.** Each datum lives in exactly one store — config in git, secrets in
-   sops, runtime state (tickets/transcripts/usage) in sqlite. Never split state across stores.
+   sops, runtime state (tickets/transcripts/usage) in Postgres (CloudNativePG). Never split state
+   across stores. (Human-approved crossing: runtime state moved sqlite→Postgres for an HA seam; the
+   single-source invariant is unchanged.)
 2. **GitOps flow.** The system's *definition* (infra, config, code) is declarative, PR-reviewed,
    CI-applied — never hand-mutated on the box. (Runtime *data* like tickets is state, not definition,
    so it lives in sqlite, not git — consistent, not a violation.)

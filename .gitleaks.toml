@@ -11,6 +11,13 @@ paths = [
   # One-way sha256 digests of sealed secret values (not the values). 64-hex would trip entropy rules.
   '''\.claude/redaction-hashes\.json$''',
 ]
+# Narrow match, NOT a path allowlist: the vendored CNPG Barman-plugin manifest ships
+# a k8s Secret whose only value is the PUBLIC sidecar image ref (base64 of
+# ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar:<ver>), not a credential.
+# Everything else in that path stays fully scanned. Version-independent (prefix only).
+regexes = [
+  '''SIDECAR_IMAGE:\s*\|\s*Z2hjci5pby9jbG91ZG5hdGl2ZS1wZy9wbHVnaW4tYmFybWFuLWNsb3VkLXNpZGVjYXI6''',
+]
 # NB: the FAKE token fixtures in src/secret-hooks.test.ts are suppressed per-line with inline
 # `gitleaks:allow` comments (not a whole-file allowlist), so a REAL secret added elsewhere in that
 # file is still caught.

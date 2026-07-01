@@ -1,5 +1,6 @@
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
+import { installCnpg } from './cnpg';
 import { ADMIN_CIDRS } from './config';
 import { assertAdminCidrsLocked } from './guards';
 import { createNetwork } from './network';
@@ -37,6 +38,7 @@ const net = createNetwork(provider);
 const cp = createControlPlane(provider, net);
 const k8sProvider = installPlatform(cp, net);
 createWorkloads(k8sProvider);
+installCnpg(k8sProvider);
 
 // ── Outputs ──────────────────────────────────────────────────────────────────────
 export const controlPlaneIp = cp.controlPlaneIp;

@@ -80,5 +80,32 @@ export const CHARTS = {
 
 export const CLUSTER_NAME = 'tidepool';
 
+// ── Datastore: CloudNativePG (PR-5b) ─────────────────────────────────────────────
+// CNPG 1.30 dropped the native barmanObjectStore → the Barman Cloud PLUGIN is
+// mandatory, and the plugin's webhook needs cert-manager. Versions pinned; the
+// plugin manifest is vendored under manifests/ (offline + deterministic preview).
+export const CNPG = {
+  certManager: { repo: 'https://charts.jetstack.io', chart: 'cert-manager', version: 'v1.20.3' },
+  operator: {
+    repo: 'https://cloudnative-pg.github.io/charts',
+    chart: 'cloudnative-pg',
+    version: '0.29.0',
+  },
+  barmanPluginVersion: 'v0.13.0', // → manifests/barman-cloud-plugin-<ver>.yaml
+  // Postgres cluster.
+  clusterName: 'tidepool-pg', // → DSN host `tidepool-pg-rw.tidepool.svc:5432`
+  namespace: 'tidepool', // co-located with the control-plane (created in 5a)
+  instances: 1, // HA seam: bump to 3 for sync replicas, no schema change
+  storageClass: 'hcloud-volumes',
+  dataSize: '10Gi',
+  walSize: '10Gi',
+  // Backups → Hetzner Object Storage (S3). Bucket is a HUMAN pre-create (Hetzner
+  // buckets can't be minted via hcloud CLI); creds come from the sops S3 secret.
+  backupBucket: 'tidepool-pg-backups',
+  backupEndpoint: 'https://nbg1.your-objectstorage.com',
+  backupSchedule: '0 0 3 * * *', // CNPG 6-field cron: 03:00 daily
+  backupRetention: '30d',
+} as const;
+
 /** Common Hetzner labels so every resource is greppable + reap-safe. */
 export const LABELS = { managed_by: 'tidepool', component: 'cluster' } as const;
