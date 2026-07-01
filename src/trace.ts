@@ -76,7 +76,8 @@ const renderTimeline = (events: ReadonlyArray<RunEvent>, runs: ReadonlyArray<Run
   ].join('\n');
 };
 
-const renderTrace = (
+/** Pure trace renderer — reused by `tp ticket get` (fed from QueueControl data). */
+export const renderTrace = (
   ticket: Ticket,
   runs: ReadonlyArray<Run>,
   events: ReadonlyArray<RunEvent>,
@@ -167,7 +168,8 @@ const renderModels = (runs: ReadonlyArray<Run>): string => {
 const renderTotal = (t: Tally): string =>
   `total{runs,tokens_in,tokens_out,wall_time_sec}: ${t.runs},${t.tokensIn},${t.tokensOut},${round3(t.wallTimeSec)}`;
 
-const renderTicketCost = (ticketId: TicketId, runs: ReadonlyArray<Run>): string => {
+/** Pure per-ticket cost renderer — reused by `tp ticket get`. */
+export const renderTicketCost = (ticketId: TicketId, runs: ReadonlyArray<Run>): string => {
   if (runs.length === 0) return `cost: ticket ${ticketId} has no runs yet`;
   const rows = runs.map(
     (r) =>

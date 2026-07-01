@@ -8,8 +8,8 @@ import { TicketStore } from './services.ts';
  * QueueControl — the narrow driver seam the `tp` CLI (and a future web UI) speaks.
  *
  * It exposes ONLY read + enqueue: `add`, `list`, `get`, `runsFor`, `events`. The
- * mover trio (`patch`/`addRun`/`appendEvents`) is deliberately absent so a remote
- * client cannot move ticket state — the reconciler stays the only mover (tenet 3).
+ * reconciler's state-mutating methods are deliberately absent so a remote client
+ * cannot move ticket state — the reconciler stays the only mover (tenet 3).
  * Two adapters satisfy the tag: `LocalQueueControl` (this file, wraps the
  * in-process `TicketStore` for dev/tests) and `HttpQueueControl` (the laptop
  * client, added later). Commands never know which is behind the tag.
@@ -28,9 +28,14 @@ export const ListTicketsQuery = Schema.Struct({
 });
 export type ListTicketsQuery = typeof ListTicketsQuery.Type;
 
-/** `events` query — narrowed by run/source, paginated by the same envelope. */
+/**
+ * `events` query — narrowed by ticket / run / source, paginated by the same
+ * envelope. All three narrows are nullable (mirrors the store's `EventQuery`):
+ * `tp ticket logs --run` / `transcript` scope by run with no ticket, while
+ * `get` / `logs <ticket>` scope by ticket.
+ */
 export const EventsQuery = Schema.Struct({
-  ticketId: TicketId,
+  ticketId: Schema.NullOr(TicketId),
   runId: Schema.NullOr(RunId),
   source: Schema.NullOr(RunSource),
   limit: Schema.Int.pipe(Schema.greaterThan(0), Schema.lessThanOrEqualTo(1000)),
@@ -88,23 +93,24 @@ export const LocalQueueControl = Layer.effect(
         ),
       get: (id) => store.byId(id),
       runsFor: (id) => store.byId(id).pipe(Effect.flatMap(() => store.runsFor(id))),
-      events: (q) =>
-        store.byId(q.ticketId).pipe(
-          Effect.flatMap(() =>
-            store.eventsFor({
-              ticketId: q.ticketId,
-              runId: q.runId ?? undefined,
-              source: q.source ?? undefined,
-            }),
-          ),
-          Effect.map((evs) => {
-            // Events carry no id; the append-only stream is stable, so cursor = index.
-            const start = q.cursor === null ? 0 : Number(q.cursor);
-            const items = evs.slice(start, start + q.limit);
-            const next = start + q.limit;
-            return { items, nextCursor: next < evs.length ? String(next) : null };
-          }),
-        ),
+      events: (q) => {
+        const paginate = (evs: ReadonlyArray<RunEvent>): Page<RunEvent> => {
+          // Events carry no id; the append-only stream is stable, so cursor = index.
+          const start = q.cursor === null ? 0 : Number(q.cursor);
+          const items = evs.slice(start, start + q.limit);
+          const next = start + q.limit;
+          return { items, nextCursor: next < evs.length ? String(next) : null };
+        };
+        const read = store
+          .eventsFor({
+            ticketId: q.ticketId ?? undefined,
+            runId: q.runId ?? undefined,
+            source: q.source ?? undefined,
+          })
+          .pipe(Effect.map(paginate));
+        // Verify the ticket exists (TicketNotFound) only when scoping by ticket.
+        return q.ticketId === null ? read : store.byId(q.ticketId).pipe(Effect.flatMap(() => read));
+      },
     } satisfies QueueControlApi;
   }),
 );
