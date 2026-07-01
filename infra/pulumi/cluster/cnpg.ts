@@ -65,10 +65,58 @@ export function installCnpg(provider: k8s.Provider): void {
   // from its compiled-in schema, so preview stays offline. v2 fetches the live
   // cluster's /openapi/v2 to type the manifest — an apiserver call the firewalled
   // preview runner can't make.
+  //
+  // MIGRATION SAFETY (tckt_bmdbr) — the v2→v1 switch (PR #59) is a Pulumi *rename*, not an
+  // in-place edit, and it changes TWO things about every child object's URN
+  // (`urn = <parentURN>$<type>::<name>`):
+  //   - parent type: `kubernetes:yaml/v2:ConfigFile` → `kubernetes:yaml:ConfigFile`;
+  //   - child NAME: v2 auto-prefixes children with the ConfigFile's name +colon
+  //     (`barman-cloud-plugin:cnpg-system/barman-cloud`), v1 does NOT
+  //     (`cnpg-system/barman-cloud`).
+  // With no alias Pulumi sees the new-URN children as fresh CREATEs and the old-URN children
+  // as orphaned DELETEs; orphan deletes run *after* creates, so the merge-to-main apply hit
+  // the live cluster with "… already exists" on all 16 children (run 28536068245). The k8s
+  // provider's own error names the fix: "Renaming a Pulumi resource: use an alias to preserve
+  // the identity, or use deleteBeforeReplace if the resource needs replacement." Note
+  // `deleteBeforeReplace` ALONE cannot fix this — a pure create (new URN, no identity link)
+  // is not a replace, so the flag is a no-op on it. Because BOTH parent-type and name changed,
+  // a component-level `type` alias is insufficient (its auto-propagated child alias keeps the
+  // new, unprefixed name and so matches nothing — confirmed: preview still showed 17 create /
+  // 18 delete). So we alias each child explicitly, in a transformation:
+  //   1. `aliases: [{ parent: <old v2 ConfigFile URN>, name: 'barman-cloud-plugin:<v1 name>' }]`
+  //      reconstructs each child's exact OLD URN (type inferred from the unchanged current
+  //      type). Pulumi finds it in state and ADOPTS the live object in place under the new
+  //      v1 parent — no create, no collision. v1's child id is `${ns}/${name}` (namespaced)
+  //      or `${name}` (cluster-scoped) — matching CNPG's manifest — and v2's was that same id
+  //      with a `barman-cloud-plugin:` prefix.
+  //   2. `deleteBeforeReplace = true` on every child is the safety net: the manifest is
+  //      byte-identical to what v2 applied, so adoption is a no-op/update, but if a child ever
+  //      DID diff to a replacement it deletes-first so it still cannot collide. DB data is
+  //      disposable (backups/contents don't matter), so a destructive barman-child replace is
+  //      acceptable — the only requirement is a clean gated `pulumi up`.
+  // The `objectstores.barmancloud.cnpg.io` CRD is one of these children: adopted in place, so
+  // the live `pg-objectstore` CR below is NOT cascade-deleted and the CNPG chain
+  // (ObjectStore → Cluster → ScheduledBackup) needs no accompanying change.
+  //
+  // This is verifiable offline: `pulumi preview` reads real `production` state, so a correct
+  // alias shows these children as adopted/updated rather than create+delete.
+  const barmanV2ConfigFileUrn = `urn:pulumi:${pulumi.getStack()}::${pulumi.getProject()}::kubernetes:yaml/v2:ConfigFile::barman-cloud-plugin`;
   const barmanPlugin = new k8s.yaml.ConfigFile(
     'barman-cloud-plugin',
     {
       file: join(__dirname, 'manifests', `barman-cloud-plugin-${CNPG.barmanPluginVersion}.yaml`),
+      transformations: [
+        (obj, childOpts) => {
+          const metadata = (obj?.metadata ?? {}) as { name?: string; namespace?: string };
+          const v1Name = metadata.namespace
+            ? `${metadata.namespace}/${metadata.name}`
+            : `${metadata.name}`;
+          childOpts.aliases = [
+            { parent: barmanV2ConfigFileUrn, name: `barman-cloud-plugin:${v1Name}` },
+          ];
+          childOpts.deleteBeforeReplace = true;
+        },
+      ],
     },
     { ...opts, dependsOn: [certManager, cnpgSystemNs] },
   );
