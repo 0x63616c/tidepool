@@ -170,6 +170,11 @@ export class MergeConflict extends Data.TaggedError('MergeConflict')<{
   readonly prNumber: number;
 }> {}
 
+/** A worker credential could not be resolved (missing PAT / auth file, sops read). */
+export class CredentialError extends Data.TaggedError('CredentialError')<{
+  readonly reason: string;
+}> {}
+
 /** Looked-up ticket not present in the store. */
 export class TicketNotFound extends Data.TaggedError('TicketNotFound')<{
   readonly id: string;

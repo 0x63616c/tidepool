@@ -2,6 +2,7 @@ import { Context, Data, type Effect } from 'effect';
 import type {
   AgentFailed,
   CIStatus,
+  CredentialError,
   ForgeError,
   MergeConflict,
   NewTicket,
@@ -182,3 +183,38 @@ export interface AgentWorkerApi {
 }
 
 export class AgentWorker extends Context.Tag('AgentWorker')<AgentWorker, AgentWorkerApi>() {}
+
+// ── CredentialBroker: the one place an agent-worker's creds come from ─────────
+
+/**
+ * The credentials one agent-worker needs to do its job. Opaque strings — the
+ * broker hides where they come from (sops today, minted App tokens / rotated
+ * opencode auth tomorrow), so this shape is the stable front the future swap
+ * keeps (tenet 4). `opencodeAuth` is the opencode `auth.json` blob (LLM provider
+ * auth); `githubToken` is the git clone/push + PR-diff token.
+ */
+export interface WorkerCredentials {
+  readonly opencodeAuth: string;
+  readonly githubToken: string;
+}
+
+/**
+ * Which dispatch is asking. Narrow + non-leaky (ids/primitives only): `repo`
+ * scopes a future GitHub App installation token, `kind`/`ticketId` scope + audit
+ * the grant. Passthrough ignores it; the rotation swap keys creds on it.
+ */
+export interface CredentialRequest {
+  readonly kind: 'work' | 'review';
+  readonly repo: string;
+  readonly ticketId: TicketId;
+}
+
+export interface CredentialBrokerApi {
+  /** Resolve the creds for one dispatched job. The dispatch path's only cred source. */
+  readonly credsFor: (job: CredentialRequest) => Effect.Effect<WorkerCredentials, CredentialError>;
+}
+
+export class CredentialBroker extends Context.Tag('CredentialBroker')<
+  CredentialBroker,
+  CredentialBrokerApi
+>() {}
