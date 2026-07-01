@@ -115,21 +115,29 @@ const failureEvent = (ticketId: TicketId, line: string): RunEvent => ({
 });
 
 /**
- * Bump attempts; fail the ticket once it has burned through `retries`. The retry
- * target depends on how far the ticket got (FIX 3): a ticket that already opened a
- * PR re-enters `review` (re-check CI / re-grade the existing branch), because
- * re-running work would push to an existing branch and fail the non-fast-forward,
- * wasting attempts. Only a pre-PR failure (no open PR yet) re-runs work via
- * `in_progress`. Always clears the dispatch handle — a retry starts a fresh worker.
+ * Bump attempts; fail the ticket once it has burned through `retries`. Routing:
+ *  - `rework` retries (the diff is deficient — review requested changes, or CI is
+ *    red) go back to `in_progress` and re-run work so the feedback can actually be
+ *    addressed; the worker force-pushes the ticket's branch, so the existing PR
+ *    updates and re-review sees a NEW diff (re-grading the same diff would just
+ *    reject identically and burn every attempt).
+ *  - other (transient) retries — deadline, dispatch error — re-run the current
+ *    stage: `review` if a PR is already open, else `in_progress`.
+ * Always clears the dispatch handle — a retry starts a fresh worker.
  */
 const retryOrFail = (
   store: TicketStoreApi,
   ticket: Ticket,
   retries: number,
   reason: string,
+  opts?: { readonly rework?: boolean },
 ): Effect.Effect<unknown, TicketNotFound> => {
   const attempts = ticket.attempts + 1;
-  const retryState: Ticket['state'] = ticket.prNumber !== null ? 'review' : 'in_progress';
+  const retryState: Ticket['state'] = opts?.rework
+    ? 'in_progress'
+    : ticket.prNumber !== null
+      ? 'review'
+      : 'in_progress';
   const cleared = { workHandle: null, dispatchedAt: null } as const;
   return attempts >= retries
     ? store.patch(ticket.id, { attempts, state: 'failed', reason, ...cleared })
@@ -311,7 +319,9 @@ const stepTicket = (
               ]);
 
             if (review.verdict === 'request_changes') {
-              yield* retryOrFail(store, ticket, config.retries, 'review-rejected');
+              yield* retryOrFail(store, ticket, config.retries, 'review-rejected', {
+                rework: true,
+              });
               return;
             }
 
