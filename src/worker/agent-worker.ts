@@ -23,6 +23,20 @@ import { type FormatPort, type GitPort, makeReviewRunner, makeRunner } from './r
  * over the two existing runner cores.
  */
 
+/**
+ * A one-line summary of what this pod is about to do, logged at startup so a
+ * running Job is identifiable from `kubectl logs` alone. The work `branch`
+ * (`tp/<tckt_id>-<slug>`) and `commitMsg` (`#tckt_… …`) both carry the ticket
+ * id, so the ticket is visible without any lookup. The tokenized `cloneUrl` is
+ * deliberately omitted — it embeds a GitHub access token and must never reach a
+ * log line — and the full `prompt` is reduced to a length (it's large and only
+ * its size is useful here).
+ */
+export const describeConfig = (config: AgentWorkerConfig): string =>
+  config.kind === 'work'
+    ? `work run: branch=${config.branch} base=${config.base} model=${config.model} commit="${config.commitMsg}" prompt=${config.prompt.length} chars`
+    : `review run: dir=${config.dir} model=${config.model} prompt=${config.prompt.length} chars`;
+
 /** Everything the dispatch needs — injected so the single-line contract is testable. */
 export interface AgentWorkerDeps {
   readonly git: GitPort;
@@ -45,6 +59,7 @@ export const makeAgentWorkerProgram = (deps: AgentWorkerDeps): Effect.Effect<voi
     Effect.gen(function* () {
       const raw = yield* Effect.tryPromise(() => deps.readConfig());
       const config = yield* Schema.decode(Schema.parseJson(AgentWorkerConfig))(raw);
+      yield* Effect.logInfo(describeConfig(config));
       if (config.kind === 'work') {
         const result = yield* makeRunner({
           git: deps.git,

@@ -1,9 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Schema } from 'effect';
-import { makeAgentWorkerProgram } from './agent-worker.ts';
+import { Effect, Logger, Schema } from 'effect';
+import { describeConfig, makeAgentWorkerProgram } from './agent-worker.ts';
 import type { OpencodePort } from './opencode-session.ts';
-import { ReviewRunnerResult, RunnerResult } from './protocol.ts';
+import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
 import type { FormatPort, GitPort } from './runner-core.ts';
 
 /**
@@ -105,6 +105,54 @@ describe('agent-worker dispatch', () => {
     const result = Effect.runSync(Schema.decode(Schema.parseJson(ReviewRunnerResult))(line));
     assert.strictEqual(result.text, 'VERDICT: APPROVE');
     assert.strictEqual(result.usage.tokensIn, 1200);
+  });
+
+  it('logs the ticket details at startup so a running pod is identifiable', async () => {
+    const lines: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message }) =>
+        lines.push(Array.isArray(message) ? message.join(' ') : String(message)),
+      ),
+    );
+    await Effect.runPromise(
+      makeAgentWorkerProgram({
+        git: fakeGit,
+        opencode: fakeOpencode('done'),
+        format: fakeFormat,
+        ensureDir: () => Promise.resolve(),
+        readConfig: () => Promise.resolve(JSON.stringify(workConfig)),
+        emit: () => {},
+      }).pipe(Effect.provide(capture)),
+    );
+    assert.strictEqual(
+      lines.some((l) => l.startsWith('work run: branch=tp/tckt_x-do-thing')),
+      true,
+    );
+  });
+});
+
+describe('describeConfig', () => {
+  const decode = (c: unknown) => Schema.decodeUnknownSync(AgentWorkerConfig)(c);
+
+  it('summarizes a work run with the ticket-identifying branch + commit', () => {
+    assert.strictEqual(
+      describeConfig(decode(workConfig)),
+      'work run: branch=tp/tckt_x-do-thing base=main model=openai/gpt-5.4-mini commit="#tckt_x feat: do the thing" prompt=12 chars',
+    );
+  });
+
+  it('never leaks the tokenized clone URL', () => {
+    const summary = describeConfig(decode(workConfig));
+    assert.strictEqual(summary.includes('x-access-token'), false);
+    assert.strictEqual(summary.includes('tok@'), false);
+  });
+
+  it('summarizes a review run', () => {
+    assert.strictEqual(
+      describeConfig(decode(reviewConfig)),
+      'review run: dir=/tmp/tp-review-x model=openai/gpt-5.4-mini prompt=16 chars',
+    );
   });
 });
 
