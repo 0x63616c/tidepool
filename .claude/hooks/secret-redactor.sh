@@ -11,9 +11,9 @@
 # mirroring that tool's result shape — a plain STRING is silently ignored (verified on CC 2.1.197).
 # We reuse the original `.tool_response` object and mask strings in place, so the shape always matches.
 #
-# Defense-in-depth: the PreToolUse secret-command-guard is the primary shield (blocks before execution);
-# this hook redacts surprises that slip through. If this hook crashes, raw output reaches context —
-# so it fails OPEN by design (never blocks a tool), and PreToolUse remains the real guarantee.
+# This is the sole leak guard: it masks secrets in tool OUTPUT before the model sees them. If this
+# hook crashes, raw output reaches context — so it fails OPEN by design (never blocks a tool). Real
+# containment is elsewhere: outbound-only box + least privilege + rotation on compromise.
 set -euo pipefail
 
 ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
