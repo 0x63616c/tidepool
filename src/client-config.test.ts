@@ -8,8 +8,8 @@ current-context = "prod"
 [contexts.prod]
 kind = "http"
 url = "http://127.0.0.1:8080"
-namespace = "tidepool"
-service = "tidepool-control-plane"
+namespace = "core"
+service = "reconciler"
 remote-port = 8080
 local-port = 8080
 
@@ -26,7 +26,7 @@ describe('parseClientConfig', () => {
     expect(prod?.kind).toBe('http');
     if (prod?.kind === 'http') {
       expect(prod.url).toBe('http://127.0.0.1:8080');
-      expect(prod.portForward?.service).toBe('tidepool-control-plane');
+      expect(prod.portForward?.service).toBe('reconciler');
       expect(prod.portForward?.localPort).toBe(8080);
     }
   });

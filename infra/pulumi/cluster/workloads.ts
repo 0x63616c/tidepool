@@ -168,16 +168,16 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
   // LoadBalancer, no Ingress — reached only via `kubectl port-forward` through
   // the /32-firewalled apiserver, so the box stays outbound-only (tenet 9).
   new k8s.core.v1.Service(
-    'control-plane-api',
+    'reconciler-api',
     {
       metadata: {
-        name: CONTROL_PLANE_SA,
+        name: RECONCILER_SA,
         namespace: cpNs.metadata.name,
-        labels: { 'app.kubernetes.io/part-of': 'tidepool' },
+        labels: { 'app.kubernetes.io/part-of': 'tidepool', 'tidepool/role': 'reconciler' },
       },
       spec: {
         type: 'ClusterIP',
-        selector: { 'app.kubernetes.io/name': CONTROL_PLANE_SA, 'app.kubernetes.io/part-of': 'tidepool' },
+        selector: { 'app.kubernetes.io/name': RECONCILER_SA, 'app.kubernetes.io/part-of': 'tidepool' },
         ports: [{ name: API_PORT_NAME, port: API_PORT, targetPort: API_PORT_NAME }],
       },
     },
