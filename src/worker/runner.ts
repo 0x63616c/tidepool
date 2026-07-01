@@ -21,7 +21,7 @@ import { type FormatPort, type GitPort, makeRunner } from './runner-core.ts';
  */
 
 /** Git over Bun's `$`. The shell is the implementation detail behind `GitPort`. */
-const bunGitPort: GitPort = {
+export const bunGitPort: GitPort = {
   clone: async ({ cloneUrl, base, dir }) => {
     await $`git clone --depth 1 --branch ${base} ${cloneUrl} ${dir}`.quiet();
   },
@@ -53,7 +53,7 @@ const bunGitPort: GitPort = {
  * it is not a gate). Commands are run raw so a multi-token command line (`bunx
  * biome format --write .`) executes as written, not as one quoted argument.
  */
-const bunFormatPort: FormatPort = {
+export const bunFormatPort: FormatPort = {
   hasFormatScript: async (dir) => {
     try {
       const pkg = JSON.parse(await readFile(`${dir}/package.json`, 'utf8')) as {

@@ -1,0 +1,61 @@
+name: images
+
+# Build the three tidepool images (shared base → control-plane + agent-worker).
+# On a PR: build only, prove the Dockerfiles are valid. On push to main: build +
+# push to ghcr by tag (:${sha} + :latest). k8s consumes these tags in a later PR;
+# this job only guarantees they build and publish.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lowercase the owner — ghcr repository paths must be lowercase, GitHub
+      # org/user names may not be.
+      - name: compute image prefix
+        id: prefix
+        run: echo "value=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/tidepool" >>"$GITHUB_OUTPUT"
+
+      # Base first (local tag), then the two derived images reference it via the
+      # BASE_IMAGE build-arg — same as the local `docker build` smoke.
+      - name: build base
+        run: docker build -f infra/docker/base.Dockerfile -t tidepool-base:latest .
+      - name: build control-plane
+        run: docker build -f infra/docker/control-plane.Dockerfile --build-arg BASE_IMAGE=tidepool-base:latest -t tidepool-control-plane:latest .
+      - name: build agent-worker
+        run: docker build -f infra/docker/agent-worker.Dockerfile --build-arg BASE_IMAGE=tidepool-base:latest -t tidepool-agent-worker:latest .
+
+      - name: log in to ghcr
+        if: github.event_name == 'push'
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login "$REGISTRY" -u '${{ github.actor }}' --password-stdin
+
+      - name: tag + push
+        if: github.event_name == 'push'
+        run: |
+          set -eux
+          prefix='${{ steps.prefix.outputs.value }}'
+          sha='${{ github.sha }}'
+          for img in base control-plane agent-worker; do
+            local_tag="tidepool-${img}:latest"
+            docker tag "$local_tag" "${prefix}-${img}:${sha}"
+            docker tag "$local_tag" "${prefix}-${img}:latest"
+            docker push "${prefix}-${img}:${sha}"
+            docker push "${prefix}-${img}:latest"
+          done

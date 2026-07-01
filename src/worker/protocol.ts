@@ -63,3 +63,26 @@ export const ReviewRunnerResult = Schema.Struct({
   usage: Usage,
 });
 export type ReviewRunnerResult = typeof ReviewRunnerResult.Type;
+
+/**
+ * The tagged config the generalized agent-worker entrypoint decodes from
+ * config.json. One image, one entrypoint, two kinds: `kind` selects the run so a
+ * k8s Job picks the path by the value mounted in its config, not by which binary
+ * it runs. Each arm reuses the existing work/review field set verbatim (spread),
+ * so the wire contract and both runner cores stay unchanged — `work` still emits
+ * a `RunnerResult`, `review` still a `ReviewRunnerResult`.
+ */
+export const WorkJobConfig = Schema.Struct({
+  kind: Schema.Literal('work'),
+  ...RunnerConfig.fields,
+});
+export type WorkJobConfig = typeof WorkJobConfig.Type;
+
+export const ReviewJobConfig = Schema.Struct({
+  kind: Schema.Literal('review'),
+  ...ReviewRunnerConfig.fields,
+});
+export type ReviewJobConfig = typeof ReviewJobConfig.Type;
+
+export const AgentWorkerConfig = Schema.Union(WorkJobConfig, ReviewJobConfig);
+export type AgentWorkerConfig = typeof AgentWorkerConfig.Type;
