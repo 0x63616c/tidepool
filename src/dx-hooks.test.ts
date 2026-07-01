@@ -190,7 +190,7 @@ describe('worktree-gc (SessionStart)', () => {
     const wt = addWorktree('d1', 'worktree-calum+dirty');
     git(proj, 'merge', '-q', 'worktree-calum+dirty');
     writeFileSync(join(wt, 'uncommitted'), 'z'); // dirty tree
-    const r = await run(WORKTREE_GC, gcInput(proj));
+    await run(WORKTREE_GC, gcInput(proj));
     assert.isTrue(exists(proj, wt), 'dirty worktree must be kept');
   });
 
@@ -200,7 +200,7 @@ describe('worktree-gc (SessionStart)', () => {
     writeFileSync(join(wt, 'g'), 'y');
     git(wt, 'add', '.');
     git(wt, 'commit', '-qm', 'local only'); // not merged, no upstream
-    const r = await run(WORKTREE_GC, gcInput(proj));
+    await run(WORKTREE_GC, gcInput(proj));
     assert.isTrue(exists(proj, wt), 'unmerged unpushed worktree must be kept');
   });
 
@@ -208,7 +208,7 @@ describe('worktree-gc (SessionStart)', () => {
     const { proj, addWorktree } = initProject();
     const wt = addWorktree('f1', 'feature/x');
     git(proj, 'merge', '-q', 'feature/x');
-    const r = await run(WORKTREE_GC, gcInput(proj));
+    await run(WORKTREE_GC, gcInput(proj));
     assert.isTrue(exists(proj, wt), 'non-local-pattern branch must be untouched');
   });
 
@@ -216,7 +216,7 @@ describe('worktree-gc (SessionStart)', () => {
     const { proj, addWorktree } = initProject();
     const wt = addWorktree('c1', 'worktree-calum+current');
     git(proj, 'merge', '-q', 'worktree-calum+current');
-    const r = await run(WORKTREE_GC, gcInput(wt)); // cwd == this worktree
+    await run(WORKTREE_GC, gcInput(wt)); // cwd == this worktree
     assert.isTrue(exists(proj, wt), 'the active session worktree must never be removed');
   });
 
