@@ -19,7 +19,7 @@ WorkingDirectory=/opt/tidepool
 # always-restart loop re-reads it on the next cycle.
 EnvironmentFile=-/etc/tidepool/env
 ExecStartPre=/usr/local/bin/materialize-secrets.sh
-ExecStart=/root/.bun/bin/bun /opt/tidepool/src/cli.ts run --watch
+ExecStart=/root/.bun/bin/bun /opt/tidepool/src/daemon.ts
 Restart=always
 RestartSec=5
 

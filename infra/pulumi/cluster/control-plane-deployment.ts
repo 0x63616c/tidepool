@@ -68,7 +68,7 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
           {
             name: 'control-plane',
             image: images.controlPlane,
-            // CMD in the image is already `tp run --watch`; leave it.
+            // CMD in the image is already the daemon (`bun run src/daemon.ts`); leave it.
             env: [
               // ── the flip ──────────────────────────────────────────────────
               { name: 'TIDEPOOL_DB_DRIVER', value: 'pg' },
