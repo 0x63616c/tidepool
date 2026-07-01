@@ -16,7 +16,7 @@ on:
   push:
     branches: [main]
     # App-source paths are included so a CODE change (baked into the control-plane +
-    # agent-worker images) auto-deploys: the up-job resolves the new image digest and
+    # agent-worker images) auto-deploys: the deploy-job resolves the new image digest and
     # rerolls. Kept OFF pull_request below so code PRs don't run the (barman-red,
     # secret-touching) infra preview — deploy happens only on merge.
     paths:
@@ -41,7 +41,7 @@ on:
 
 permissions:
   contents: read
-  packages: read # up-job pulls the current commit's image digests from ghcr (auto-deploy)
+  packages: read # deploy-job pulls the current commit's image digests from ghcr (auto-deploy)
 
 # Never cancel an in-flight apply; previews are cheap enough to let run.
 concurrency:
@@ -99,7 +99,7 @@ jobs:
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
         # PULUMI_CONFIG_PASSPHRASE is exported to $GITHUB_ENV from sops above.
 
-  up:
+  deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Fully automatic: a merge to main builds images (images.yml) then this job
@@ -142,7 +142,7 @@ jobs:
           aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
           pulumi_passphrase=$(sops -d --extract '["pulumi_config_passphrase"]' secrets/pulumi_config_passphrase.enc.yaml)
           # PR-6.5 (human-approved tenet-9 widening): the control-plane k8s Secret
-          # is seeded from these two. up-job ONLY — preview renders them empty.
+          # is seeded from these two. deploy-job ONLY — preview renders them empty.
           forge_token=$(sops -d --extract '["forge_github_token"]' secrets/forge_github_token.enc.yaml)
           opencode_auth=$(sops -d --extract '["runner_opencode_auth_json"]' secrets/runner_opencode_auth_json.enc.yaml)
           echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
