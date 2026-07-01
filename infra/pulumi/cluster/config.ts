@@ -99,10 +99,14 @@ export const CNPG = {
   storageClass: 'hcloud-volumes',
   dataSize: '10Gi',
   walSize: '10Gi',
-  // Backups → Hetzner Object Storage (S3). Bucket is a HUMAN pre-create (Hetzner
-  // buckets can't be minted via hcloud CLI); creds come from the sops S3 secret.
+  // Backups → Hetzner Object Storage (S3). The bucket is Pulumi-managed (declarative,
+  // tenet-2) via an aws.Provider pointed at the Hetzner S3 endpoint — same endpoint +
+  // sops-decrypted creds the Pulumi state backend already uses. Creds come from the
+  // ambient AWS_* env at apply (never hardcoded / never in state). Hetzner project S3
+  // keys can create buckets via the S3 API (`aws s3 mb`), so no human pre-create.
   backupBucket: 'tidepool-pg-backups',
   backupEndpoint: 'https://nbg1.your-objectstorage.com',
+  backupRegion: 'nbg1', // Hetzner Object Storage region (Nuremberg); == state-backend region
   backupSchedule: '0 0 3 * * *', // CNPG 6-field cron: 03:00 daily
   backupRetention: '30d',
 } as const;

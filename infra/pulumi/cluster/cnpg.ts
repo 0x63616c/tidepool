@@ -1,5 +1,7 @@
 import { join } from 'node:path';
+import * as aws from '@pulumi/aws';
 import * as k8s from '@pulumi/kubernetes';
+import * as pulumi from '@pulumi/pulumi';
 import { CNPG } from './config';
 
 /**
@@ -77,6 +79,31 @@ export function installCnpg(provider: k8s.Provider): void {
     opts,
   );
 
+  // ── Backup bucket (Pulumi-managed, declarative — tenet-2, no hand-mutated infra) ─
+  // Hetzner Object Storage is S3-compatible; drive it with the aws provider aimed at
+  // the Hetzner endpoint (same endpoint + region the Pulumi state backend uses). Creds
+  // are read from the ambient AWS_* env at apply — the sops-decrypted pair CI exports —
+  // and never passed as inputs, so they never land in state. The skip* flags disable
+  // the AWS-only STS / IMDS / account probes that a non-AWS S3 endpoint can't answer.
+  const hetznerS3 = new aws.Provider('hetzner-s3', {
+    region: CNPG.backupRegion,
+    endpoints: [{ s3: CNPG.backupEndpoint }],
+    s3UsePathStyle: true,
+    skipCredentialsValidation: true,
+    skipRequestingAccountId: true,
+    skipMetadataApiCheck: true,
+    skipRegionValidation: true,
+  });
+
+  // retainOnDelete: a `pulumi destroy` must never take the backups with it. Hetzner's
+  // Ceph RGW is idempotent on CreateBucket (200 on an already-owned bucket in-region),
+  // so a re-apply — or a bucket that happens to pre-exist — adopts rather than errors.
+  const backupBucket = new aws.s3.Bucket(
+    'pg-backups',
+    { bucket: CNPG.backupBucket },
+    { provider: hetznerS3, retainOnDelete: true },
+  );
+
   // ── ObjectStore CR → Hetzner S3 bucket ─────────────────────────────────────────
   const objectStore = new k8s.apiextensions.CustomResource(
     'pg-objectstore',
@@ -86,7 +113,8 @@ export function installCnpg(provider: k8s.Provider): void {
       metadata: { name: 'tidepool-pg-store', namespace: CNPG.namespace },
       spec: {
         configuration: {
-          destinationPath: `s3://${CNPG.backupBucket}/`,
+          // Reference the managed bucket's name so the CR depends on it existing.
+          destinationPath: pulumi.interpolate`s3://${backupBucket.bucket}/`,
           endpointURL: CNPG.backupEndpoint,
           s3Credentials: {
             accessKeyId: { name: s3Secret.metadata.name, key: 'access_key_id' },
@@ -98,7 +126,7 @@ export function installCnpg(provider: k8s.Provider): void {
         retentionPolicy: CNPG.backupRetention,
       },
     },
-    { ...opts, dependsOn: [barmanPlugin, s3Secret] },
+    { ...opts, dependsOn: [barmanPlugin, s3Secret, backupBucket] },
   );
 
   // ── Postgres Cluster (single instance; HA seam one field away) ─────────────────
