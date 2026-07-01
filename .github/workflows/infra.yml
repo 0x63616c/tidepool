@@ -1,0 +1,130 @@
+name: Infra
+
+# Tidepool Kubernetes cluster (Pulumi, infra/pulumi/cluster).
+#   PR   → `pulumi preview` (read-only: computes the plan, creates NOTHING).
+#   main → `pulumi up`, but the job runs in the `production` GitHub Environment,
+#          which requires a human (Calum) to click approve. So MERGING is safe —
+#          the live apply pauses for a human, never auto-spends (tenet 6).
+#
+# Secrets flow: the `ci` age key (GH secret SOPS_AGE_KEY) decrypts the hcloud
+# token + Hetzner S3 creds from sops at run time; the S3 creds also unlock the
+# self-managed Pulumi state backend. Nothing sensitive is committed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/pulumi/cluster/**'
+      - '.github/workflows/infra.yml'
+      - 'secrets/hcloud_api_token.enc.yaml'
+      - 'secrets/hetzner_s3_credentials.enc.yaml'
+      - '.sops.yaml'
+  pull_request:
+    paths:
+      - 'infra/pulumi/cluster/**'
+      - '.github/workflows/infra.yml'
+      - 'secrets/hcloud_api_token.enc.yaml'
+      - 'secrets/hetzner_s3_credentials.enc.yaml'
+      - '.sops.yaml'
+
+permissions:
+  contents: read
+
+# Never cancel an in-flight apply; previews are cheap enough to let run.
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WORK_DIR: infra/pulumi/cluster
+  STACK: production
+  # Self-managed Pulumi state on Hetzner Object Storage (public, non-secret).
+  PULUMI_BACKEND_URL: 's3://tidepool-pulumi-state?endpoint=nbg1.your-objectstorage.com&s3ForcePathStyle=true&region=nbg1'
+  AWS_REGION: nbg1
+  SOPS_VERSION: v3.13.2
+
+jobs:
+  preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - name: install deps
+        working-directory: ${{ env.WORK_DIR }}
+        run: bun install --frozen-lockfile
+      - name: decrypt creds (sops + ci age key)
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          curl -fsSL -o /usr/local/bin/sops \
+            "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64"
+          chmod +x /usr/local/bin/sops
+          hcloud_token=$(sops -d --extract '["hcloud_api_token"]' secrets/hcloud_api_token.enc.yaml)
+          aws_key=$(sops -d --extract '["access_key_id"]' secrets/hetzner_s3_credentials.enc.yaml)
+          aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
+          echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
+          {
+            echo "HCLOUD_TOKEN=$hcloud_token"
+            echo "AWS_ACCESS_KEY_ID=$aws_key"
+            echo "AWS_SECRET_ACCESS_KEY=$aws_secret"
+          } >>"$GITHUB_ENV"
+      - name: pulumi preview
+        uses: pulumi/actions@v6
+        with:
+          command: preview
+          stack-name: ${{ env.STACK }}
+          work-dir: ${{ env.WORK_DIR }}
+          cloud-url: ${{ env.PULUMI_BACKEND_URL }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+
+  up:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # HUMAN GATE: the `production` environment requires manual approval before this
+    # job runs, so a merge never auto-applies. Configure required reviewers on it.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - name: install deps
+        working-directory: ${{ env.WORK_DIR }}
+        run: bun install --frozen-lockfile
+      - name: install hcloud-upload-image (Talos snapshot bake)
+        run: |
+          ver=v0.5.0
+          curl -fsSL -o /tmp/hui.tar.gz \
+            "https://github.com/hetznercloud/hcloud-upload-image/releases/download/${ver}/hcloud-upload-image-linux-amd64.tar.gz"
+          tar -xzf /tmp/hui.tar.gz -C /usr/local/bin hcloud-upload-image-linux-amd64
+          mv /usr/local/bin/hcloud-upload-image-linux-amd64 /usr/local/bin/hcloud-upload-image
+          chmod +x /usr/local/bin/hcloud-upload-image
+      - name: decrypt creds (sops + ci age key)
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          curl -fsSL -o /usr/local/bin/sops \
+            "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64"
+          chmod +x /usr/local/bin/sops
+          hcloud_token=$(sops -d --extract '["hcloud_api_token"]' secrets/hcloud_api_token.enc.yaml)
+          aws_key=$(sops -d --extract '["access_key_id"]' secrets/hetzner_s3_credentials.enc.yaml)
+          aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
+          echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
+          {
+            echo "HCLOUD_TOKEN=$hcloud_token"
+            echo "AWS_ACCESS_KEY_ID=$aws_key"
+            echo "AWS_SECRET_ACCESS_KEY=$aws_secret"
+          } >>"$GITHUB_ENV"
+      - name: pulumi up
+        uses: pulumi/actions@v6
+        with:
+          command: up
+          stack-name: ${{ env.STACK }}
+          work-dir: ${{ env.WORK_DIR }}
+          cloud-url: ${{ env.PULUMI_BACKEND_URL }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}

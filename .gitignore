@@ -17,7 +17,7 @@ secrets/*.dec.*
 # Pulumi
 infra/**/Pulumi.*.yaml
 infra/**/.pulumi/
-infra/pulumi/bin/
+infra/pulumi/**/bin/
 
 # agent skills — local ergonomics, regenerable via SKILLS.md (not product source)
 # .agents/skills/ holds the real files; .claude/skills is a symlink into it so
