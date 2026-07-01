@@ -11,9 +11,9 @@
   },
   "scripts": {
     "format": "biome format --write .",
-    "format:sh": "shfmt -w -i 2 -ci .claude/hooks/*.sh infra/scripts/*.sh infra/bootstrap/*.sh",
+    "format:sh": "shfmt -w -i 2 -ci .claude/hooks/*.sh infra/scripts/*.sh",
     "lint": "biome check .",
-    "lint:sh": "shellcheck .claude/hooks/*.sh infra/scripts/*.sh infra/bootstrap/*.sh && shfmt -d -i 2 -ci .claude/hooks/*.sh infra/scripts/*.sh infra/bootstrap/*.sh",
+    "lint:sh": "shellcheck .claude/hooks/*.sh infra/scripts/*.sh && shfmt -d -i 2 -ci .claude/hooks/*.sh infra/scripts/*.sh",
     "typecheck": "tsc --noEmit",
     "test": "bun --bun vitest run",
     "commitlint": "commitlint --last --verbose",
