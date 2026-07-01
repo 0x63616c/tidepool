@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun --bun vitest run",
     "commitlint": "commitlint --last --verbose",
+    "kube": "bash infra/scripts/tp-kubeconfig.sh",
     "seal:hashes": "bash infra/scripts/redaction-hashes.sh",
     "check:secrets": "bash infra/scripts/redaction-hashes.sh --check",
     "check": "biome check . && bun run lint:sh && bun run typecheck && bun run test",
