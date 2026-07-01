@@ -5,7 +5,12 @@ title = "tidepool gitleaks"
 useDefault = true
 
 [allowlist]
-description = "sops-encrypted secrets are high-entropy ciphertext by design"
+description = "sops-encrypted secrets are high-entropy ciphertext; redaction hashes are one-way sha256 digests"
 paths = [
   '''secrets/.*\.enc\.(yaml|json)$''',
+  # One-way sha256 digests of sealed secret values (not the values). 64-hex would trip entropy rules.
+  '''\.claude/redaction-hashes\.json$''',
 ]
+# NB: the FAKE token fixtures in src/secret-hooks.test.ts are suppressed per-line with inline
+# `gitleaks:allow` comments (not a whole-file allowlist), so a REAL secret added elsewhere in that
+# file is still caught.
