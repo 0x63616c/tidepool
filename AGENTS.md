@@ -47,6 +47,12 @@ one line, do not implement it.
     a second way creeps in, converge it.
 11. **Docs track reality.** When you change the system, update the docs that describe it (DESIGN/
     HANDOFF/AGENTS/GOALS) in the same change. No stale or contradictory docs left behind.
+12. **Test-driven — red before green.** Every behavior change is specified by a test written FIRST
+    that fails before the code exists and passes after. A test that never failed is not evidence
+    (tenet 8) — no behavior ships on a test written after the fact. Pure refactors keep the existing
+    suite green (no behavior change ⇒ no new test); infra/deletion/docs prove themselves via their
+    own checkable terminal state. The reviewer confirms each new test genuinely fails without its
+    impl, not merely that it's green.
 
 Examples needing approval: a second source of truth, bypassing GitOps/CI, an always-on service,
 leaking an impl across a seam, removing/loosening a gate, widening autonomy, a public inbound port,
@@ -84,7 +90,7 @@ Resolve a credential via sops before concluding it's absent — don't infer abse
 
 - DO be concise everywhere — docs included.
 - DO keep interfaces narrow and implementations swappable.
-- DO write the test first for bugfixes (reproduce, then fix).
+- DO write the test first for any behavior change (tenet 12) — reproduce/spec, then implement.
 - DON'T edit `secrets/**` or `.github/workflows/**` unless the ticket explicitly says so
   (these are security-sensitive; protected once self-bootstrap is live).
 - DON'T add dependencies casually; prefer the standard lib / existing deps.
