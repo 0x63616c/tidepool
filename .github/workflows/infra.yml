@@ -6,9 +6,11 @@ name: Infra
 #          which requires a human (Calum) to click approve. So MERGING is safe —
 #          the live apply pauses for a human, never auto-spends (tenet 6).
 #
-# Secrets flow: the `ci` age key (GH secret SOPS_AGE_KEY) decrypts the hcloud
-# token + Hetzner S3 creds from sops at run time; the S3 creds also unlock the
-# self-managed Pulumi state backend. Nothing sensitive is committed.
+# Secrets flow: SOPS_AGE_KEY (the `ci` age key) is the ONLY GitHub Actions secret.
+# It decrypts the hcloud token, Hetzner S3 creds, and the Pulumi config passphrase
+# from sops at run time; the S3 creds also unlock the self-managed Pulumi state
+# backend, and the passphrase decrypts that state's secrets. Nothing else is a
+# GH secret; nothing sensitive is committed.
 
 on:
   push:
@@ -18,6 +20,7 @@ on:
       - '.github/workflows/infra.yml'
       - 'secrets/hcloud_api_token.enc.yaml'
       - 'secrets/hetzner_s3_credentials.enc.yaml'
+      - 'secrets/pulumi_config_passphrase.enc.yaml'
       - '.sops.yaml'
   pull_request:
     paths:
@@ -25,6 +28,7 @@ on:
       - '.github/workflows/infra.yml'
       - 'secrets/hcloud_api_token.enc.yaml'
       - 'secrets/hetzner_s3_credentials.enc.yaml'
+      - 'secrets/pulumi_config_passphrase.enc.yaml'
       - '.sops.yaml'
 
 permissions:
@@ -65,11 +69,14 @@ jobs:
           hcloud_token=$(sops -d --extract '["hcloud_api_token"]' secrets/hcloud_api_token.enc.yaml)
           aws_key=$(sops -d --extract '["access_key_id"]' secrets/hetzner_s3_credentials.enc.yaml)
           aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
+          pulumi_passphrase=$(sops -d --extract '["pulumi_config_passphrase"]' secrets/pulumi_config_passphrase.enc.yaml)
           echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
+          echo "::add-mask::$pulumi_passphrase"
           {
             echo "HCLOUD_TOKEN=$hcloud_token"
             echo "AWS_ACCESS_KEY_ID=$aws_key"
             echo "AWS_SECRET_ACCESS_KEY=$aws_secret"
+            echo "PULUMI_CONFIG_PASSPHRASE=$pulumi_passphrase"
           } >>"$GITHUB_ENV"
       - name: pulumi preview
         uses: pulumi/actions@v6
@@ -78,8 +85,7 @@ jobs:
           stack-name: ${{ env.STACK }}
           work-dir: ${{ env.WORK_DIR }}
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
-        env:
-          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+        # PULUMI_CONFIG_PASSPHRASE is exported to $GITHUB_ENV from sops above.
 
   up:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -120,11 +126,14 @@ jobs:
           hcloud_token=$(sops -d --extract '["hcloud_api_token"]' secrets/hcloud_api_token.enc.yaml)
           aws_key=$(sops -d --extract '["access_key_id"]' secrets/hetzner_s3_credentials.enc.yaml)
           aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
+          pulumi_passphrase=$(sops -d --extract '["pulumi_config_passphrase"]' secrets/pulumi_config_passphrase.enc.yaml)
           echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
+          echo "::add-mask::$pulumi_passphrase"
           {
             echo "HCLOUD_TOKEN=$hcloud_token"
             echo "AWS_ACCESS_KEY_ID=$aws_key"
             echo "AWS_SECRET_ACCESS_KEY=$aws_secret"
+            echo "PULUMI_CONFIG_PASSPHRASE=$pulumi_passphrase"
           } >>"$GITHUB_ENV"
       - name: compute this runner's egress IP (#4 JIT apiserver reachability)
         run: |
@@ -144,7 +153,7 @@ jobs:
           work-dir: ${{ env.WORK_DIR }}
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
         env:
-          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          # PULUMI_CONFIG_PASSPHRASE is exported to $GITHUB_ENV from sops above.
           # Consumed by config.ts → firewall control-port allow-list (self-healing;
           # next apply overwrites this /32 with the new runner IP).
           TIDEPOOL_CI_RUNNER_CIDR: ${{ env.TIDEPOOL_CI_RUNNER_CIDR }}

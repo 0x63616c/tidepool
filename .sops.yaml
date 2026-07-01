@@ -41,6 +41,12 @@ creation_rules:
     key_groups:
       - age: [*ci, *mainbox, *breakglass]
 
+  # Pulumi config passphrase — encrypts the self-managed Pulumi state's secrets.
+  # Read ONLY by Pulumi-in-CI (not the box), so CI-only (least-priv, no mainbox).
+  - path_regex: secrets/pulumi_config_passphrase\.enc\.yaml$
+    key_groups:
+      - age: [*ci, *breakglass]
+
   # Catch-all so any NEW secrets/*.enc.* file is at least sealed to box+breakglass
   # until it gets its own explicit rule above. sops uses the FIRST matching rule,
   # so this MUST stay last.
