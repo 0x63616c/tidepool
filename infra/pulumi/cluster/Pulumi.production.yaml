@@ -13,5 +13,5 @@ config:
   # Digest-pinned application images (PR-6.5). Immutable `@sha256:` refs — never a
   # mutable tag — so the control-plane rollout is reproducible. Bump deliberately
   # when cutting a release (get the digest from the images.yml ghcr push).
-  tidepool-cluster:controlPlaneImage: ghcr.io/0x63616c/tidepool-control-plane@sha256:9743f970be9d09f1ff68037bc7b0fbe696fbb6e189326744a46a3fa427d2f2da
-  tidepool-cluster:agentWorkerImage: ghcr.io/0x63616c/tidepool-agent-worker@sha256:d4199a0c901179913a6a039fe77c04963342b221c0882a39d9b805e27e15efa1
+  tidepool-cluster:controlPlaneImage: ghcr.io/0x63616c/tidepool-control-plane@sha256:33233e838de5b38e68f144eb3b02cfc8c43698b957278628d9770e6c4b3631a0
+  tidepool-cluster:agentWorkerImage: ghcr.io/0x63616c/tidepool-agent-worker@sha256:7455a02f93192f1a372ce1056c8ca79be84664c3518880bbc9f63033160a070c
