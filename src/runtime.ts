@@ -101,7 +101,6 @@ export const ticketStoreLive = (): Layer.Layer<TicketStore> =>
 const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount';
 export const inClusterK8sConfig: Effect.Effect<K8sWorkerConfig> = Effect.gen(function* () {
   const token = yield* Effect.promise(() => readFile(`${SA_DIR}/token`, 'utf8'));
-  const caCert = yield* Effect.promise(() => readFile(`${SA_DIR}/ca.crt`, 'utf8'));
   const host = envOr('KUBERNETES_SERVICE_HOST', 'kubernetes.default.svc');
   const port = envOr('KUBERNETES_SERVICE_PORT', '443');
   const image = process.env.TIDEPOOL_AGENT_WORKER_IMAGE;
@@ -113,7 +112,6 @@ export const inClusterK8sConfig: Effect.Effect<K8sWorkerConfig> = Effect.gen(fun
   return {
     apiBaseUrl: `https://${host}:${port}`,
     token: token.trim(),
-    caCert,
     namespace: envOr('TIDEPOOL_WORKER_NAMESPACE', 'tidepool-workers'),
     image,
     cpuRequest: envOr('TIDEPOOL_WORKER_CPU_REQUEST', '2'),

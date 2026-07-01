@@ -9,6 +9,7 @@ import {
   OPENCODE_SECRET_KEY,
   PG_APP_SECRET,
   PG_URL_SECRET_KEY,
+  SA_CA_CERT_PATH,
   WORKER_NAMESPACE,
 } from './control-plane-deployment';
 
@@ -96,6 +97,16 @@ describe('buildControlPlaneDeploymentSpec — the env flip', () => {
 
   it('sets HOME=/root so the broker resolves the opencode auth path', () => {
     expect(envOf('HOME')?.value).toBe('/root');
+  });
+
+  it('trusts the cluster CA for apiserver TLS (NODE_EXTRA_CA_CERTS → SA ca.crt)', () => {
+    // The reconciler's Bun `fetch` creates worker Jobs over the apiserver's
+    // HTTPS, whose cert is signed by the internal cluster CA (not in the default
+    // trust store). Without this env the TLS handshake fails and every dispatch
+    // errors with a "Transport error" — dispatch silently broke at the pg/k8s
+    // cutover until this. NODE_EXTRA_CA_CERTS is read by Bun at startup and adds
+    // the auto-mounted SA CA to the trust store.
+    expect(envOf('NODE_EXTRA_CA_CERTS')?.value).toBe(SA_CA_CERT_PATH);
   });
 });
 
