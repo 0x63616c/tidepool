@@ -12,7 +12,9 @@ import { defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts'],
+    // `src/` app suite + the PURE infra guards (guards.ts has no @pulumi import,
+    // so it runs here without the cluster's node_modules — tenet 12 red-green).
+    include: ['src/**/*.test.ts', 'infra/pulumi/cluster/**/*.test.ts'],
     pool: 'forks',
   },
 });

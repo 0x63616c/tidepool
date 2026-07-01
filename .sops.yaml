@@ -3,7 +3,7 @@
 # decrypt a secret, edit that secret's rule and run `sops updatekeys <file>`.
 #
 #   mainbox    — the always-on control plane (private key lives ONLY on the box)
-#   ci         — GitHub Actions (Pulumi-in-CI; currently only hcloud_api_token)
+#   ci         — GitHub Actions (Pulumi-in-CI; hcloud_api_token + hetzner_s3_credentials)
 #   breakglass — Calum's offline recovery key (recipient of EVERY secret)
 #
 # Holds NO secret values (those live in secrets/*.enc.yaml, encrypted). Tenet 9:
@@ -34,6 +34,18 @@ creation_rules:
   - path_regex: secrets/ssh_tidepool_private_key\.enc\.yaml$
     key_groups:
       - age: [*mainbox, *breakglass]
+
+  # Hetzner Object Storage (S3) creds — Pulumi state backend + (PR-5b) CNPG
+  # backups. Pulumi-in-CI reads it, so CI-readable. Above the catch-all.
+  - path_regex: secrets/hetzner_s3_credentials\.enc\.yaml$
+    key_groups:
+      - age: [*ci, *mainbox, *breakglass]
+
+  # Pulumi config passphrase — encrypts the self-managed Pulumi state's secrets.
+  # Read ONLY by Pulumi-in-CI (not the box), so CI-only (least-priv, no mainbox).
+  - path_regex: secrets/pulumi_config_passphrase\.enc\.yaml$
+    key_groups:
+      - age: [*ci, *breakglass]
 
   # Catch-all so any NEW secrets/*.enc.* file is at least sealed to box+breakglass
   # until it gets its own explicit rule above. sops uses the FIRST matching rule,

@@ -42,9 +42,13 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
 > **`CredentialBroker`** seam (`credsFor(job) → { opencodeAuth, githubToken }`) — a passthrough today
 > (reads the existing PAT + opencode auth), the one-module swap point for future GitHub App tokens /
 > auto-rotation, so the dispatch path never reads a secret directly (tenet 9). The real
-> **`K8sAgentWorker`**, Talos/Pulumi infra, and the **Postgres/CNPG** datastore land in later PRs and
-> swap in as Layers with no reconciler change. Sections below that still describe the box model are
-> updated incrementally as those PRs land.
+> **`K8sAgentWorker`** seam has landed; the **Talos/Pulumi Kubernetes cluster** is now defined in
+> `infra/pulumi/cluster/` (PR-5a) — a baked Talos snapshot, dedicated Hetzner network + firewall, a
+> cpx32 control plane, CCM/CSI/cluster-autoscaler (min=0), and the namespace/NetworkPolicy/RBAC wall;
+> the live `pulumi up` is human-gated (a GitHub Environment approval), so nothing is provisioned on
+> merge. The **Postgres/CNPG** datastore (PR-5b) and the reconciler cutover (PR-6) follow and swap in
+> as Layers with no reconciler change. Sections below that still describe the box model are updated
+> incrementally as those PRs land.
 
 ---
 
@@ -59,9 +63,9 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
   - Typed errors (`RateCapped`/`BoxFailed`/`MergeConflict`) in signatures, not `throw`.
   - Built-in **OpenTelemetry** tracing = per-ticket/run/agent spans → the observability requirement, free.
   - `@effect/schema` for validation (replaces zod). `@effect/cli` for `tp` (+ AXI output contracts).
-- **Pulumi (TypeScript)** for infra, **not OpenTofu** — stack unity + shared types; **state in Pulumi
-  Cloud (free tier)** which *eliminates the Object-Storage state-bootstrap paradox*. Still declarative
-  + CI-applied (`pulumi up` in Actions) → GitOps tenet intact.
+- **Pulumi (TypeScript)** for infra, **not OpenTofu** — stack unity + shared types; **state in Hetzner
+  Object Storage (S3, bucket `tidepool-pulumi-state`)**, self-managed and encrypted by the stack
+  passphrase. Still declarative + CI-applied (`pulumi up` in Actions) → GitOps tenet intact.
 - **`bun:sqlite` + Drizzle** (or `@effect/sql-sqlite`) for the typed ticket store + migrations.
 - **`mise`** pins bun/opencode/pulumi versions identically across local + CI + box (env parity).
 - **Bun `$`** for git/ssh/hetzner shelling; **Octokit** for the GitHub `Forge`.
@@ -343,7 +347,7 @@ every datacenter** (capacity), and gen-1 `cpx11/21` are US-only. EU offers `cpx1
   open). This is a stop-gap pending the Effect runner rewrite — **not** the intended shape.
 
 Cost reality: the model is the already-paid Codex sub. Hetzner ≈ €10–20/mo (main flat + workers
-hourly-only-when-up). State backend = Pulumi Cloud (free), no object-storage bill.
+hourly-only-when-up). State backend = Hetzner Object Storage (S3, `tidepool-pulumi-state`).
 
 ## 4.5 Pain points, autonomy & dev-loop strategy (from the grill)
 

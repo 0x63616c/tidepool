@@ -1,0 +1,19 @@
+name: tidepool-cluster
+runtime: nodejs
+description: >-
+  Tidepool Kubernetes cluster (Talos on Hetzner) — the future home of the
+  control-plane and agent-worker Jobs (k8s migration PR-5a). Declares: a baked
+  Talos snapshot, a dedicated private network + firewall, a control-plane node,
+  the Hetzner CCM + CSI + cluster-autoscaler platform (Helm), and the namespace /
+  NetworkPolicy / RBAC wall. CNPG (the datastore) lands in a follow-up (PR-5b).
+
+  Distinct Pulumi PROJECT from `tidepool-infra` (the legacy single box, retired in
+  PR-7) so the two lifecycles never entangle; both share the self-managed Hetzner
+  S3 state backend (`tidepool-pulumi-state`, nbg1), namespaced by project/stack.
+  hcloud token + S3 creds are supplied from sops via the environment at
+  `pulumi login`/`up` time (in CI, decrypted with the `ci` age key) — never committed.
+main: index.ts
+config:
+  # Pinned but bumpable at the (human-gated) apply. Overridable via `pulumi config set`.
+  tidepool-cluster:location:
+    default: nbg1

@@ -1,0 +1,13 @@
+# Talos Image Factory schematic (committed → deterministic image).
+# POSTed to factory.talos.dev at bake time to resolve a schematic id; the id +
+# TALOS_VERSION form the raw-image URL that hcloud-upload-image writes to a snapshot.
+#
+# Extensions:
+#   iscsi-tools      — REQUIRED by the Hetzner CSI driver (iscsiadm on the host).
+#   util-linux-tools — provides `blkid`/`nsenter` the CSI node plugin shells out to.
+# Keep this list minimal; every addition changes the schematic id → triggers a rebake.
+customization:
+  systemExtensions:
+    officialExtensions:
+      - siderolabs/iscsi-tools
+      - siderolabs/util-linux-tools
