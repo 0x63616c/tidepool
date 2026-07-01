@@ -11,7 +11,7 @@ import { type AgentWorker, type Forge, TicketStore, type TicketStoreApi } from '
  * a terminal state against `Fake*` adapters. Free, fast, no infra. Proofs:
  * (a) backlog→…→done via dispatch+poll on green CI + approve, (b) red CI retries
  * to cap then failed, (c) an in_progress ticket with reattach handles is resumed,
- * (d) a review rejection re-reviews (never re-works) the PR, plus the async
+ * (d) a review rejection re-works the PR branch (not re-review), plus the async
  * `running` branches: worker-side `Failed` retries and the deadline reaper.
  */
 
@@ -158,14 +158,18 @@ describe('reconciler', () => {
         yield* runSteps(2, env);
 
         const final = yield* store.byId(ticket.id);
-        // Re-enters REVIEW (not in_progress), keeps the existing PR, consumes an attempt.
-        assert.strictEqual(final.state, 'review');
+        // Re-WORKS from in_progress to address the feedback (not re-review the same
+        // unchanged diff), keeping the existing PR/branch; consumes an attempt.
+        assert.strictEqual(final.state, 'in_progress');
         assert.strictEqual(final.prNumber, 7);
         assert.strictEqual(final.attempts, 1);
         assert.isNull(final.workHandle);
-        // Crucially, work never re-ran against the already-pushed branch.
-        const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
-        assert.strictEqual(work.length, 0);
+        // The next step re-dispatches WORK against the existing branch (the worker
+        // force-pushes so the PR updates), rather than re-grading the same diff.
+        yield* runSteps(1, env);
+        const reworking = yield* store.byId(ticket.id);
+        assert.strictEqual(reworking.state, 'running');
+        assert.isNotNull(reworking.workHandle);
       }),
   );
 

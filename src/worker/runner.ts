@@ -41,7 +41,11 @@ export const bunGitPort: GitPort = {
   },
   headSha: (dir) => $`git -C ${dir} rev-parse HEAD`.text(),
   push: async (dir, branch) => {
-    await $`git -C ${dir} push -u origin ${branch}`.quiet();
+    // --force so a re-work (after a review requested changes) overwrites the
+    // ticket's own branch from a fresh clone of main; a plain push would be
+    // rejected non-fast-forward. Safe: the reconciler is the sole writer of this
+    // deterministic per-ticket branch. Harmless no-op on the first push.
+    await $`git -C ${dir} push -u --force origin ${branch}`.quiet();
   },
 };
 
