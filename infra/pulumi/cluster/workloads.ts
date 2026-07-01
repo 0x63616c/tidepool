@@ -1,6 +1,8 @@
 import * as k8s from '@pulumi/kubernetes';
 import { CNPG, NODE_SUBNET_CIDR, POD_CIDR, SERVICE_CIDR } from './config';
 import {
+  API_PORT,
+  API_PORT_NAME,
   buildControlPlaneDeploymentSpec,
   CONTROL_PLANE_SA,
   CONTROL_PLANE_SECRET,
@@ -148,5 +150,25 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
       spec: buildControlPlaneDeploymentSpec(images) as unknown as k8s.types.input.apps.v1.DeploymentSpec,
     },
     { ...opts, dependsOn: [cpSecret, reconcilerSa] },
+  );
+
+  // ClusterIP (headless-of-public) Service for the queue-control HTTP API. No
+  // LoadBalancer, no Ingress — reached only via `kubectl port-forward` through
+  // the /32-firewalled apiserver, so the box stays outbound-only (tenet 9).
+  new k8s.core.v1.Service(
+    'control-plane-api',
+    {
+      metadata: {
+        name: CONTROL_PLANE_SA,
+        namespace: cpNs.metadata.name,
+        labels: { 'app.kubernetes.io/part-of': 'tidepool' },
+      },
+      spec: {
+        type: 'ClusterIP',
+        selector: { 'app.kubernetes.io/name': CONTROL_PLANE_SA, 'app.kubernetes.io/part-of': 'tidepool' },
+        ports: [{ name: API_PORT_NAME, port: API_PORT, targetPort: API_PORT_NAME }],
+      },
+    },
+    opts,
   );
 }

@@ -12,6 +12,12 @@ export default defineConfig({
       base: 'main',
       models: { work: 'openai/gpt-5.4-mini', review: 'openai/gpt-5.4-mini' },
     },
+    {
+      // Self-hosting: the system works on its own repo. Strong models for real code.
+      repo: '0x63616c/tidepool',
+      base: 'main',
+      models: { work: 'openai/gpt-5.5', review: 'openai/gpt-5.5' },
+    },
   ],
   models: { work: 'openai/gpt-5.5', review: 'openai/gpt-5.5' },
   workers: { max: 1, idleTimeoutSec: 300, maxTtlSec: 3600 },

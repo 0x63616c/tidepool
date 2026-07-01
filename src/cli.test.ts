@@ -1,14 +1,14 @@
-import { assert, describe, it } from '@effect/vitest';
-import { Duration, Effect, Fiber, Layer, TestClock } from 'effect';
-import { runProgram } from './cli.ts';
+import { describe, expect, it } from '@effect/vitest';
+import { Effect, Layer } from 'effect';
+import { addAction, getAction, listAction } from './cli.ts';
 import { AppConfig, type Config, defineConfig } from './config.ts';
-import { fakeAgentWorker, fakeForge, makeInMemoryStore } from './fakes.ts';
-import { TicketStore, type TicketStoreApi } from './services.ts';
+import { InMemoryTicketStore } from './fakes.ts';
+import { LocalQueueControl, QueueControl } from './queue-control.ts';
 
 /**
- * `tp run` wiring (unit-level): the `--watch` flag selects the always-on
- * `reconcileForever` loop, while the default one-shot path seeds the slugify demo
- * and settles once. Proven against fakes — no live adapters, no infra.
+ * `tp ticket` command actions (unit-level): each verb is a thin Effect over the
+ * `QueueControl` seam, so we exercise them against the in-process local adapter —
+ * no CLI runtime, no live store. Proves the client-side wiring + rendering.
  */
 
 const testConfig: Config = defineConfig({
@@ -19,45 +19,46 @@ const testConfig: Config = defineConfig({
   retries: 2,
 });
 
-const env = (store: TicketStoreApi) =>
-  Layer.mergeAll(
-    Layer.succeed(TicketStore, store),
-    Layer.succeed(AppConfig, testConfig),
-    fakeForge({ ci: 'green' }),
-    fakeAgentWorker({ verdict: 'approve' }),
-  );
+const qc = LocalQueueControl.pipe(
+  Layer.provide(Layer.mergeAll(InMemoryTicketStore, Layer.succeed(AppConfig, testConfig))),
+);
+const run = <A, E>(eff: Effect.Effect<A, E, QueueControl>) => eff.pipe(Effect.provide(qc));
 
-describe('runProgram', () => {
-  it.effect('one-shot (watch=false): seeds the slugify demo and settles to done', () =>
-    Effect.gen(function* () {
-      const store = yield* makeInMemoryStore;
-      yield* runProgram(false).pipe(Effect.provide(env(store)));
-
-      const tickets = yield* store.list();
-      const slug = tickets.find((t) => t.title === 'add slugify');
-      assert.isDefined(slug);
-      assert.strictEqual(slug?.state, 'done');
-    }),
-  );
-
-  it.effect(
-    'watch=true: runs the reconcile loop (drives the backlog) and skips the demo seed',
-    () =>
+describe('tp ticket add / list', () => {
+  it.effect('add enqueues a ticket that list then shows', () =>
+    run(
       Effect.gen(function* () {
-        const store = yield* makeInMemoryStore;
-        // A real backlog ticket the daemon should drive — proves the loop reconciles.
-        const seeded = yield* store.add({ title: 'real work', goal: 'do it', target: 't/repo' });
-
-        const fiber = yield* runProgram(true).pipe(Effect.provide(env(store)), Effect.fork);
-        // Let round 1 (t=0) run settle to a fixpoint, then stop the forever loop.
-        yield* TestClock.adjust(Duration.seconds(1));
-        yield* Fiber.interrupt(fiber);
-
-        const tickets = yield* store.list();
-        // The loop reconciled the real ticket to done…
-        assert.strictEqual((yield* store.byId(seeded.id)).state, 'done');
-        // …and watch mode never seeds the slugify demo ticket.
-        assert.isUndefined(tickets.find((t) => t.title === 'add slugify'));
+        const created = yield* addAction({ title: 'do a thing', goal: 'g', target: 't/repo' });
+        expect(created).toContain('ticket: created tckt_');
+        expect(created).toContain('  target: t/repo');
+        const listed = yield* listAction({ target: null, limit: 50 });
+        expect(listed).toContain('do a thing');
+        expect(listed).toContain('t/repo');
       }),
+    ),
+  );
+});
+
+describe('tp ticket get', () => {
+  it.effect('renders the merged lifecycle + cost view for a ticket', () =>
+    run(
+      Effect.gen(function* () {
+        const qcApi = yield* QueueControl;
+        const t = yield* qcApi.add({ title: 'traced', goal: 'g', target: 't/repo' });
+        const view = yield* getAction(t.id);
+        // trace section names the ticket; cost section reports (zero) usage.
+        expect(view).toContain(t.id);
+        expect(view.toLowerCase()).toContain('cost');
+      }),
+    ),
+  );
+
+  it.effect('fails TicketNotFound for an unknown ticket id', () =>
+    run(
+      Effect.gen(function* () {
+        const decoded = yield* Effect.either(getAction('tckt_nope' as never));
+        expect(decoded._tag).toBe('Left');
+      }),
+    ),
   );
 });

@@ -1,5 +1,5 @@
-# control-plane image — the one always-on reconciler. Runs `tp run --watch`
-# (the reconcileForever loop, src/cli.ts). Builds FROM the shared base; adds the
+# control-plane image — the one always-on reconciler. Runs the daemon
+# (the reconcileForever loop, src/daemon.ts). Builds FROM the shared base; adds the
 # app source + its dependencies. It never dispatches agents itself (that's the
 # agent-worker Job), but shares the base for one toolchain.
 #
@@ -20,4 +20,4 @@ COPY . .
 
 # The always-on reconcile loop. Config/secrets/datastore are provided at runtime
 # (k8s wiring lands in a later PR); override the command for a one-shot smoke.
-CMD ["bun", "run", "src/cli.ts", "run", "--watch"]
+CMD ["bun", "run", "src/daemon.ts"]
