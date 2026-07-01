@@ -43,7 +43,7 @@ workload; the workload is an `agent`.
 | `main` | server + primary-ip | `main` |
 | `worker-<hash>` | autoscaler node pool `worker` | (nodes) |
 | `cluster` | network + firewall | `cluster` |
-| `pg-backups` | S3 bucket | — (S3 API takes no hcloud labels — the one legit exception) |
+| `tidepool-pg-backups` | S3 bucket | — (S3 names are **globally unique across all tenants** → stays qualified; and the S3 API takes no hcloud labels) |
 
 **k8s (bare in-cluster; every object gets `app.kubernetes.io/part-of=tidepool` + `tidepool/role`):**
 
@@ -60,6 +60,8 @@ workload; the workload is an `agent`.
 - `app.kubernetes.io/part-of=tidepool` — the anchor every object carries
 - k8s cluster/context `tidepool` / `admin@tidepool` (lives in shared `~/.kube`)
 - Pulumi project/config namespace `tidepool-cluster`; Pulumi state bucket `tidepool-pulumi-state`
+- **S3 buckets** (`tidepool-pg-backups`, `tidepool-pulumi-state`) — the S3 name namespace is global
+  across every tenant, so bare names collide (`pg-backups` is taken). Buckets always stay qualified.
 - ghcr images `tidepool-control-plane`, `tidepool-agent-worker`; `TIDEPOOL_*` env vars; Git User-Agent
 
 ## Abbreviation registry (the one place each abbrev is ruled)

@@ -123,7 +123,9 @@ export const CNPG = {
   // sops-decrypted creds the Pulumi state backend already uses. Creds come from the
   // ambient AWS_* env at apply (never hardcoded / never in state). Hetzner project S3
   // keys can create buckets via the S3 API (`aws s3 mb`), so no human pre-create.
-  backupBucket: 'pg-backups',
+  // S3 bucket names are globally unique across all tenants — the one namespace we
+  // can't treat as tidepool-scoped, so it stays qualified (see NAMING.md exception).
+  backupBucket: 'tidepool-pg-backups',
   backupEndpoint: 'https://nbg1.your-objectstorage.com',
   backupRegion: 'nbg1', // Hetzner Object Storage region (Nuremberg); == state-backend region
   backupSchedule: '0 0 3 * * *', // CNPG 6-field cron: 03:00 daily
