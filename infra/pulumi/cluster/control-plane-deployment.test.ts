@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildControlPlaneDeploymentSpec,
-  CONTROL_PLANE_SA,
-  CONTROL_PLANE_SECRET,
+  RECONCILER_SA,
+  RECONCILER_SECRET,
   GITHUB_TOKEN_KEY,
   OPENCODE_FILE,
   OPENCODE_MOUNT_DIR,
@@ -10,7 +10,7 @@ import {
   PG_APP_SECRET,
   PG_URL_SECRET_KEY,
   SA_CA_CERT_PATH,
-  WORKER_NAMESPACE,
+  AGENT_NAMESPACE,
 } from './control-plane-deployment';
 
 /**
@@ -66,7 +66,7 @@ describe('buildControlPlaneDeploymentSpec — singleton reconciler', () => {
   });
 
   it('runs as the least-privilege control-plane ServiceAccount', () => {
-    expect(spec.template.spec.serviceAccountName).toBe(CONTROL_PLANE_SA);
+    expect(spec.template.spec.serviceAccountName).toBe(RECONCILER_SA);
   });
 
   it('selector matches the pod template labels (a valid Deployment)', () => {
@@ -92,7 +92,7 @@ describe('buildControlPlaneDeploymentSpec — the env flip', () => {
   });
 
   it('dispatches worker Jobs into the untrusted worker namespace', () => {
-    expect(envOf('TIDEPOOL_WORKER_NAMESPACE')?.value).toBe(WORKER_NAMESPACE);
+    expect(envOf('TIDEPOOL_AGENT_NAMESPACE')?.value).toBe(AGENT_NAMESPACE);
   });
 
   it('sets HOME=/root so the broker resolves the opencode auth path', () => {
@@ -121,7 +121,7 @@ describe('buildControlPlaneDeploymentSpec — secrets by reference only', () => 
     const e = envOf('GITHUB_TOKEN');
     expect(e?.value).toBeUndefined();
     expect(e?.valueFrom?.secretKeyRef).toEqual({
-      name: CONTROL_PLANE_SECRET,
+      name: RECONCILER_SECRET,
       key: GITHUB_TOKEN_KEY,
     });
   });
@@ -139,7 +139,7 @@ describe('buildControlPlaneDeploymentSpec — secrets by reference only', () => 
     expect(mount).toBeDefined();
     expect(mount?.readOnly).toBe(true);
     const vol = spec.template.spec.volumes.find((v) => v.name === mount?.name);
-    expect(vol?.secret?.secretName).toBe(CONTROL_PLANE_SECRET);
+    expect(vol?.secret?.secretName).toBe(RECONCILER_SECRET);
     expect(vol?.secret?.items).toContainEqual({ key: OPENCODE_SECRET_KEY, path: OPENCODE_FILE });
     // mountPath + item path must resolve to the broker's hardcoded read path.
     expect(`${OPENCODE_MOUNT_DIR}/${OPENCODE_FILE}`).toBe('/root/.tidepool/bootstrap/opencode-auth.json');

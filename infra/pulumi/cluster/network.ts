@@ -28,15 +28,15 @@ export interface ClusterNetwork {
 
 export function createNetwork(provider: hcloud.Provider): ClusterNetwork {
   const network = new hcloud.Network(
-    'tidepool-cluster-net',
-    { name: 'tidepool-cluster', ipRange: NETWORK_CIDR, labels: LABELS },
+    'cluster-net',
+    { name: 'cluster', ipRange: NETWORK_CIDR, labels: { ...LABELS, role: 'cluster' } },
     { provider },
   );
 
   // Node subnet. The CCM's route-controller adds the pod-CIDR routes on top; the
   // subnet range and POD_CIDR are deliberately disjoint (see config.ts).
   const subnet = new hcloud.NetworkSubnet(
-    'tidepool-cluster-subnet',
+    'cluster-subnet',
     {
       networkId: network.id.apply((id) => Number.parseInt(id, 10)),
       type: 'cloud',
@@ -54,10 +54,10 @@ export function createNetwork(provider: hcloud.Provider): ClusterNetwork {
   //                              etcd, CNI) and from the pod CIDR.
   const controlPortSources = controlPortSourceCidrs(ADMIN_CIDRS, CI_RUNNER_CIDR);
   const firewall = new hcloud.Firewall(
-    'tidepool-cluster-fw',
+    'cluster-fw',
     {
-      name: 'tidepool-cluster',
-      labels: LABELS,
+      name: 'cluster',
+      labels: { ...LABELS, role: 'cluster' },
       rules: [
         {
           direction: 'in',

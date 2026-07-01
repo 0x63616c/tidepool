@@ -69,13 +69,13 @@ export function createControlPlane(
 
   // ── Primary IP → stable cluster endpoint (breaks the config↔server cycle) ──────
   const cpIp = new hcloud.PrimaryIp(
-    'tp-cp-ip',
+    'main-ip',
     {
-      name: 'tidepool-cp',
+      name: 'main',
       type: 'ipv4',
       location: LOCATION,
       autoDelete: false,
-      labels: LABELS,
+      labels: { ...LABELS, role: 'main' },
     },
     { provider },
   );
@@ -124,13 +124,13 @@ export function createControlPlane(
 
   // ── Control-plane node (boots the snapshot, self-configures from user-data) ────
   const node = new hcloud.Server(
-    'tp-cp',
+    'main',
     {
-      name: 'tidepool-cp',
+      name: 'main',
       serverType: CONTROL_PLANE_TYPE,
       image: imageId,
       location: LOCATION,
-      labels: { ...LABELS, role: 'control-plane' },
+      labels: { ...LABELS, role: 'main' },
       userData: cpConfig.machineConfiguration,
       publicNets: [{ ipv4Enabled: true, ipv4: cpIp.id.apply((id) => Number.parseInt(id, 10)), ipv6Enabled: true }],
       firewallIds: [net.firewall.id.apply((id) => Number.parseInt(id, 10))],

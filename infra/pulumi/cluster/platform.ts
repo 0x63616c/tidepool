@@ -79,7 +79,7 @@ export function installPlatform(cp: TalosControlPlane, net: ClusterNetwork): k8s
         image: { tag: CHARTS.autoscaler.imageTag },
         autoscalingGroups: [
           {
-            name: 'tidepool-workers',
+            name: 'worker',
             minSize: WORKER_MIN,
             maxSize: WORKER_MAX,
             instanceType: WORKER_TYPE,

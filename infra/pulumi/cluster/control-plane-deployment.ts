@@ -20,19 +20,19 @@ export interface ControlPlaneImages {
 }
 
 /** ServiceAccount (created in workloads.ts) that grants the Job-driver RBAC. */
-export const CONTROL_PLANE_SA = 'tidepool-control-plane';
+export const RECONCILER_SA = 'reconciler';
 /** k8s Secret (created in workloads.ts) holding the reconciler's own creds. */
-export const CONTROL_PLANE_SECRET = 'tidepool-control-plane-secrets';
-/** CNPG auto-generated app secret: `<cluster>-app` for cluster `tidepool-pg`. */
-export const PG_APP_SECRET = 'tidepool-pg-app';
+export const RECONCILER_SECRET = 'reconciler-secrets';
+/** CNPG auto-generated app secret: `<cluster>-app` for cluster `pg`. */
+export const PG_APP_SECRET = 'pg-app';
 /** Key in the CNPG app secret holding the full `postgresql://…` DSN. */
 export const PG_URL_SECRET_KEY = 'uri';
-/** Key in CONTROL_PLANE_SECRET holding the GitHub token (forge + git). */
+/** Key in RECONCILER_SECRET holding the GitHub token (forge + git). */
 export const GITHUB_TOKEN_KEY = 'GITHUB_TOKEN';
-/** Key in CONTROL_PLANE_SECRET holding the opencode `auth.json` blob. */
+/** Key in RECONCILER_SECRET holding the opencode `auth.json` blob. */
 export const OPENCODE_SECRET_KEY = 'opencode';
-/** The untrusted namespace the reconciler dispatches worker Jobs into. */
-export const WORKER_NAMESPACE = 'tidepool-workers';
+/** The untrusted namespace the reconciler dispatches agent Jobs into. */
+export const AGENT_NAMESPACE = 'agents';
 /**
  * k8s auto-mounts the ServiceAccount CA here in every pod. We point Bun's
  * `NODE_EXTRA_CA_CERTS` at it so the reconciler's `fetch` trusts the apiserver
@@ -49,7 +49,11 @@ export const SA_CA_CERT_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/ca
 export const OPENCODE_MOUNT_DIR = '/root/.tidepool/bootstrap';
 export const OPENCODE_FILE = 'opencode-auth.json';
 
-const LABELS = { 'app.kubernetes.io/name': CONTROL_PLANE_SA, 'app.kubernetes.io/part-of': 'tidepool' };
+const LABELS = {
+  'app.kubernetes.io/name': RECONCILER_SA,
+  'app.kubernetes.io/part-of': 'tidepool',
+  'tidepool/role': 'reconciler',
+};
 const OPENCODE_VOLUME = 'opencode-auth';
 
 /** Build the `apps/v1` Deployment spec for the control-plane reconciler. */
@@ -63,10 +67,10 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
     template: {
       metadata: { labels: LABELS },
       spec: {
-        serviceAccountName: CONTROL_PLANE_SA,
+        serviceAccountName: RECONCILER_SA,
         containers: [
           {
-            name: 'control-plane',
+            name: 'reconciler',
             image: images.controlPlane,
             // CMD in the image is already `tp run --watch`; leave it.
             env: [
@@ -78,11 +82,11 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
               },
               { name: 'TIDEPOOL_AGENT_WORKER', value: 'k8s' },
               { name: 'TIDEPOOL_AGENT_WORKER_IMAGE', value: images.agentWorker },
-              { name: 'TIDEPOOL_WORKER_NAMESPACE', value: WORKER_NAMESPACE },
+              { name: 'TIDEPOOL_AGENT_NAMESPACE', value: AGENT_NAMESPACE },
               // ── the reconciler's own creds (by reference only) ────────────
               {
                 name: 'GITHUB_TOKEN',
-                valueFrom: { secretKeyRef: { name: CONTROL_PLANE_SECRET, key: GITHUB_TOKEN_KEY } },
+                valueFrom: { secretKeyRef: { name: RECONCILER_SECRET, key: GITHUB_TOKEN_KEY } },
               },
               // HOME anchors the broker's hardcoded opencode-auth read path.
               { name: 'HOME', value: '/root' },
@@ -104,7 +108,7 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
           {
             name: OPENCODE_VOLUME,
             secret: {
-              secretName: CONTROL_PLANE_SECRET,
+              secretName: RECONCILER_SECRET,
               items: [{ key: OPENCODE_SECRET_KEY, path: OPENCODE_FILE }],
             },
           },

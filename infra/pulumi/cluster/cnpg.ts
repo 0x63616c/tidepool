@@ -4,6 +4,9 @@ import * as k8s from '@pulumi/kubernetes';
 import * as pulumi from '@pulumi/pulumi';
 import { CNPG } from './config';
 
+/** Symmetric label schema for every CNPG-owned object (peer with the reconciler). */
+const PG_LABELS = { 'app.kubernetes.io/part-of': 'tidepool', 'tidepool/role': 'pg' } as const;
+
 /**
  * CloudNativePG datastore (PR-5b).
  *
@@ -125,7 +128,7 @@ export function installCnpg(provider: k8s.Provider): void {
   const s3Secret = new k8s.core.v1.Secret(
     'pg-backup-s3',
     {
-      metadata: { name: 'tidepool-pg-backup-s3', namespace: CNPG.namespace },
+      metadata: { name: 'pg-backup-s3', namespace: CNPG.namespace, labels: PG_LABELS },
       stringData: {
         access_key_id: process.env.AWS_ACCESS_KEY_ID ?? '',
         secret_access_key: process.env.AWS_SECRET_ACCESS_KEY ?? '',
@@ -165,7 +168,7 @@ export function installCnpg(provider: k8s.Provider): void {
     {
       apiVersion: 'barmancloud.cnpg.io/v1',
       kind: 'ObjectStore',
-      metadata: { name: 'tidepool-pg-store', namespace: CNPG.namespace },
+      metadata: { name: 'pg-store', namespace: CNPG.namespace, labels: PG_LABELS },
       spec: {
         configuration: {
           // Reference the managed bucket's name so the CR depends on it existing.
@@ -190,7 +193,7 @@ export function installCnpg(provider: k8s.Provider): void {
     {
       apiVersion: 'postgresql.cnpg.io/v1',
       kind: 'Cluster',
-      metadata: { name: CNPG.clusterName, namespace: CNPG.namespace },
+      metadata: { name: CNPG.clusterName, namespace: CNPG.namespace, labels: PG_LABELS },
       spec: {
         instances: CNPG.instances,
         storage: { size: CNPG.dataSize, storageClass: CNPG.storageClass },
@@ -213,7 +216,7 @@ export function installCnpg(provider: k8s.Provider): void {
     {
       apiVersion: 'postgresql.cnpg.io/v1',
       kind: 'ScheduledBackup',
-      metadata: { name: 'tidepool-pg-daily', namespace: CNPG.namespace },
+      metadata: { name: 'pg-daily', namespace: CNPG.namespace, labels: PG_LABELS },
       spec: {
         schedule: CNPG.backupSchedule,
         backupOwnerReference: 'self',

@@ -71,7 +71,7 @@ export const SqliteTicketStore = Layer.scoped(
 /**
  * Postgres `TicketStore` (CNPG under k8s). The DSN comes from `TIDEPOOL_PG_URL`
  * at runtime (pod env / CredentialBroker) — never hardcoded, wrapped `Redacted`
- * so it never prints. Prod points it at `tidepool-pg-rw.tidepool.svc:5432`. A
+ * so it never prints. Prod points it at `pg-rw.core.svc:5432`. A
  * missing DSN while `TIDEPOOL_DB_DRIVER=pg` is a fatal boot defect (die).
  */
 export const PgTicketStore = Layer.unwrapScoped(
@@ -112,7 +112,7 @@ export const inClusterK8sConfig: Effect.Effect<K8sWorkerConfig> = Effect.gen(fun
   return {
     apiBaseUrl: `https://${host}:${port}`,
     token: token.trim(),
-    namespace: envOr('TIDEPOOL_WORKER_NAMESPACE', 'tidepool-workers'),
+    namespace: envOr('TIDEPOOL_AGENT_NAMESPACE', 'agents'),
     image,
     // Absolute so it survives the Job's /work workingDir override (the image
     // ENTRYPOINT is relative to its own /app WORKDIR — see K8sWorkerConfig.command).

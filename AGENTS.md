@@ -82,6 +82,9 @@ a secret outside sops.
 
 ## Standards (enforced)
 
+- **Naming:** one mechanical standard for resources, code, and labels — see `NAMING.md`. Bare inside
+  a tidepool-only scope, `tp` = CLI only, peers share one label schema, name by layer (machine vs
+  workload). New resource? Copy the pattern in `NAMING.md`.
 - **Language/runtime:** TypeScript + Bun. One language across cli, reconciler, runner.
 - **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `pr_` + short lowercase base36
   suffix (`[0-9a-z]`), so ids satisfy their own commitlint/branch gate `tckt_[0-9a-z]+`.
