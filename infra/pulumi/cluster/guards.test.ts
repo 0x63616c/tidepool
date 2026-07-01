@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertAdminCidrsLocked,
+  buildWorkerDriverRules,
   buildWorkerEgressPolicySpec,
   controlPortSourceCidrs,
 } from './guards';
@@ -70,5 +71,25 @@ describe('buildWorkerEgressPolicySpec (tenet-9 wall)', () => {
       return ports?.some((p) => p.port === 53);
     });
     expect(dns).toBeDefined();
+  });
+});
+
+describe('buildWorkerDriverRules (reconciler SA least-privilege in worker ns)', () => {
+  const rules = buildWorkerDriverRules();
+  const ruleFor = (apiGroup: string, resource: string) =>
+    rules.find((r) => r.apiGroups.includes(apiGroup) && r.resources.includes(resource));
+
+  it('can create the per-Job creds Secret — but only create (Job ownerRef GCs it)', () => {
+    // The dispatch bug: without secrets:create the control-plane SA 403s creating
+    // the per-Job auth Secret and every dispatch fails. `create` is the tightest
+    // possible grant (RBAC can't scope create by name); get/list/delete are NOT
+    // needed because the Secret's ownerReference→Job cascades on Job teardown.
+    const secrets = ruleFor('', 'secrets');
+    expect(secrets?.verbs).toEqual(['create']);
+  });
+
+  it('drives Jobs (create+delete) and reads pod logs, nothing cluster-wide', () => {
+    expect(ruleFor('batch', 'jobs')?.verbs).toEqual(['create', 'get', 'list', 'watch', 'delete']);
+    expect(ruleFor('', 'pods/log')?.verbs).toEqual(['get']);
   });
 });

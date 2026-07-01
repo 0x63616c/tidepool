@@ -9,7 +9,7 @@ import {
   OPENCODE_SECRET_KEY,
   PG_APP_SECRET,
 } from './control-plane-deployment';
-import { buildWorkerEgressPolicySpec } from './guards';
+import { buildWorkerDriverRules, buildWorkerEgressPolicySpec } from './guards';
 
 // The CNPG-generated app secret the Deployment references (`<cluster>-app`) MUST
 // track the cluster cnpg.ts creates — assert it here rather than keep a second
@@ -91,11 +91,7 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
     'role-agent-worker-driver',
     {
       metadata: { name: 'agent-worker-driver', namespace: workerNs.metadata.name },
-      rules: [
-        { apiGroups: ['batch'], resources: ['jobs'], verbs: ['create', 'get', 'list', 'watch', 'delete'] },
-        { apiGroups: [''], resources: ['pods'], verbs: ['get', 'list', 'watch'] },
-        { apiGroups: [''], resources: ['pods/log'], verbs: ['get'] },
-      ],
+      rules: buildWorkerDriverRules() as unknown as k8s.types.input.rbac.v1.PolicyRule[],
     },
     { ...opts, dependsOn: [workerNs] },
   );
