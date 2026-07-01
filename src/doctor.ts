@@ -7,12 +7,13 @@ import { AppConfig } from './config.ts';
 import { TicketStore } from './services.ts';
 
 /**
- * `tp doctor` — the single terminal check that proves the whole Phase C chain
+ * `tp doctor` — the single terminal check that proves the whole work chain
  * worked (DESIGN §Validation). It PASSes only when all four facts hold:
  *  - slugify exists on the testbed's main branch (the work landed + merged),
  *  - a fresh clone's `bun run test` passes (CI's gate reproduces locally),
  *  - the latest recorded work run has non-zero tokens (a REAL agent ran, not a fake),
- *  - the latest work run has boxProvider === 'hetzner' (proves a REAL cloud worker, not LocalBoxMaker).
+ *  - the latest work run did NOT run on a local box (a k8s worker records `null`,
+ *    the retired Hetzner path recorded `'hetzner'`; only LocalBoxMaker fakes set `'local'`).
  * Any single failure ⇒ FAIL with a specific reason + a non-zero exit.
  */
 
@@ -21,9 +22,10 @@ export interface DoctorFacts {
   readonly freshCloneTestPassed: boolean;
   readonly latestRunTokens: number;
   /**
-   * Provider from the latest work run — must be `'hetzner'` to prove a REAL cloud
-   * worker was provisioned (LocalBoxMaker runs locally and sets `'local'`; null means
-   * no work run has been recorded yet).
+   * Provider from the latest work run. Real remote runs are `null` (today's k8s
+   * worker) or the legacy `'hetzner'`; only a LocalBoxMaker fake sets `'local'`,
+   * which the verdict rejects. Null also covers "no work run recorded yet" (the
+   * zero-token check catches that first).
    */
   readonly latestWorkRunBoxProvider: 'hetzner' | 'local' | null;
 }
@@ -44,10 +46,10 @@ export const doctorVerdict = (facts: DoctorFacts): DoctorVerdict => {
   if (facts.latestRunTokens <= 0) {
     return { ok: false, reason: 'latest run recorded zero tokens (no real agent run)' };
   }
-  if (facts.latestWorkRunBoxProvider !== 'hetzner') {
+  if (facts.latestWorkRunBoxProvider === 'local') {
     return {
       ok: false,
-      reason: `latest work run provider is not hetzner (got: ${facts.latestWorkRunBoxProvider ?? 'null'})`,
+      reason: 'latest work run ran on a local box (LocalBoxMaker), not a real remote worker',
     };
   }
   return { ok: true, reason: null };
@@ -123,6 +125,6 @@ export const renderDoctor = (v: DoctorVerdict & { readonly facts?: DoctorFacts }
         '  slugify on testbed@main ✓',
         '  fresh-clone bun run test ✓',
         '  non-zero run tokens ✓',
-        `  hetzner provider in latest work run: ${v.facts?.latestWorkRunBoxProvider ?? '(none)'}`,
+        `  box provider in latest work run: ${v.facts?.latestWorkRunBoxProvider ?? '(none — k8s worker)'}`,
       ].join('\n')
     : `doctor: FAIL\n  reason: ${v.reason}`;

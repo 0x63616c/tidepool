@@ -28,37 +28,10 @@ export const Workers = Schema.Struct({
 });
 export type Workers = typeof Workers.Type;
 
-export const BoxConfig = Schema.Struct({
-  type: Schema.String,
-  /** Fallback order on `resource_unavailable` (capacity will bite if hardcoded). */
-  locations: Schema.NonEmptyArray(Schema.String),
-  /**
-   * Optional prebaked worker image — a Hetzner image name or snapshot id. When
-   * omitted, workers boot stock `ubuntu-24.04` and run the full bake.sh recipe
-   * via cloud-init (today's behavior). A later PR sets this to the snapshot id.
-   */
-  imageId: Schema.optional(Schema.Union(Schema.String, Schema.Number)),
-});
-export type BoxConfig = typeof BoxConfig.Type;
-
-export const StateConfig = Schema.Struct({
-  /**
-   * Hetzner Volume id holding the control-plane sqlite (management state). It is
-   * declarative infra identity (PR-reviewed, GitOps), NOT runtime state — like
-   * the SSH-key/network ids. Bound by a later PR once the management box exists;
-   * the volume is what makes the db survive a box rebuild.
-   */
-  volumeId: Schema.optional(Schema.Union(Schema.String, Schema.Number)),
-});
-export type StateConfig = typeof StateConfig.Type;
-
 export const Config = Schema.Struct({
   targets: Schema.NonEmptyArray(Target),
   models: ModelTier,
   workers: Workers,
-  box: BoxConfig,
-  /** Optional management-state binding; undefined until the management box exists. */
-  state: Schema.optional(StateConfig),
   /** Max work attempts before a ticket goes `failed`. */
   retries: Schema.Int.pipe(Schema.greaterThanOrEqualTo(1)),
 });

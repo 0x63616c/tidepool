@@ -1,7 +1,5 @@
 #!/usr/bin/env bun
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Args, Command, Options } from '@effect/cli';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
 import { Console, Effect, Either, Layer, Logger, Option, Schema } from 'effect';
@@ -9,15 +7,10 @@ import { AppConfig } from './config.ts';
 import { renderDoctor, runDoctor } from './doctor.ts';
 import type { RunEvent, Ticket } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
-import { initStateBucket } from './object-storage.ts';
 import { reconcileForever, settle } from './reconciler.ts';
 import { AppConfigLive, liveStack, ticketStoreLive } from './runtime.ts';
 import { type AgentWorker, type Forge, TicketStore } from './services.ts';
 import { costReport, traceReport } from './trace.ts';
-import { BunCommandRunner, DEFAULT_BOOTSTRAP_DIR, up } from './up.ts';
-
-/** The pulumi program lives in the standalone node package next to `src/`. */
-const PULUMI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'infra', 'pulumi');
 
 /**
  * `tp` — the control-plane CLI. Agent-facing (AXI): TOON output, content-first
@@ -146,46 +139,6 @@ const runCommand = Command.make('run', { watch: Options.boolean('watch') }, ({ w
           Effect.zipRight(Effect.sync(() => process.exit(1))),
         ),
       ),
-    ),
-  ),
-);
-
-/**
- * `tp up` — idempotent control-plane bring-up. Validates the H1 bootstrap inputs,
- * ensures the Pulumi state bucket, runs `pulumi up` (with a control-box capacity
- * fallback chain), prints the H2 key-delivery step with the real box IP, then
- * polls the box to ready. `--skip-pulumi` validates + prints the plan only.
- */
-const upCommand = Command.make(
-  'up',
-  {
-    skipPulumi: Options.boolean('skip-pulumi'),
-    bootstrapDir: Options.text('bootstrap-dir').pipe(Options.withDefault(DEFAULT_BOOTSTRAP_DIR)),
-    timeout: Options.integer('timeout').pipe(Options.withDefault(600)),
-  },
-  ({ bootstrapDir, skipPulumi, timeout }) =>
-    up({ bootstrapDir, pulumiDir: PULUMI_DIR, skipPulumi, readinessTimeoutSec: timeout }).pipe(
-      Effect.provide(BunCommandRunner),
-      Effect.catchTag('UpError', (e) =>
-        Console.log(e.message).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
-      ),
-    ),
-);
-
-/** `tp bucket-init` — idempotently ensure the Pulumi state bucket (debug helper). */
-const bucketInitCommand = Command.make('bucket-init', {}, () =>
-  initStateBucket().pipe(
-    Effect.flatMap((r) =>
-      Console.log(`bucket: ${r.bucket} ${r.created ? 'created' : 'already present (no-op)'}`),
-    ),
-    Effect.catchTag('ObjectStorageError', (e) =>
-      Console.log(
-        [
-          'error: bucket-init failed',
-          `  reason: ${e.op}: ${e.reason}`,
-          'help: ensure ~/.tidepool/bootstrap/hetzner-s3.env holds valid Hetzner S3 creds',
-        ].join('\n'),
-      ).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
     ),
   ),
 );
@@ -379,8 +332,6 @@ const root = Command.make('tp', {}, () => homeView).pipe(
     lsCommand,
     ticketCommand,
     runCommand,
-    upCommand,
-    bucketInitCommand,
     doctorCommand,
     logsCommand,
     transcriptCommand,

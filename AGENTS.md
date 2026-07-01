@@ -42,7 +42,7 @@ one line, do not implement it.
    before it's needed.
 8. **Evidence before claims.** Prove via a checkable terminal state, not assertion.
 9. **Least privilege / secrets stay home.** Box is outbound-only (no public inbound); master keys
-   never leave the main box; personal/internal scale only.
+   never leave the cluster / control plane; personal/internal scale only.
 10. **One way of doing things.** One idiom, not a mix — **Effect** for all effects/errors/DI (never a
     raw-promise + Effect mashup), `@effect/schema` for validation (not zod alongside it), one HTTP
     layer (`@effect/platform`), one SQL layer (`@effect/sql`). Consistency beats local cleverness; if
