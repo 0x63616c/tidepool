@@ -58,7 +58,16 @@ export function installCnpg(provider: k8s.Provider): void {
   );
 
   // ── Barman Cloud plugin (vendored manifest → objectstores CRD + controller) ────
-  const barmanPlugin = new k8s.yaml.v2.ConfigFile(
+  // PREVIEW-SAFE (tckt_prev18): the v1 `k8s.yaml.ConfigFile` is a CLIENT-SIDE
+  // CollectionComponentResource — it parses the vendored manifest in-process and
+  // maps each doc to a typed resource. The v2 equivalent is a PROVIDER-side
+  // component that decodes server-side, so post-apply (kubeconfig now a known
+  // value) it dials the apiserver for OpenAPI even at `pulumi preview` and times
+  // out against the admin-only firewall (the preview job, unlike up, never adds
+  // its runner /32). v1 needs no live cluster at preview and is apply-equivalent
+  // (same objects, same dependsOn ordering). This is the only yaml manifest in the
+  // program, so there is no v1/v2 mix to reconcile (tenet 10).
+  const barmanPlugin = new k8s.yaml.ConfigFile(
     'barman-cloud-plugin',
     {
       file: join(__dirname, 'manifests', `barman-cloud-plugin-${CNPG.barmanPluginVersion}.yaml`),
