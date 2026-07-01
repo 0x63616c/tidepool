@@ -33,6 +33,7 @@ on:
 
 permissions:
   contents: read
+  packages: read # up-job pulls the current commit's image digests from ghcr (auto-deploy)
 
 # Never cancel an in-flight apply; previews are cheap enough to let run.
 concurrency:
@@ -93,8 +94,10 @@ jobs:
   up:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # HUMAN GATE: the `production` environment requires manual approval before this
-    # job runs, so a merge never auto-applies. Configure required reviewers on it.
+    # Fully automatic: a merge to main builds images (images.yml) then this job
+    # resolves the current commit's digests and applies — no human gate (personal
+    # scale, blast radius small). The `production` environment is kept as a GitHub
+    # deployment label only; add required reviewers here to reintroduce a gate.
     environment: production
     steps:
       - uses: actions/checkout@v4
@@ -163,6 +166,32 @@ jobs:
           [ -n "$ip" ] || { echo "could not resolve runner IP"; exit 1; }
           echo "::add-mask::$ip"
           echo "TIDEPOOL_CI_RUNNER_CIDR=${ip}/32" >>"$GITHUB_ENV"
+      - name: resolve this commit's image digests (auto-deploy)
+        run: |
+          # Merge→deploy: reroll with THIS commit's freshly-built images. images.yml
+          # (which pushes :${sha}) runs in parallel with this job, so poll ghcr for
+          # the tag, and FAIL CLOSED if it never appears — a merge must never apply a
+          # stale image. config.ts (pickImage) prefers these over the git-pinned
+          # default and rejects a non-@sha256 ref.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          resolve() {
+            repo="$1"
+            tries=0
+            until digest=$(docker buildx imagetools inspect "ghcr.io/0x63616c/${repo}:${{ github.sha }}" --format '{{.Manifest.Digest}}' 2>/dev/null); do
+              tries=$((tries + 1))
+              if [ "$tries" -ge 30 ]; then
+                echo "timed out waiting for ghcr.io/0x63616c/${repo}:${{ github.sha }}" >&2
+                exit 1
+              fi
+              echo "waiting for ${repo}:${{ github.sha }} (attempt ${tries})..."
+              sleep 10
+            done
+            printf 'ghcr.io/0x63616c/%s@%s' "$repo" "$digest"
+          }
+          {
+            echo "TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE=$(resolve tidepool-control-plane)"
+            echo "TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE=$(resolve tidepool-agent-worker)"
+          } >>"$GITHUB_ENV"
       - name: pulumi up
         uses: pulumi/actions@v6
         with:
@@ -178,3 +207,6 @@ jobs:
           # Consumed by config.ts → firewall control-port allow-list (self-healing;
           # next apply overwrites this /32 with the new runner IP).
           TIDEPOOL_CI_RUNNER_CIDR: ${{ env.TIDEPOOL_CI_RUNNER_CIDR }}
+          # Auto-deploy: current-commit image digests → config.ts pickImage override.
+          TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE: ${{ env.TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE }}
+          TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE: ${{ env.TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE }}

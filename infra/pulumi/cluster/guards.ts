@@ -38,6 +38,22 @@ export function controlPortSourceCidrs(
   return runner ? [...adminCidrs, runner] : [...adminCidrs];
 }
 
+/**
+ * Resolve the image ref to deploy: prefer a CI-resolved digest (`override`, set
+ * by the up-job from the current commit's freshly-built image) over the git-pinned
+ * `fallback` in Pulumi.production.yaml. This is the merge→deploy auto-pin seam.
+ * Fails CLOSED if the override is not `@sha256:`-pinned — a mutable tag would break
+ * reproducible rollout (tenet 8), the same invariant `cfg.require` protects for the
+ * committed value.
+ */
+export function pickImage(override: string | undefined, fallback: string): string {
+  if (override === undefined || override === '') return fallback;
+  if (!override.includes('@sha256:')) {
+    throw new Error(`refusing mutable-tag image override (must be @sha256-pinned): ${override}`);
+  }
+  return override;
+}
+
 /** One RBAC PolicyRule (pure shape; workloads.ts maps it to the @pulumi type). */
 export interface WorkerDriverRule {
   readonly apiGroups: readonly string[];

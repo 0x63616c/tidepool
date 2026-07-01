@@ -1,4 +1,5 @@
 import * as pulumi from '@pulumi/pulumi';
+import { pickImage } from './guards';
 
 /**
  * Single source of the cluster's pinned versions, machine sizes, and CIDRs
@@ -85,8 +86,18 @@ export const CLUSTER_NAME = 'tidepool';
 // Jobs. `require` (not `get`) so a real apply FAILS CLOSED on an unpinned image —
 // set both to an immutable `@sha256:<digest>` in Pulumi.production.yaml, never a
 // mutable tag (reproducible rollout, tenet 8). Bumped deliberately per release.
-export const CONTROL_PLANE_IMAGE = cfg.require('controlPlaneImage');
-export const AGENT_WORKER_IMAGE = cfg.require('agentWorkerImage');
+// Auto-deploy (merge→prod): the up-job resolves the current commit's freshly-built
+// image to a digest and exports it as TIDEPOOL_DEPLOY_*_IMAGE; that override wins
+// over the git-pinned default so a merge rerolls with its own build. Local `pulumi
+// up` (no env) uses the committed pin. pickImage fails closed on a mutable tag.
+export const CONTROL_PLANE_IMAGE = pickImage(
+  process.env.TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE,
+  cfg.require('controlPlaneImage'),
+);
+export const AGENT_WORKER_IMAGE = pickImage(
+  process.env.TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE,
+  cfg.require('agentWorkerImage'),
+);
 
 // ── Datastore: CloudNativePG (PR-5b) ─────────────────────────────────────────────
 // CNPG 1.30 dropped the native barmanObjectStore → the Barman Cloud PLUGIN is
