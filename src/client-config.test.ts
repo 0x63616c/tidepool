@@ -5,6 +5,8 @@ import {
   contextNames,
   deleteContext,
   describeContext,
+  isSerializableValue,
+  isValidContextName,
   parseClientConfig,
   resolveContext,
   serializeClientConfig,
@@ -151,5 +153,31 @@ describe('describeContext', () => {
         },
       }),
     ).toBe('http → port-forward core/reconciler:8080');
+  });
+});
+
+describe('config write-path hardening (review fixes)', () => {
+  it('a # inside a quoted url is not treated as a comment (round-trips)', () => {
+    const cfg = parseClientConfig('[contexts.x]\nkind = "http"\nurl = "http://h/p#frag"\n');
+    const x = cfg.contexts.x;
+    expect(x?.kind === 'http' && x.url).toBe('http://h/p#frag');
+  });
+
+  it('a full-line comment is still stripped', () => {
+    const cfg = parseClientConfig('# a comment\ncurrent-context = "local"\n');
+    expect(cfg.currentContext).toBe('local');
+  });
+
+  it('rejects context names that would not round-trip', () => {
+    expect(isValidContextName('prod')).toBe(true);
+    expect(isValidContextName('my_prod-2')).toBe(true);
+    expect(isValidContextName('my.prod')).toBe(false);
+    expect(isValidContextName('has space')).toBe(false);
+  });
+
+  it('rejects values that cannot be serialized safely', () => {
+    expect(isSerializableValue('http://h:8080')).toBe(true);
+    expect(isSerializableValue('http://a"b')).toBe(false);
+    expect(isSerializableValue('line\nbreak')).toBe(false);
   });
 });

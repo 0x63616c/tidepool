@@ -60,6 +60,17 @@ export class PortForwardError extends Data.TaggedError('PortForwardError')<{
 
 const stripQuotes = (v: string): string => v.replace(/^["']|["']$/g, '');
 
+/** Strip a trailing `# comment`, but never one that sits inside a quoted value. */
+const stripComment = (line: string): string => {
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' || ch === "'") inQuote = !inQuote;
+    else if (ch === '#' && !inQuote) return line.slice(0, i);
+  }
+  return line;
+};
+
 /** Parse a port field, falling back on missing/non-numeric input (no silent NaN). */
 const portNum = (v: string | undefined, fallback: number): number => {
   const n = Number(v);
@@ -77,7 +88,7 @@ export const parseClientConfig = (text: string): ClientConfig => {
   let section: string | null = null;
 
   for (const line of text.split('\n')) {
-    const trimmed = line.replace(/#.*$/, '').trim();
+    const trimmed = stripComment(line).trim();
     if (trimmed.length === 0) continue;
     const sectionMatch = trimmed.match(/^\[contexts\.([\w-]+)\]$/);
     if (sectionMatch?.[1] !== undefined) {
@@ -240,19 +251,29 @@ export const serializeClientConfig = (config: ClientConfig): string => {
 /** The absolute path of the client config file (`~/.tidepool/config`). */
 export const clientConfigPath = (): string => join(homedir(), '.tidepool', 'config');
 
-/** Write the config to `~/.tidepool/config`, creating the directory if needed. */
+/** Context names must round-trip through the section grammar `[contexts.<name>]`. */
+export const isValidContextName = (name: string): boolean => /^[\w-]+$/.test(name);
+
+/** A serialized string value must not contain a quote/newline (the format can't escape them). */
+export const isSerializableValue = (v: string): boolean => !/["'\r\n]/.test(v);
+
+/**
+ * Write the config to `~/.tidepool/config`, creating the directory if needed.
+ * Atomic: serialize to a temp file then rename over the target, so a crash mid-
+ * write can never leave a half-written config that loses the operator's backends.
+ */
 export const writeClientConfig = (
   config: ClientConfig,
 ): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const dir = join(homedir(), '.tidepool');
-    yield* fs
-      .makeDirectory(dir, { recursive: true })
-      .pipe(Effect.mapError((e) => new ClientConfigError({ message: String(e) })));
-    yield* fs
-      .writeFileString(clientConfigPath(), serializeClientConfig(config))
-      .pipe(Effect.mapError((e) => new ClientConfigError({ message: String(e) })));
+    const path = clientConfigPath();
+    const tmp = `${path}.tmp`;
+    const fail = (e: unknown) => new ClientConfigError({ message: String(e) });
+    yield* fs.makeDirectory(dir, { recursive: true }).pipe(Effect.mapError(fail));
+    yield* fs.writeFileString(tmp, serializeClientConfig(config)).pipe(Effect.mapError(fail));
+    yield* fs.rename(tmp, path).pipe(Effect.mapError(fail));
   });
 
 /**

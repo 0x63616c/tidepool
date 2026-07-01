@@ -13,6 +13,8 @@ import {
   contextNames,
   deleteContext,
   describeContext,
+  isSerializableValue,
+  isValidContextName,
   loadClientConfig,
   type PortForwardError,
   resolveBaseUrl,
@@ -463,13 +465,40 @@ const contextSetCommand = Command.make(
   ({ kind, localPort, name, namespace, remotePort, service, url }) =>
     loadClientConfig.pipe(
       Effect.flatMap((config): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> => {
-        if (kind === 'sqlite') return writeSet(config, { name, kind: 'sqlite' }, name);
-        const lp = Option.getOrElse(localPort, () => remotePort);
-        if (Option.isSome(namespace) && Option.isSome(service)) {
+        // Name must survive the `[contexts.<name>]` grammar (else it vanishes on reload).
+        if (!isValidContextName(name))
+          return usageError(
+            `invalid context name: ${name}`,
+            'names may contain only letters, digits, - and _',
+          );
+        if (Option.isSome(url) && !isSerializableValue(url.value))
+          return usageError(
+            '--url may not contain quotes or newlines',
+            'tp context set <name> --url http://host:8080',
+          );
+        const pf = Option.isSome(namespace) && Option.isSome(service);
+        if (kind === 'sqlite') {
+          if (Option.isSome(url) || pf)
+            return usageError(
+              'a sqlite context takes no --url / --namespace / --service',
+              'tp context set local --kind sqlite',
+            );
+          return writeSet(config, { name, kind: 'sqlite' }, name);
+        }
+        // http: exactly one of {--url} or {--namespace + --service}, never both.
+        if (Option.isSome(url) && pf)
+          return usageError(
+            'use either --url OR --namespace/--service (a port-forward), not both',
+            'tp context set prod --namespace core --service reconciler',
+          );
+        if (pf && Option.isSome(namespace) && Option.isSome(service)) {
+          const lp = Option.getOrElse(localPort, () => remotePort);
           const ctx: ClientContext = {
+            // The forward serves the derived localhost url; storing that (not a
+            // dead user url) keeps describeContext / resolveBaseUrl consistent.
             name,
             kind: 'http',
-            url: Option.getOrElse(url, () => `http://127.0.0.1:${lp}`),
+            url: `http://127.0.0.1:${lp}`,
             portForward: {
               namespace: namespace.value,
               service: service.value,
