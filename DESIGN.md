@@ -108,9 +108,12 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── main b
 ### Compute
 > **Superseded by the AgentWorker migration (see the note under §Architecture).** `BoxMaker` is
 > removed; compute + agent execution now sit behind the async **`AgentWorker`** seam
-> (`dispatch`/`poll`/`cancel`/`reap`). The v0 Hetzner box-maker text below is retained for context
-> until the `K8sAgentWorker` + Talos/Pulumi PRs land; the spend guardrail is now the deadline reaper
-> (`now - dispatchedAt > deadline → cancel`) + k8s scale-to-zero, not `acquireRelease`-on-scope-close.
+> (`dispatch`/`poll`/`cancel`/`reap`), live as `K8sAgentWorker` on the Talos/Pulumi cluster. The v0
+> Hetzner box-maker *implementation* — `src/hetzner-box.ts`, `src/hetzner-volume.ts`, the SSH
+> remote-work path in `agent-runner.ts`, and the `infra/worker/*` snapshot bake — was **deleted in
+> PR-7**; the v0 text below is historical context only. The spend guardrail is now the deadline
+> reaper (`now - dispatchedAt > deadline → cancel`) + k8s scale-to-zero, not
+> `acquireRelease`-on-scope-close.
 - **Box-maker behind a `BoxMaker` interface.** v0 impl = **direct Hetzner Cloud API** (`POST
   /v1/servers` from a prebaked snapshot + cloud-init; worker self-`DELETE`s on idle via metadata).
   **Crabbox dropped** — research verdict GREEN for direct: Tidepool already builds the governance
@@ -217,7 +220,7 @@ everything upstream). Two levels:
 - **Auto-merge in v1.** No human gate. Escalates to a human only on repeated failure.
 
 ### Standards (the spec the review agent grades against — mechanical, not vibes)
-- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `lease_`, `pr_` + short lowercase base36
+- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `pr_` + short lowercase base36
   (`[0-9a-z]`, matches the `tckt_[0-9a-z]+` gate).
   Same id is the sqlite PK, the CLI display, and threads through branch/PR/commit.
 - **Branch:** `tp/tckt_xxx-short-slug`.

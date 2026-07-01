@@ -24,8 +24,6 @@ import {
  * rotation becomes a one-module swap (tenet 4).
  */
 
-const LOCAL_BOX = { ip: '127.0.0.1' } as const;
-
 /**
  * `LocalAgentWorker` factory. `makeRunner` is injected (defaulting to the real
  * opencode runner) so tests can drive `dispatch` with a scripted runner and
@@ -54,7 +52,6 @@ export const makeLocalAgentWorker = (
               input.kind === 'work'
                 ? DispatchOutcome.Work({
                     result: yield* runner.work({
-                      box: LOCAL_BOX,
                       ticket: input.ticket,
                       repo: input.repo,
                       base: input.base,
@@ -64,7 +61,6 @@ export const makeLocalAgentWorker = (
                   })
                 : DispatchOutcome.Review({
                     result: yield* runner.review({
-                      box: LOCAL_BOX,
                       ticket: input.ticket,
                       repo: input.repo,
                       prNumber: input.prNumber,

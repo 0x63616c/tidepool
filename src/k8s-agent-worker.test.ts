@@ -329,8 +329,7 @@ function runnerLineUsage() {
 
 /**
  * Wire tests over the real `@effect/platform` Fetch client with `globalThis.fetch`
- * stubbed per-test (same pattern as `hetzner-box.test.ts`) — exercises the
- * dispatch/poll/cancel error paths without a cluster.
+ * stubbed per-test — exercises the dispatch/poll/cancel error paths without a cluster.
  */
 describe('K8sAgentWorker (wire)', () => {
   const wireCfg: K8sWorkerConfig = { ...CFG, apiBaseUrl: 'https://k8s.test' };

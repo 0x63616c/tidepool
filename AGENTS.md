@@ -14,8 +14,8 @@ for the researched facts/versions. Read `DESIGN.md` before making non-trivial ch
    invariant, never something you state in a ticket goal. No direct pushes to `main`.
 2. **Follow the standards below mechanically.** CI + git hooks enforce them; the review agent grades
    against them. If a hook/CI fails, fix the code — do not bypass.
-3. **No leaky abstractions.** `BoxMaker`, `Forge`, `TicketStore`, `AgentRunner`, `CredentialBroker`
-   are deep modules: narrow front, implementation fully hidden. Never let Hetzner/GitHub/opencode
+3. **No leaky abstractions.** `AgentWorker`, `Forge`, `TicketStore`, `CredentialBroker`
+   are deep modules: narrow front, implementation fully hidden. Never let k8s/GitHub/opencode
    types leak across an interface boundary.
 4. **A ticket's `goal` defines acceptance.** Work toward it; the review agent checks the diff against
    it + CI status.
@@ -63,7 +63,7 @@ a secret outside sops.
 ## Standards (enforced)
 
 - **Language/runtime:** TypeScript + Bun. One language across cli, reconciler, runner.
-- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `lease_`, `pr_` + short lowercase base36
+- **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `pr_` + short lowercase base36
   suffix (`[0-9a-z]`), so ids satisfy their own commitlint/branch gate `tckt_[0-9a-z]+`.
 - **Branches:** `tp/<tckt_id>-<short-slug>` (e.g. `tp/tckt_a1b2c3-add-slugify`).
 - **Commits:** subject **leads with the ticket**, then Conventional Commits:

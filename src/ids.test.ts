@@ -1,17 +1,6 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Either, Schema } from 'effect';
-import {
-  BoxId,
-  LeaseId,
-  newBoxId,
-  newLeaseId,
-  newPrId,
-  newRunId,
-  newTicketId,
-  PrId,
-  RunId,
-  TicketId,
-} from './ids.ts';
+import { BoxId, newBoxId, newPrId, newRunId, newTicketId, PrId, RunId, TicketId } from './ids.ts';
 
 /**
  * Characterization of the id module's public contract: every generated id is a
@@ -24,7 +13,6 @@ describe('ids', () => {
     { prefix: 'tckt', make: newTicketId, schema: TicketId },
     { prefix: 'run', make: newRunId, schema: RunId },
     { prefix: 'box', make: newBoxId, schema: BoxId },
-    { prefix: 'lease', make: newLeaseId, schema: LeaseId },
     { prefix: 'pr', make: newPrId, schema: PrId },
   ] as const;
 
@@ -39,7 +27,6 @@ describe('ids', () => {
     assert.isTrue(newTicketId().startsWith('tckt_'));
     assert.isTrue(newRunId().startsWith('run_'));
     assert.isTrue(newBoxId().startsWith('box_'));
-    assert.isTrue(newLeaseId().startsWith('lease_'));
     assert.isTrue(newPrId().startsWith('pr_'));
   });
 
