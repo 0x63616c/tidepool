@@ -14,6 +14,15 @@ const WORKTREE_GC = join(ROOT, '.claude/hooks/worktree-gc.sh');
 
 type HookResult = { stdout: string; exitCode: number };
 
+// Isolate every git invocation (test helper AND the hooks under test) from the developer's global/
+// system git config. Without this, real commits/merges/worktree ops in throwaway repos pick up a
+// global `core.hooksPath` and fire the dev's personal hooks (notifications, sounds) on each test run.
+// Identity is supplied via GIT_AUTHOR_*/GIT_COMMITTER_* so /dev/null global config is safe.
+const GIT_ISOLATED_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+} as const;
+
 const run = async (
   script: string,
   input: unknown,
@@ -23,7 +32,7 @@ const run = async (
     stdin: new TextEncoder().encode(JSON.stringify(input)),
     stdout: 'pipe',
     stderr: 'pipe',
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...GIT_ISOLATED_ENV, ...env },
   });
   const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
   return { stdout, exitCode };
@@ -36,6 +45,7 @@ const git = (cwd: string, ...args: string[]): string =>
     encoding: 'utf8',
     env: {
       ...process.env,
+      ...GIT_ISOLATED_ENV,
       GIT_AUTHOR_NAME: 'T',
       GIT_AUTHOR_EMAIL: 't@t',
       GIT_COMMITTER_NAME: 'T',
