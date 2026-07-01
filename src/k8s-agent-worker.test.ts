@@ -1,17 +1,17 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Exit } from 'effect';
 import { AgentFailed, type Ticket } from './domain.ts';
-import { DispatchOutcome } from './services.ts';
 import {
   buildAgentWorkerConfig,
   buildJobManifest,
   buildSecretManifest,
   classifyJobStatus,
   harvestOutcome,
+  type K8sWorkerConfig,
   k8sName,
   workHandleFor,
-  type K8sWorkerConfig,
 } from './k8s-agent-worker.ts';
+import { DispatchOutcome } from './services.ts';
 
 /**
  * K8sAgentWorker — unit tests over the pure manifest/mapping helpers. No cluster:

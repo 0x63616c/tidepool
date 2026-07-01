@@ -1,0 +1,61 @@
+# K8sAgentWorker e2e (tckt_yj0v4t). Spins up an EPHEMERAL kind cluster and runs
+# the real dispatch → poll → harvest → cancel path against it via `kubectl proxy`
+# (no TLS/token). The worker image is a stub that echoes a canned RunnerResult and
+# exits 0 — NO LLM/GitHub/Hetzner spend, only real k8s Job/Secret/pod-log
+# mechanics. Gated test (`K8S_E2E=1`); skipped by the normal `test` job.
+name: k8s-e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-roundtrip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - run: bun install --frozen-lockfile
+
+      - name: create ephemeral kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: tidepool-e2e
+
+      - name: build + load the stub worker image
+        run: |
+          cat > Dockerfile.e2e-stub <<'EOF'
+          FROM busybox:1.37
+          # Stub agent-worker: emit one canned RunnerResult line, then exit 0.
+          CMD echo '{"commitSha":"e2ecommit","usage":{"model":"stub","tokensIn":1,"tokensOut":2,"wallTimeSec":3}}'
+          EOF
+          docker build -f Dockerfile.e2e-stub -t tidepool-e2e-stub:e2e .
+          kind load docker-image tidepool-e2e-stub:e2e --name tidepool-e2e
+
+      - name: create workers namespace
+        run: kubectl create namespace tidepool-workers
+
+      - name: start kubectl proxy
+        run: |
+          kubectl proxy --port=8001 &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8001/healthz && break
+            sleep 1
+          done
+
+      - name: run the k8s e2e
+        env:
+          K8S_E2E: '1'
+          K8S_API: http://127.0.0.1:8001
+          E2E_IMAGE: tidepool-e2e-stub:e2e
+        run: bun --bun vitest run src/k8s-agent-worker.e2e.test.ts
