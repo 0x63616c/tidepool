@@ -21,6 +21,7 @@
     "talos.ts",
     "platform.ts",
     "workloads.ts",
+    "control-plane-deployment.ts",
     "guards.ts",
     "cnpg.ts"
   ]

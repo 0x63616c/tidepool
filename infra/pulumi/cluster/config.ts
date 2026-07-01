@@ -80,6 +80,14 @@ export const CHARTS = {
 
 export const CLUSTER_NAME = 'tidepool';
 
+// ── Application images (digest-pinned; PR-6.5 control-plane Deployment) ───────────
+// The ghcr refs the control-plane Deployment runs + dispatches as agent-worker
+// Jobs. `require` (not `get`) so a real apply FAILS CLOSED on an unpinned image —
+// set both to an immutable `@sha256:<digest>` in Pulumi.production.yaml, never a
+// mutable tag (reproducible rollout, tenet 8). Bumped deliberately per release.
+export const CONTROL_PLANE_IMAGE = cfg.require('controlPlaneImage');
+export const AGENT_WORKER_IMAGE = cfg.require('agentWorkerImage');
+
 // ── Datastore: CloudNativePG (PR-5b) ─────────────────────────────────────────────
 // CNPG 1.30 dropped the native barmanObjectStore → the Barman Cloud PLUGIN is
 // mandatory, and the plugin's webhook needs cert-manager. Versions pinned; the
