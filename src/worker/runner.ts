@@ -161,6 +161,9 @@ export const makeProgram = (deps: RunnerDeps): Effect.Effect<void> =>
     Effect.gen(function* () {
       const raw = yield* Effect.tryPromise(() => deps.readConfig());
       const config = yield* Schema.decode(Schema.parseJson(RunnerConfig))(raw);
+      yield* Effect.logInfo('runner starting').pipe(
+        Effect.annotateLogs({ model: config.model, branch: config.branch }),
+      );
       const result = yield* makeRunner({
         git: deps.git,
         opencode: deps.opencode,

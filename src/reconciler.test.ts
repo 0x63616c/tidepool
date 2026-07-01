@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Duration, Effect, Fiber, Layer, Ref, TestClock } from 'effect';
+import { Duration, Effect, Fiber, HashMap, Layer, Logger, Ref, TestClock } from 'effect';
 import { AppConfig, type Config, defineConfig } from './config.ts';
 import { fakeAgentWorker, fakeForge, makeInMemoryStore } from './fakes.ts';
 import { newPrId } from './ids.ts';
@@ -461,5 +461,64 @@ describe('reconciler observability', () => {
         // The opencode line is the serialized transcript (what `tp transcript` parses).
         assert.deepStrictEqual(JSON.parse(opencode.line), [{ type: 'message', text: 'hi' }]);
       }),
+  );
+});
+
+describe('reconciler logging (stdout observability)', () => {
+  // Fold message + annotations into one string so tests can assert on structured
+  // fields the default (kubectl-visible) logger renders inline.
+  const captureInto = (sink: string[]) =>
+    Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message, annotations }) => {
+        const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(
+          ' ',
+        );
+        sink.push(`${String(message)} ${ann}`.trim());
+      }),
+    );
+
+  it.effect('emits a dispatch log carrying the ticket id + target (the silent-failure path)', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      // backlog → in_progress → dispatch work.
+      yield* runSteps(2, env).pipe(Effect.provide(captureInto(logs)));
+
+      assert.isTrue(
+        logs.some((l) => /dispatch/i.test(l) && l.includes(ticket.id) && l.includes('t/repo')),
+        `expected a dispatch log with the ticket id + target; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect('logs a boot banner naming the loaded targets when the loop starts', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      const fiber = yield* reconcileForever(30).pipe(
+        Effect.provide(env),
+        Effect.provide(captureInto(logs)),
+        Effect.fork,
+      );
+      yield* TestClock.adjust(Duration.millis(1)); // let the banner emit before the first spaced tick
+      yield* Fiber.interrupt(fiber);
+
+      assert.isTrue(
+        logs.some((l) => /reconciler loop started/i.test(l) && l.includes('t/repo')),
+        `expected a boot banner naming the targets; got: ${JSON.stringify(logs)}`,
+      );
+    }),
   );
 });

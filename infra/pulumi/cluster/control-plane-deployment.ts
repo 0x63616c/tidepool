@@ -34,6 +34,14 @@ export const OPENCODE_SECRET_KEY = 'opencode';
 /** The untrusted namespace the reconciler dispatches worker Jobs into. */
 export const WORKER_NAMESPACE = 'tidepool-workers';
 /**
+ * k8s auto-mounts the ServiceAccount CA here in every pod. We point Bun's
+ * `NODE_EXTRA_CA_CERTS` at it so the reconciler's `fetch` trusts the apiserver
+ * cert (signed by the internal cluster CA, absent from the default trust store).
+ * Without it every worker-Job dispatch fails apiserver TLS with a "Transport
+ * error" — the silent post-cutover bug this closes.
+ */
+export const SA_CA_CERT_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt';
+/**
  * Mount dir for the opencode blob. LocalCredentialBroker reads a HARDCODED
  * `join(homedir(), '.tidepool/bootstrap/opencode-auth.json')`; with HOME=/root
  * (the base image's user) this dir + OPENCODE_FILE resolve to that exact path.
@@ -78,6 +86,10 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
               },
               // HOME anchors the broker's hardcoded opencode-auth read path.
               { name: 'HOME', value: '/root' },
+              // Trust the internal cluster CA so the reconciler's fetch can
+              // verify the apiserver cert when creating worker Jobs (see
+              // SA_CA_CERT_PATH). Read by Bun at startup.
+              { name: 'NODE_EXTRA_CA_CERTS', value: SA_CA_CERT_PATH },
             ],
             volumeMounts: [{ name: OPENCODE_VOLUME, mountPath: OPENCODE_MOUNT_DIR, readOnly: true }],
             // CPU request but NO cpu limit (bursty boot/migrate); mem request==limit

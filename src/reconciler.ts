@@ -164,6 +164,9 @@ const stepTicket = (
         // Dispatch the work agent-worker; store the reattach handle + dispatch time
         // and move to `running`. The work runs out of band; we poll it each tick.
         const branch = branchFor(ticket);
+        // Logged BEFORE the dispatch so a dispatch that throws (e.g. apiserver
+        // TLS) still leaves a visible attempt line ahead of the failure event.
+        yield* Effect.logInfo('dispatching work agent').pipe(Effect.annotateLogs({ branch }));
         const handle = yield* worker.dispatch({
           kind: 'work',
           ticket,
@@ -202,6 +205,7 @@ const stepTicket = (
           ticket.dispatchedAt !== null &&
           now - ticket.dispatchedAt > config.workers.maxTtlSec * 1000
         ) {
+          yield* Effect.logWarning('worker past deadline; cancelling + retrying');
           yield* worker.cancel(handle);
           yield* retryOrFail(store, ticket, config.retries, 'deadline-exceeded');
           yield* store.appendEvents([
@@ -219,6 +223,7 @@ const stepTicket = (
             // Classify the worker-side failure like the old in-process mapping:
             // a rate-cap requeues (never counts an attempt); anything else retries.
             if (RATE_CAP_RE.test(status.reason)) {
+              yield* Effect.logInfo('worker rate-capped; requeued (no attempt spent)');
               yield* store.patch(ticket.id, {
                 state: 'rate_capped',
                 reason: 'rate-capped',
@@ -227,6 +232,9 @@ const stepTicket = (
               });
               yield* store.appendEvents([failureEvent(ticket.id, 'rate-capped')]);
             } else {
+              yield* Effect.logWarning('worker failed; retrying or failing').pipe(
+                Effect.annotateLogs({ reason: status.reason }),
+              );
               yield* retryOrFail(store, ticket, config.retries, `agent: ${status.reason}`);
               yield* store.appendEvents([failureEvent(ticket.id, `AgentFailed: ${status.reason}`)]);
             }
@@ -256,6 +264,9 @@ const stepTicket = (
                   title: work.title,
                   body: work.body,
                 });
+                yield* Effect.logInfo('opened PR; moving to review').pipe(
+                  Effect.annotateLogs({ pr: pr.number }),
+                );
                 yield* store.patch(ticket.id, {
                   branch,
                   prNumber: pr.number,
@@ -317,6 +328,9 @@ const stepTicket = (
 
             // approve + green → auto-merge → done.
             const merged = yield* forge.merge({ repo: ticket.target, prNumber });
+            yield* Effect.logInfo('merged PR; ticket done').pipe(
+              Effect.annotateLogs({ pr: prNumber, sha: merged.sha }),
+            );
             yield* store.patch(ticket.id, {
               state: 'done',
               mergeSha: merged.sha,
@@ -340,6 +354,9 @@ const stepTicket = (
         const ci = yield* forge.checks({ repo: ticket.target, prNumber });
         if (ci === 'pending') return; // wait; next tick re-checks
         if (ci === 'red') {
+          yield* Effect.logWarning('PR CI red; retrying or failing').pipe(
+            Effect.annotateLogs({ pr: prNumber }),
+          );
           yield* retryOrFail(store, ticket, config.retries, 'ci-red');
           return;
         }
@@ -347,6 +364,9 @@ const stepTicket = (
         // CI green → dispatch the review agent-worker (grades the diff vs goal) and
         // move to `running`; the verdict is harvested when its poll succeeds. The
         // control-plane never runs opencode — the worker does (FIX 1).
+        yield* Effect.logInfo('CI green; dispatching review agent').pipe(
+          Effect.annotateLogs({ pr: prNumber }),
+        );
         const handle = yield* worker.dispatch({
           kind: 'review',
           ticket,
@@ -374,32 +394,49 @@ const stepTicket = (
       RateCapped: (_: RateCapped) =>
         Effect.flatMap(TicketStore, (s) =>
           Effect.zipRight(
-            s.patch(ticket.id, {
-              state: 'rate_capped',
-              reason: 'rate-capped',
-              workHandle: null,
-              dispatchedAt: null,
-            }),
-            s.appendEvents([failureEvent(ticket.id, 'rate-capped')]),
+            Effect.logInfo('dispatch rate-capped; requeued (no attempt spent)'),
+            Effect.zipRight(
+              s.patch(ticket.id, {
+                state: 'rate_capped',
+                reason: 'rate-capped',
+                workHandle: null,
+                dispatchedAt: null,
+              }),
+              s.appendEvents([failureEvent(ticket.id, 'rate-capped')]),
+            ),
           ),
         ),
+      // The silent-failure sink pre-fix: a dispatch that throws (e.g. apiserver
+      // TLS) only wrote a DB event, invisible in `kubectl logs`. Now mirrored to
+      // stdout as a warning so the same class of outage is visible immediately.
       AgentFailed: (e: AgentFailed) =>
         Effect.flatMap(AppConfig, (c) =>
           Effect.flatMap(TicketStore, (s) =>
             Effect.zipRight(
-              retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`),
-              s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]),
+              Effect.logWarning('dispatch failed; retrying or failing').pipe(
+                Effect.annotateLogs({ reason: e.reason }),
+              ),
+              Effect.zipRight(
+                retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`),
+                s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]),
+              ),
             ),
           ),
         ),
       MergeConflict: (_: MergeConflict) =>
         Effect.flatMap(TicketStore, (s) =>
-          s.patch(ticket.id, { state: 'in_progress', workHandle: null, dispatchedAt: null }),
+          Effect.zipRight(
+            Effect.logWarning('merge conflict; bouncing ticket back to in_progress'),
+            s.patch(ticket.id, { state: 'in_progress', workHandle: null, dispatchedAt: null }),
+          ),
         ),
       ForgeError: () => Effect.void, // transient — retried next tick, ticket unchanged
     }),
     // Ticket vanished mid-step (we just listed it) — re-listed next tick; never crash the loop.
     Effect.catchTag('TicketNotFound', () => Effect.void),
+    // Every log emitted inside this step carries the ticket + target, so a line in
+    // `kubectl logs` is self-identifying (which ticket, which repo) without grepping.
+    Effect.annotateLogs({ ticket: ticket.id, target: ticket.target, state: ticket.state }),
     Effect.asVoid,
   );
 
@@ -453,8 +490,20 @@ export const settle = (
 export const reconcileForever = (
   intervalSec = 30,
 ): Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =>
-  settle().pipe(
-    Effect.catchAllCause((cause) => Effect.logError('settle round failed; continuing', cause)),
-    Effect.repeat(Schedule.spaced(Duration.seconds(intervalSec))),
-    Effect.asVoid,
-  );
+  Effect.gen(function* () {
+    const config = yield* AppConfig;
+    // One boot line proving the loop started + which config it read — a healthy
+    // idle reconciler is otherwise indistinguishable from a hung one in the logs.
+    yield* Effect.logInfo('reconciler loop started').pipe(
+      Effect.annotateLogs({
+        intervalSec,
+        retries: config.retries,
+        targets: config.targets.map((t) => t.repo).join(','),
+      }),
+    );
+    yield* settle().pipe(
+      Effect.catchAllCause((cause) => Effect.logError('settle round failed; continuing', cause)),
+      Effect.repeat(Schedule.spaced(Duration.seconds(intervalSec))),
+      Effect.asVoid,
+    );
+  });

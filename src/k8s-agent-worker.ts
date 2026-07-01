@@ -44,8 +44,6 @@ export interface K8sWorkerConfig {
   readonly apiBaseUrl: string;
   /** Bearer token for the API. May be empty (e.g. against `kubectl proxy`). */
   readonly token: string;
-  /** PEM CA bundle to trust for the API server. Optional (plain-http proxies). */
-  readonly caCert?: string;
   /** Namespace the worker Jobs live in. */
   readonly namespace: string;
   /** agent-worker container image (registry ref + tag), by config. */
@@ -453,9 +451,11 @@ export const makeK8sAgentWorker = (
       const jobsUrl = `${cfg.apiBaseUrl}/apis/batch/v1/namespaces/${cfg.namespace}/jobs`;
       const secretsUrl = `${cfg.apiBaseUrl}/api/v1/namespaces/${cfg.namespace}/secrets`;
       const podsUrl = `${cfg.apiBaseUrl}/api/v1/namespaces/${cfg.namespace}/pods`;
-      // TODO(PR-6): apply `cfg.caCert` to the HttpClient for in-cluster TLS trust.
-      // The caller provides the HttpClient layer (kind CI uses a plain-http proxy),
-      // so the CA is carried in config but not yet wired into the transport here.
+      // In-cluster apiserver TLS trust is established at the process level, not
+      // per-request: the control-plane Deployment sets NODE_EXTRA_CA_CERTS to the
+      // auto-mounted SA CA (see SA_CA_CERT_PATH), which Bun's fetch reads at
+      // startup. The caller only has to provide a plain HttpClient layer (kind CI
+      // points it at a plain-http proxy, so no CA is needed there either).
       const headers = k8sHeaders(cfg.token);
       const post = (url: string, body: unknown) =>
         client.post(url, {
@@ -545,6 +545,9 @@ export const makeK8sAgentWorker = (
               }),
             );
           }
+          yield* Effect.logInfo('created worker Job + creds Secret').pipe(
+            Effect.annotateLogs({ handle, kind: input.kind, namespace: cfg.namespace }),
+          );
           return makeWorkHandle(handle);
         }).pipe(Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }));
 
