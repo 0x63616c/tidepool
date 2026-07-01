@@ -114,6 +114,9 @@ export const inClusterK8sConfig: Effect.Effect<K8sWorkerConfig> = Effect.gen(fun
     token: token.trim(),
     namespace: envOr('TIDEPOOL_WORKER_NAMESPACE', 'tidepool-workers'),
     image,
+    // Absolute so it survives the Job's /work workingDir override (the image
+    // ENTRYPOINT is relative to its own /app WORKDIR — see K8sWorkerConfig.command).
+    command: ['bun', 'run', '/app/src/worker/agent-worker.ts'],
     cpuRequest: envOr('TIDEPOOL_WORKER_CPU_REQUEST', '2'),
     memRequest: envOr('TIDEPOOL_WORKER_MEM_REQUEST', '2Gi'),
     activeDeadlineSeconds: Number(envOr('TIDEPOOL_WORKER_DEADLINE_SEC', '1800')),

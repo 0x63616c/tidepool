@@ -28,6 +28,7 @@ const CFG: K8sWorkerConfig = {
   token: 'sa-token',
   namespace: 'tidepool-workers',
   image: 'registry.test/agent-worker:abc123',
+  command: ['bun', 'run', '/app/src/worker/agent-worker.ts'],
   cpuRequest: '2',
   memRequest: '2Gi',
   activeDeadlineSeconds: 1800,
@@ -199,6 +200,28 @@ describe('buildJobManifest', () => {
   it('does not bake any secret value into the manifest', () => {
     assert.notInclude(JSON.stringify(manifest), 'ghs_tok');
     assert.notInclude(JSON.stringify(manifest), creds.opencodeAuth);
+  });
+
+  it('pins the configured command, ABSOLUTE, robust to the workingDir override', () => {
+    // The image ENTRYPOINT is relative (`bun run src/worker/agent-worker.ts`) but
+    // the Job overrides workingDir to the /work workspace (where the repo is cloned
+    // and config.json is mounted). A relative entrypoint then resolves to
+    // /work/src/... which does not exist → `Module not found` and silent dispatch
+    // death. So prod config supplies an absolute command that ignores cwd.
+    const c = first(manifest.spec.template.spec.containers);
+    assert.deepStrictEqual(c.command, CFG.command);
+    // The command must NOT live under the working dir it would be resolved against.
+    assert.isFalse(c.command?.[2]?.startsWith(c.workingDir));
+  });
+
+  it('omits command when config has none, so the image ENTRYPOINT runs (kind-e2e stub)', () => {
+    const stub = buildJobManifest({
+      handle: 'tp-work-tckt-abc-sfx1',
+      config: { ...CFG, command: undefined },
+      input: workInput,
+      annotations: {},
+    });
+    assert.isUndefined(first(stub.spec.template.spec.containers).command);
   });
 });
 

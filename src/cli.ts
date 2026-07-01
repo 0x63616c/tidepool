@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Args, Command, Options } from '@effect/cli';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
-import { Console, Effect, Either, Layer, Option, Schema } from 'effect';
+import { Console, Effect, Either, Layer, Logger, Option, Schema } from 'effect';
 import { AppConfig } from './config.ts';
 import { renderDoctor, runDoctor } from './doctor.ts';
 import type { RunEvent, Ticket } from './domain.ts';
@@ -394,5 +394,13 @@ const cli = Command.run(root, { name: 'tp', version: '0.0.0' });
 // Guard the runMain side effect so the module is importable by unit tests
 // (e.g. `runProgram`) without launching the CLI.
 if (import.meta.main) {
-  cli(process.argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain);
+  const program = cli(process.argv).pipe(Effect.provide(BunContext.layer));
+  // Structured JSON logs when not attached to a terminal (i.e. the in-cluster
+  // control-plane daemon, where a log aggregator ingests stdout); keep the pretty
+  // logger for interactive human use.
+  if (process.stdout.isTTY) {
+    BunRuntime.runMain(program);
+  } else {
+    BunRuntime.runMain(program.pipe(Effect.provide(Logger.json)), { disablePrettyLogger: true });
+  }
 }
