@@ -189,7 +189,10 @@ jobs:
             tries=0
             until digest=$(docker buildx imagetools inspect "ghcr.io/0x63616c/${repo}:${{ github.sha }}" --format '{{.Manifest.Digest}}' 2>/dev/null); do
               tries=$((tries + 1))
-              if [ "$tries" -ge 30 ]; then
+              # 60×10s = 10min. images.yml runs in parallel and a rapid series of
+              # merges cancels-in-progress → a cold base-image rebuild (~6-8min), so
+              # a 5min window could time out before the image lands (it did once).
+              if [ "$tries" -ge 60 ]; then
                 echo "timed out waiting for ghcr.io/0x63616c/${repo}:${{ github.sha }}" >&2
                 return 1
               fi
