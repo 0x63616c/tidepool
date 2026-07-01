@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/main-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "main-guard"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash|Read",
@@ -9,6 +22,18 @@
             "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/secret-redactor.sh\"",
             "timeout": 15,
             "statusMessage": "secret-redactor"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-gc.sh\"",
+            "timeout": 30,
+            "statusMessage": "worktree-gc"
           }
         ]
       }
