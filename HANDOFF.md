@@ -8,7 +8,7 @@
 ## What Tidepool is (10-second version)
 
 A personal agentic-coding control plane. The control plane runs as a Kubernetes Deployment
-(`tidepool-control-plane`, ns `tidepool`) on a Talos/Hetzner cluster: a TS+Bun reconciler loop over a
+(`reconciler`, ns `core`) on a Talos/Hetzner cluster: a TS+Bun reconciler loop over a
 **Postgres ticket store** (CloudNativePG, single source of truth). Tickets dispatch ephemeral k8s Jobs
 that drive coding agents (opencode SDK, on Calum's Codex subscription) against a target repo:
 `branch → PR → review → auto-merge-on-green`. Declarative infra (Pulumi in CI), secrets sops+age,

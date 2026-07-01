@@ -42,8 +42,8 @@ jobs:
           docker build -f Dockerfile.e2e-stub -t tidepool-e2e-stub:e2e .
           kind load docker-image tidepool-e2e-stub:e2e --name tidepool-e2e
 
-      - name: create workers namespace
-        run: kubectl create namespace tidepool-workers
+      - name: create agents namespace
+        run: kubectl create namespace agents
 
       # Proxy + test in ONE step: a `&` background process is not guaranteed to
       # survive into a later step, so keep it alive for the whole test run here.

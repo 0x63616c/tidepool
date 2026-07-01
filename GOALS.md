@@ -72,10 +72,10 @@ permission needed — guardrails are the control.
 ## Phase D — always-on cloud control plane — DONE (superseded by the k8s cluster)
 Make the reconciler itself cloud-resident. **Delivered, but not as the originally-planned single
 always-on Hetzner box.** The control plane now runs as a Kubernetes **Deployment**
-(`tidepool-control-plane`, ns `tidepool`) on a **Talos/Hetzner k8s cluster** defined in
+(`reconciler`, ns `core`) on a **Talos/Hetzner k8s cluster** defined in
 `infra/pulumi/cluster/` — **Pulumi (TS) applied by `pulumi up` in GitHub Actions** (GitOps), a merge
 to main auto-building images and rerolling the Deployment to the current commit's digests. The ticket
-store is **Postgres** (CloudNativePG cluster `tidepool-pg`); workers are ephemeral k8s Jobs via the
+store is **Postgres** (CloudNativePG cluster `pg`); agents are ephemeral k8s Jobs via the
 `K8sAgentWorker` seam. Pulumi state is self-managed on Hetzner S3 (no Pulumi Cloud account needed). The
 old always-on Hetzner main box, its `tp-state` sqlite volume, `tidepool-private` network, `tp-main-fw`
 firewall, and worker snapshot were all destroyed; the `tp up` / `tp bucket-init` CLI commands and the

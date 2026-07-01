@@ -4,8 +4,8 @@ import {
   API_PORT,
   API_PORT_NAME,
   buildControlPlaneDeploymentSpec,
-  CONTROL_PLANE_SA,
-  CONTROL_PLANE_SECRET,
+  RECONCILER_SA,
+  RECONCILER_SECRET,
   type ControlPlaneImages,
   GITHUB_TOKEN_KEY,
   OPENCODE_SECRET_KEY,
@@ -35,15 +35,15 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
   const opts = { provider };
 
   const cpNs = new k8s.core.v1.Namespace(
-    'ns-tidepool',
-    { metadata: { name: 'tidepool', labels: { 'app.kubernetes.io/part-of': 'tidepool' } } },
+    'ns-core',
+    { metadata: { name: 'core', labels: { 'app.kubernetes.io/part-of': 'tidepool' } } },
     opts,
   );
   const workerNs = new k8s.core.v1.Namespace(
-    'ns-tidepool-workers',
+    'ns-agents',
     {
       metadata: {
-        name: 'tidepool-workers',
+        name: 'agents',
         labels: { 'app.kubernetes.io/part-of': 'tidepool', trust: 'untrusted' },
       },
     },
@@ -75,33 +75,45 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
     { ...opts, dependsOn: [workerNs] },
   );
 
-  // ── RBAC: reconciler SA (in tidepool) drives Jobs in tidepool-workers ──────────
+  // ── RBAC: reconciler SA (in core) drives Jobs in agents ────────────────────────
   const reconcilerSa = new k8s.core.v1.ServiceAccount(
-    'sa-control-plane',
-    { metadata: { name: 'tidepool-control-plane', namespace: cpNs.metadata.name } },
+    'sa-reconciler',
+    {
+      metadata: {
+        name: RECONCILER_SA,
+        namespace: cpNs.metadata.name,
+        labels: { 'app.kubernetes.io/part-of': 'tidepool', 'tidepool/role': 'reconciler' },
+      },
+    },
     { ...opts, dependsOn: [cpNs] },
   );
 
-  // Agent-worker Jobs run as this SA — no API permissions of its own.
+  // Agent Jobs run as this SA — no API permissions of its own.
   new k8s.core.v1.ServiceAccount(
-    'sa-agent-worker',
-    { metadata: { name: 'tidepool-agent-worker', namespace: workerNs.metadata.name } },
+    'sa-agent',
+    {
+      metadata: {
+        name: 'agent',
+        namespace: workerNs.metadata.name,
+        labels: { 'app.kubernetes.io/part-of': 'tidepool', 'tidepool/role': 'agent' },
+      },
+    },
     { ...opts, dependsOn: [workerNs] },
   );
 
   const workerRole = new k8s.rbac.v1.Role(
-    'role-agent-worker-driver',
+    'role-agent-driver',
     {
-      metadata: { name: 'agent-worker-driver', namespace: workerNs.metadata.name },
+      metadata: { name: 'agent-driver', namespace: workerNs.metadata.name },
       rules: buildWorkerDriverRules() as unknown as k8s.types.input.rbac.v1.PolicyRule[],
     },
     { ...opts, dependsOn: [workerNs] },
   );
 
   new k8s.rbac.v1.RoleBinding(
-    'rb-agent-worker-driver',
+    'rb-agent-driver',
     {
-      metadata: { name: 'agent-worker-driver', namespace: workerNs.metadata.name },
+      metadata: { name: 'agent-driver', namespace: workerNs.metadata.name },
       roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'Role', name: workerRole.metadata.name },
       subjects: [
         {
@@ -124,7 +136,7 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
   const cpSecret = new k8s.core.v1.Secret(
     'control-plane-secrets',
     {
-      metadata: { name: CONTROL_PLANE_SECRET, namespace: cpNs.metadata.name },
+      metadata: { name: RECONCILER_SECRET, namespace: cpNs.metadata.name },
       stringData: {
         [GITHUB_TOKEN_KEY]: process.env.TIDEPOOL_FORGE_GITHUB_TOKEN ?? '',
         [OPENCODE_SECRET_KEY]: process.env.TIDEPOOL_OPENCODE_AUTH_JSON ?? '',
@@ -136,16 +148,16 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
   // ── THE LIVE FLIP: the singleton reconciler on Postgres + the k8s agent-worker ──
   // Spec built by the pure, unit-tested helper. `replicas:1 + Recreate` keeps it a
   // singleton (tenet 3 + one PgMigrator). It also references the CNPG-managed
-  // `tidepool-pg-app` secret (created by installCnpg); if that isn't present yet
+  // `pg-app` secret (created by installCnpg); if that isn't present yet
   // the pod simply waits and starts once CNPG creates it — no cross-module
   // dependsOn (createWorkloads doesn't see the cnpg resources).
   new k8s.apps.v1.Deployment(
-    'control-plane',
+    'reconciler',
     {
       metadata: {
-        name: CONTROL_PLANE_SA,
+        name: RECONCILER_SA,
         namespace: cpNs.metadata.name,
-        labels: { 'app.kubernetes.io/part-of': 'tidepool' },
+        labels: { 'app.kubernetes.io/part-of': 'tidepool', 'tidepool/role': 'reconciler' },
       },
       spec: buildControlPlaneDeploymentSpec(images) as unknown as k8s.types.input.apps.v1.DeploymentSpec,
     },

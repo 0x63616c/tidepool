@@ -112,8 +112,8 @@ export const CNPG = {
   },
   barmanPluginVersion: 'v0.13.0', // → manifests/barman-cloud-plugin-<ver>.yaml
   // Postgres cluster.
-  clusterName: 'tidepool-pg', // → DSN host `tidepool-pg-rw.tidepool.svc:5432`
-  namespace: 'tidepool', // co-located with the control-plane (created in 5a)
+  clusterName: 'pg', // → DSN host `pg-rw.core.svc:5432`
+  namespace: 'core', // co-located with the reconciler (created in 5a)
   instances: 1, // HA seam: bump to 3 for sync replicas, no schema change
   storageClass: 'hcloud-volumes',
   dataSize: '10Gi',
@@ -123,12 +123,16 @@ export const CNPG = {
   // sops-decrypted creds the Pulumi state backend already uses. Creds come from the
   // ambient AWS_* env at apply (never hardcoded / never in state). Hetzner project S3
   // keys can create buckets via the S3 API (`aws s3 mb`), so no human pre-create.
-  backupBucket: 'tidepool-pg-backups',
+  backupBucket: 'pg-backups',
   backupEndpoint: 'https://nbg1.your-objectstorage.com',
   backupRegion: 'nbg1', // Hetzner Object Storage region (Nuremberg); == state-backend region
   backupSchedule: '0 0 3 * * *', // CNPG 6-field cron: 03:00 daily
   backupRetention: '30d',
 } as const;
 
-/** Common Hetzner labels so every resource is greppable + reap-safe. */
-export const LABELS = { managed_by: 'tidepool', component: 'cluster' } as const;
+/**
+ * Base Hetzner label every managed resource carries (greppable + reap-safe).
+ * Each resource spreads this and adds its own `role` so the label schema is
+ * symmetric across peers — `{ managed_by, role }` on all of them, never some.
+ */
+export const LABELS = { managed_by: 'tidepool' } as const;

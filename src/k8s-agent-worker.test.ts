@@ -26,7 +26,7 @@ import { AgentWorker, type AgentWorkerApi, CredentialBroker } from './services.t
 const CFG: K8sWorkerConfig = {
   apiBaseUrl: 'https://k8s.test:6443',
   token: 'sa-token',
-  namespace: 'tidepool-workers',
+  namespace: 'agents',
   image: 'registry.test/agent-worker:abc123',
   command: ['bun', 'run', '/app/src/worker/agent-worker.ts'],
   cpuRequest: '2',
@@ -94,12 +94,9 @@ describe('k8sName', () => {
 });
 
 describe('workHandleFor', () => {
-  it('builds a tp-<kind>-<ticket>-<suffix> Job name', () => {
-    assert.strictEqual(workHandleFor('work', 'tckt_ab12cd', 'x7q2'), 'tp-work-tckt-ab12cd-x7q2');
-    assert.strictEqual(
-      workHandleFor('review', 'tckt_ab12cd', 'x7q2'),
-      'tp-review-tckt-ab12cd-x7q2',
-    );
+  it('builds a <kind>-<ticket>-<suffix> Job name', () => {
+    assert.strictEqual(workHandleFor('work', 'tckt_ab12cd', 'x7q2'), 'work-tckt-ab12cd-x7q2');
+    assert.strictEqual(workHandleFor('review', 'tckt_ab12cd', 'x7q2'), 'review-tckt-ab12cd-x7q2');
   });
 
   it('is a valid DNS-1123 label (<=63 chars, [a-z0-9-])', () => {
@@ -134,7 +131,7 @@ describe('buildAgentWorkerConfig (config.json payload)', () => {
 });
 
 describe('buildJobManifest', () => {
-  const handle = 'tp-work-tckt-ab12cd-x7q2';
+  const handle = 'work-tckt-ab12cd-x7q2';
   const manifest = buildJobManifest({
     handle,
     config: CFG,
@@ -142,17 +139,17 @@ describe('buildJobManifest', () => {
     annotations: { 'tidepool/pr-title': 'feat: x', 'tidepool/pr-body': 'goal' },
   });
 
-  it('is a batch/v1 Job named after the handle in the workers namespace', () => {
+  it('is a batch/v1 Job named after the handle in the agents namespace', () => {
     assert.strictEqual(manifest.apiVersion, 'batch/v1');
     assert.strictEqual(manifest.kind, 'Job');
     assert.strictEqual(manifest.metadata.name, handle);
-    assert.strictEqual(manifest.metadata.namespace, 'tidepool-workers');
+    assert.strictEqual(manifest.metadata.namespace, 'agents');
   });
 
   it('carries the tidepool selector labels', () => {
     const l = manifest.metadata.labels;
     assert.strictEqual(l['app.kubernetes.io/part-of'], 'tidepool');
-    assert.strictEqual(l['tidepool/role'], 'agent-worker');
+    assert.strictEqual(l['tidepool/role'], 'agent');
     assert.strictEqual(l['tidepool/kind'], 'work');
     assert.strictEqual(l['tidepool/ticket'], 'tckt_ab12cd');
   });
@@ -216,7 +213,7 @@ describe('buildJobManifest', () => {
 
   it('omits command when config has none, so the image ENTRYPOINT runs (kind-e2e stub)', () => {
     const stub = buildJobManifest({
-      handle: 'tp-work-tckt-abc-sfx1',
+      handle: 'work-tckt-abc-sfx1',
       config: { ...CFG, command: undefined },
       input: workInput,
       annotations: {},
@@ -227,8 +224,8 @@ describe('buildJobManifest', () => {
 
 describe('buildSecretManifest', () => {
   const secret = buildSecretManifest({
-    handle: 'tp-work-tckt-ab12cd-x7q2',
-    namespace: 'tidepool-workers',
+    handle: 'work-tckt-ab12cd-x7q2',
+    namespace: 'agents',
     jobUid: 'uid-123',
     configJson: '{"kind":"work"}',
     opencodeAuth: '{"openai":"auth"}',
@@ -239,7 +236,7 @@ describe('buildSecretManifest', () => {
     assert.strictEqual(secret.apiVersion, 'v1');
     assert.strictEqual(secret.kind, 'Secret');
     assert.strictEqual(secret.type, 'Opaque');
-    assert.strictEqual(secret.metadata.name, 'tp-work-tckt-ab12cd-x7q2');
+    assert.strictEqual(secret.metadata.name, 'work-tckt-ab12cd-x7q2');
     assert.property(secret.stringData, 'config.json');
     assert.property(secret.stringData, 'auth.json');
   });
@@ -248,7 +245,7 @@ describe('buildSecretManifest', () => {
     const owner = first(secret.metadata.ownerReferences);
     assert.strictEqual(owner.kind, 'Job');
     assert.strictEqual(owner.uid, 'uid-123');
-    assert.strictEqual(owner.name, 'tp-work-tckt-ab12cd-x7q2');
+    assert.strictEqual(owner.name, 'work-tckt-ab12cd-x7q2');
     assert.strictEqual(owner.blockOwnerDeletion, true);
   });
 });
@@ -381,7 +378,7 @@ describe('K8sAgentWorker (wire)', () => {
     ).then((exit) => ({ exit, logs }));
   };
 
-  const HANDLE = 'tp-work-tckt-ab12cd-sfx1';
+  const HANDLE = 'work-tckt-ab12cd-sfx1';
   const method = (init?: { method?: string }) => init?.method ?? 'GET';
 
   const stub = (

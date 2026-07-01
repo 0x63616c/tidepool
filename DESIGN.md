@@ -10,10 +10,10 @@ It is the source of truth for *why* the system is shaped the way it is.
 
 ## 1. One-paragraph shape
 
-The **control plane** runs as a Kubernetes **Deployment** (`tidepool-control-plane`, namespace
-`tidepool`) on a Talos/Hetzner cluster — a TypeScript + Bun **reconciler loop** over a **Postgres**
-ticket store (CloudNativePG cluster `tidepool-pg`, the single source of truth for tickets). When
-tickets exist, the reconciler **dispatches ephemeral k8s Jobs** (agent-workers) through the async
+The **control plane** runs as a Kubernetes **Deployment** (`reconciler`, namespace
+`core`) on a Talos/Hetzner cluster — a TypeScript + Bun **reconciler loop** over a **Postgres**
+ticket store (CloudNativePG cluster `pg`, the single source of truth for tickets). When
+tickets exist, the reconciler **dispatches ephemeral k8s Jobs** (agents) through the async
 **`K8sAgentWorker`** seam. Each Job runs a TS **runner** that embeds the **opencode TypeScript SDK**
 to drive coding agents against a target GitHub repo: `branch → PR → review-agent →
 auto-merge-on-green`. Models run via a **ChatGPT/Codex subscription** (OAuth, not metered API)
@@ -62,7 +62,7 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > the reconciler loop starts only after it succeeds. Existing sqlite state was carried over once by a
 > **throwaway, idempotent sqlite→Postgres data-move Job** (`pg-data-move.ts`) that read through the
 > domain types and hard-failed on any source/dest row-count mismatch (tenet 8), then was deleted. The
-> pg DSN (`tidepool-pg-rw.tidepool.svc:5432`) + creds are runtime config (`Redacted`), never hardcoded.
+> pg DSN (`pg-rw.core.svc:5432`) + creds are runtime config (`Redacted`), never hardcoded.
 
 ---
 
@@ -81,10 +81,10 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
   Object Storage (S3, bucket `tidepool-pulumi-state`)**, self-managed and encrypted by the stack
   passphrase. Still declarative + CI-applied (`pulumi up` in Actions) → GitOps tenet intact.
 - **Datastore = CloudNativePG (Postgres).** Runtime state (tickets/transcripts/usage) lives in a CNPG
-  `Cluster` `tidepool-pg` (`instances: 1`; DSN `tidepool-pg-rw.tidepool.svc:5432`) on `hcloud-volumes`
+  `Cluster` `pg` (`instances: 1`; DSN `pg-rw.core.svc:5432`) on `hcloud-volumes`
   PVCs (data + WAL), with daily `ScheduledBackup` → Hetzner S3 via the Barman Cloud **plugin** (CNPG
   1.30 dropped the in-tree store; the plugin needs cert-manager). The backup bucket
-  (`tidepool-pg-backups`) is **Pulumi-managed** — an `aws.s3.Bucket` under an `aws.Provider` aimed at
+  (`pg-backups`) is **Pulumi-managed** — an `aws.s3.Bucket` under an `aws.Provider` aimed at
   the Hetzner S3 endpoint (creds from the ambient sops-decrypted env, never in state), so there is **no
   hand-created prerequisite** (tenet 2). Single instance now, **HA one field
   away** (`instances: 3`) — no schema change. Infra lands PR-5b; the app driver swaps
@@ -349,7 +349,7 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   drop public SSH; add a bearer token to the queue API at that point. (You have it.)
 - Firewall is declarative (Pulumi).
 - **Operator kubectl access:** the cluster kubeconfig is a *secret output* of the
-  `tidepool-cluster` Pulumi stack; `bun run kube` (`infra/scripts/tp-kubeconfig.sh`) decrypts the
+  `tidepool-cluster` Pulumi stack; `bun run kube` (`infra/scripts/kubeconfig.sh`) decrypts the
   S3-state creds via sops, reads the output, and writes `~/.kube/tidepool.yaml` (0600). In this repo
   `.envrc` layers that onto `KUBECONFIG` so `kubectl` defaults to `admin@tidepool` while other
   clusters stay selectable; elsewhere your normal default is untouched. The apiserver `:6443` is

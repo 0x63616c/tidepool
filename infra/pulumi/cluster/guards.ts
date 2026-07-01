@@ -63,7 +63,7 @@ export interface WorkerDriverRule {
 
 /**
  * Least-privilege RBAC the reconciler SA (in `tidepool`) needs to drive worker
- * Jobs in the untrusted `tidepool-workers` namespace — and nothing more:
+ * Jobs in the untrusted `agents` namespace — and nothing more:
  *  - jobs: full lifecycle (dispatch/poll/cancel/reap).
  *  - pods + pods/log: read-only, to stream worker output.
  *  - secrets: CREATE ONLY — the per-Job creds Secret (opencode auth + git token).

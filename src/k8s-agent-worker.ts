@@ -23,7 +23,7 @@ import { type AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './work
 /**
  * `K8sAgentWorker` — the out-of-band `AgentWorker` (tenet 4 swap of the sync
  * `LocalAgentWorker`). `dispatch` POSTs a Kubernetes `Job` (+ a per-Job `Secret`
- * carrying the broker's creds) into the `tidepool-workers` namespace and returns
+ * carrying the broker's creds) into the `agents` namespace and returns
  * the Job name as the durable `WorkHandle`; `poll` reads Job status and, on
  * success, harvests the pod's final stdout line (the existing `RunnerResult` —
  * no new channel). Because the handle is just the Job name, poll works after a
@@ -88,22 +88,22 @@ export const k8sName = (s: string): string =>
     .replace(/^-+|-+$/g, '');
 
 /**
- * The Job name AND `WorkHandle`: `tp-<kind>-<ticket>-<suffix>`. The ticket id's
+ * The Job name AND `WorkHandle`: `<kind>-<ticket>-<suffix>`. The ticket id's
  * sops-style `_` is not DNS-1123-legal, so it is sanitized; the raw id is still
  * carried verbatim on the `tidepool/ticket` label (where `_` is allowed).
  */
 export const workHandleFor = (kind: 'work' | 'review', ticketId: string, suffix: string): string =>
-  `tp-${kind}-${k8sName(ticketId)}-${k8sName(suffix)}`.slice(0, 63).replace(/-+$/g, '');
+  `${kind}-${k8sName(ticketId)}-${k8sName(suffix)}`.slice(0, 63).replace(/-+$/g, '');
 
 const jobLabels = (kind: 'work' | 'review', ticketId: string): Record<string, string> => ({
   [PART_OF]: 'tidepool',
-  'tidepool/role': 'agent-worker',
+  'tidepool/role': 'agent',
   'tidepool/kind': kind,
   'tidepool/ticket': ticketId,
 });
 
-/** Label selector matching every agent-worker Job (for `reap`). */
-export const WORKER_SELECTOR = `${PART_OF}=tidepool,tidepool/role=agent-worker`;
+/** Label selector matching every agent Job (for `reap`). */
+export const AGENT_SELECTOR = `${PART_OF}=tidepool,tidepool/role=agent`;
 
 // ── Manifest builders (pure) ─────────────────────────────────────────────────
 
@@ -124,14 +124,14 @@ export const buildAgentWorkerConfig = (
         cloneUrl: `https://x-access-token:${creds.githubToken}@github.com/${input.repo}.git`,
         base: input.base,
         branch: input.branch,
-        dir: `${WORKDIR}/tp-work-${input.ticket.id}`,
+        dir: `${WORKDIR}/work-${input.ticket.id}`,
         model: input.model,
         prompt: workPrompt(input.ticket),
         commitMsg: commitMessage(input.ticket),
       }
     : {
         kind: 'review',
-        dir: `${WORKDIR}/tp-review-${input.ticket.id}`,
+        dir: `${WORKDIR}/review-${input.ticket.id}`,
         model: input.model,
         prompt: reviewPrompt(input.ticket, diff),
       };
@@ -238,7 +238,7 @@ export const buildJobManifest = (args: {
           restartPolicy: 'Never',
           containers: [
             {
-              name: 'agent-worker',
+              name: 'agent',
               image: config.image,
               // Only override when config provides one; else the image ENTRYPOINT runs.
               ...(config.command ? { command: config.command } : {}),
@@ -621,7 +621,7 @@ export const makeK8sAgentWorker = (
 
       const reap: () => Effect.Effect<{ readonly cancelled: readonly WorkHandle[] }> = () =>
         client
-          .get(`${jobsUrl}?labelSelector=${encodeURIComponent(WORKER_SELECTOR)}`, { headers })
+          .get(`${jobsUrl}?labelSelector=${encodeURIComponent(AGENT_SELECTOR)}`, { headers })
           // Listing proves reachability; actual deletion of finished Jobs (and
           // their owned Secrets) is handled by `ttlSecondsAfterFinished`. A list
           // failure is non-fatal to a sweep — log it rather than swallow silently.

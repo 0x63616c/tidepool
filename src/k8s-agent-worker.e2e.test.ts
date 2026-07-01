@@ -53,7 +53,7 @@ const fakeBroker = Layer.succeed(CredentialBroker, {
 const configLayer = k8sWorkerConfigLayer({
   apiBaseUrl: process.env.K8S_API ?? 'http://127.0.0.1:8001',
   token: '',
-  namespace: 'tidepool-workers',
+  namespace: 'agents',
   image: IMAGE,
   // Small enough to schedule on a single kind node.
   cpuRequest: '100m',
@@ -78,7 +78,7 @@ describe.skipIf(!RUN_E2E)('K8sAgentWorker (kind e2e)', () => {
         const worker = yield* AgentWorker;
 
         const handle = yield* worker.dispatch(workInput);
-        expect(handle).toMatch(/^tp-work-tckt-e2e001-/);
+        expect(handle).toMatch(/^work-tckt-e2e001-/);
 
         // Poll until the Job leaves Running (stub finishes in seconds).
         const waitDone = (): Effect.Effect<WorkStatus> =>

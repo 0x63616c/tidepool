@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tp-kubeconfig.sh — fetch the live cluster kubeconfig into ~/.kube so `kubectl`
+# kubeconfig.sh — fetch the live cluster kubeconfig into ~/.kube so `kubectl`
 # works locally. The kubeconfig is a *secret output* of the `tidepool-cluster`
 # Pulumi stack, so getting it means: decrypt the S3 state creds + config
 # passphrase (sops), log in to the S3 state backend, and read the stack output.
@@ -55,12 +55,12 @@ mkdir -p "$(dirname "$KUBECONFIG_OUT")"
 pulumi stack output kubeconfig --show-secrets >"$KUBECONFIG_OUT"
 chmod 600 "$KUBECONFIG_OUT"
 
-# Pin the control-plane namespace into the context so `kubectl get pods` targets
-# `tidepool` (not `default`) whenever this context is active — no --namespace to
-# remember. Re-applied on every refresh since we rewrite the file wholesale.
+# Pin the app namespace into the context so `kubectl get pods` targets `core`
+# (not `default`) whenever this context is active — no --namespace to remember.
+# Re-applied on every refresh since we rewrite the file wholesale.
 kubectl --kubeconfig "$KUBECONFIG_OUT" config set-context admin@tidepool \
-  --namespace tidepool >/dev/null
+  --namespace core >/dev/null
 
-echo "tp-kubeconfig: wrote $KUBECONFIG_OUT (context admin@tidepool, namespace tidepool)"
+echo "kubeconfig: wrote $KUBECONFIG_OUT (context admin@tidepool, namespace core)"
 echo "  use it: export KUBECONFIG=$KUBECONFIG_OUT   # then: kubectl get nodes"
 echo "  (apiserver :6443 is firewalled to the admin /32 — connect the VPN first)"
