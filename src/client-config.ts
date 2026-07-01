@@ -60,6 +60,17 @@ export class PortForwardError extends Data.TaggedError('PortForwardError')<{
 
 const stripQuotes = (v: string): string => v.replace(/^["']|["']$/g, '');
 
+/** Strip a trailing `# comment`, but never one that sits inside a quoted value. */
+const stripComment = (line: string): string => {
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' || ch === "'") inQuote = !inQuote;
+    else if (ch === '#' && !inQuote) return line.slice(0, i);
+  }
+  return line;
+};
+
 /** Parse a port field, falling back on missing/non-numeric input (no silent NaN). */
 const portNum = (v: string | undefined, fallback: number): number => {
   const n = Number(v);
@@ -77,7 +88,7 @@ export const parseClientConfig = (text: string): ClientConfig => {
   let section: string | null = null;
 
   for (const line of text.split('\n')) {
-    const trimmed = line.replace(/#.*$/, '').trim();
+    const trimmed = stripComment(line).trim();
     if (trimmed.length === 0) continue;
     const sectionMatch = trimmed.match(/^\[contexts\.([\w-]+)\]$/);
     if (sectionMatch?.[1] !== undefined) {
@@ -166,6 +177,103 @@ export const resolveContext = (
     if (ctx === null)
       return yield* Effect.fail(new ClientConfigError({ message: `no such context: ${chosen}` }));
     return ctx;
+  });
+
+// ── config management (kubectl-style: the CLI owns ~/.tidepool/config) ─────────
+
+/** Every context name known to the config plus the always-present built-in `local`. */
+export const contextNames = (config: ClientConfig): ReadonlyArray<string> => {
+  const names = new Set<string>([DEFAULT_CONTEXT.name, ...Object.keys(config.contexts)]);
+  return [...names].sort();
+};
+
+/** Look up a context by name, falling back to the built-in `local` (sqlite). */
+export const contextByName = (config: ClientConfig, name: string): ClientContext | null =>
+  config.contexts[name] ?? (name === DEFAULT_CONTEXT.name ? DEFAULT_CONTEXT : null);
+
+/** One-line human description of a context's backend target. */
+export const describeContext = (ctx: ClientContext): string =>
+  ctx.kind === 'sqlite'
+    ? 'sqlite (local store)'
+    : ctx.portForward !== undefined
+      ? `http → port-forward ${ctx.portForward.namespace}/${ctx.portForward.service}:${ctx.portForward.remotePort}`
+      : `http → ${ctx.url}`;
+
+/** Add or replace a context (edit is upsert-by-name). Pure. */
+export const upsertContext = (config: ClientConfig, ctx: ClientContext): ClientConfig => ({
+  ...config,
+  contexts: { ...config.contexts, [ctx.name]: ctx },
+});
+
+/**
+ * Remove a context. If it was the current default, the default is cleared (so
+ * resolution falls back to built-in `local`) rather than left dangling. Pure.
+ */
+export const deleteContext = (config: ClientConfig, name: string): ClientConfig => {
+  const { [name]: _removed, ...rest } = config.contexts;
+  return {
+    currentContext: config.currentContext === name ? null : config.currentContext,
+    contexts: rest,
+  };
+};
+
+/** Set the default context. Pure — the caller validates the name exists first. */
+export const setCurrentContext = (config: ClientConfig, name: string): ClientConfig => ({
+  ...config,
+  currentContext: name,
+});
+
+/** Serialize back to the on-disk format, round-trippable by `parseClientConfig`. */
+export const serializeClientConfig = (config: ClientConfig): string => {
+  const lines: string[] = [];
+  if (config.currentContext !== null)
+    lines.push(`current-context = "${config.currentContext}"`, '');
+  for (const name of Object.keys(config.contexts).sort()) {
+    const ctx = config.contexts[name];
+    if (ctx === undefined) continue;
+    lines.push(`[contexts.${name}]`, `kind = "${ctx.kind}"`);
+    if (ctx.kind === 'http') {
+      lines.push(`url = "${ctx.url}"`);
+      if (ctx.portForward !== undefined) {
+        lines.push(
+          `namespace = "${ctx.portForward.namespace}"`,
+          `service = "${ctx.portForward.service}"`,
+          `remote-port = ${ctx.portForward.remotePort}`,
+          `local-port = ${ctx.portForward.localPort}`,
+        );
+      }
+    }
+    lines.push('');
+  }
+  return `${lines.join('\n').trimEnd()}\n`;
+};
+
+/** The absolute path of the client config file (`~/.tidepool/config`). */
+export const clientConfigPath = (): string => join(homedir(), '.tidepool', 'config');
+
+/** Context names must round-trip through the section grammar `[contexts.<name>]`. */
+export const isValidContextName = (name: string): boolean => /^[\w-]+$/.test(name);
+
+/** A serialized string value must not contain a quote/newline (the format can't escape them). */
+export const isSerializableValue = (v: string): boolean => !/["'\r\n]/.test(v);
+
+/**
+ * Write the config to `~/.tidepool/config`, creating the directory if needed.
+ * Atomic: serialize to a temp file then rename over the target, so a crash mid-
+ * write can never leave a half-written config that loses the operator's backends.
+ */
+export const writeClientConfig = (
+  config: ClientConfig,
+): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const dir = join(homedir(), '.tidepool');
+    const path = clientConfigPath();
+    const tmp = `${path}.tmp`;
+    const fail = (e: unknown) => new ClientConfigError({ message: String(e) });
+    yield* fs.makeDirectory(dir, { recursive: true }).pipe(Effect.mapError(fail));
+    yield* fs.writeFileString(tmp, serializeClientConfig(config)).pipe(Effect.mapError(fail));
+    yield* fs.rename(tmp, path).pipe(Effect.mapError(fail));
   });
 
 /**

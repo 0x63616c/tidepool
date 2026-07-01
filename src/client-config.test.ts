@@ -1,6 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { type ClientConfig, parseClientConfig, resolveContext } from './client-config.ts';
+import {
+  type ClientConfig,
+  contextNames,
+  deleteContext,
+  describeContext,
+  isSerializableValue,
+  isValidContextName,
+  parseClientConfig,
+  resolveContext,
+  serializeClientConfig,
+  setCurrentContext,
+  upsertContext,
+} from './client-config.ts';
 
 const SAMPLE = `
 current-context = "prod"
@@ -79,4 +91,93 @@ describe('resolveContext precedence: flag > env > file > default', () => {
       expect(ctx.kind).toBe('sqlite');
     }),
   );
+});
+
+describe('config management (CRUD + serialize round-trip)', () => {
+  const base: ClientConfig = parseClientConfig(SAMPLE);
+
+  it('serialize → parse round-trips a config with a port-forward context', () => {
+    // Identity: writing then re-reading yields the same model (incl. port-forward).
+    expect(parseClientConfig(serializeClientConfig(base))).toEqual(base);
+    expect(base.contexts.prod?.kind).toBe('http');
+    const prod = base.contexts.prod;
+    if (prod?.kind === 'http') expect(prod.portForward).toBeDefined();
+  });
+
+  it('upsert adds then edits a context by name', () => {
+    const added = upsertContext(base, { name: 'staging', kind: 'http', url: 'http://s:1' });
+    expect(added.contexts.staging?.kind).toBe('http');
+    const edited = upsertContext(added, { name: 'staging', kind: 'http', url: 'http://s:2' });
+    const s = edited.contexts.staging;
+    expect(s?.kind === 'http' && s.url).toBe('http://s:2');
+  });
+
+  it('deleting the current context clears the default (no dangling pointer)', () => {
+    const after = deleteContext(base, 'prod');
+    expect(after.contexts.prod).toBeUndefined();
+    expect(after.currentContext).toBeNull();
+  });
+
+  it('deleting a non-current context leaves the default intact', () => {
+    const after = deleteContext(base, 'local');
+    expect(after.contexts.local).toBeUndefined();
+    expect(after.currentContext).toBe('prod');
+  });
+
+  it('contextNames always includes the built-in local, sorted', () => {
+    expect(contextNames({ currentContext: null, contexts: {} })).toEqual(['local']);
+    expect(contextNames(base)).toEqual(['local', 'prod']);
+  });
+
+  it('setCurrentContext sets the default', () => {
+    expect(setCurrentContext(base, 'local').currentContext).toBe('local');
+  });
+});
+
+describe('describeContext', () => {
+  it('names the backend target for each kind', () => {
+    expect(describeContext({ name: 'local', kind: 'sqlite' })).toContain('sqlite');
+    expect(describeContext({ name: 's', kind: 'http', url: 'http://h:1' })).toBe(
+      'http → http://h:1',
+    );
+    expect(
+      describeContext({
+        name: 'p',
+        kind: 'http',
+        url: 'http://127.0.0.1:8080',
+        portForward: {
+          namespace: 'core',
+          service: 'reconciler',
+          remotePort: 8080,
+          localPort: 8080,
+        },
+      }),
+    ).toBe('http → port-forward core/reconciler:8080');
+  });
+});
+
+describe('config write-path hardening (review fixes)', () => {
+  it('a # inside a quoted url is not treated as a comment (round-trips)', () => {
+    const cfg = parseClientConfig('[contexts.x]\nkind = "http"\nurl = "http://h/p#frag"\n');
+    const x = cfg.contexts.x;
+    expect(x?.kind === 'http' && x.url).toBe('http://h/p#frag');
+  });
+
+  it('a full-line comment is still stripped', () => {
+    const cfg = parseClientConfig('# a comment\ncurrent-context = "local"\n');
+    expect(cfg.currentContext).toBe('local');
+  });
+
+  it('rejects context names that would not round-trip', () => {
+    expect(isValidContextName('prod')).toBe(true);
+    expect(isValidContextName('my_prod-2')).toBe(true);
+    expect(isValidContextName('my.prod')).toBe(false);
+    expect(isValidContextName('has space')).toBe(false);
+  });
+
+  it('rejects values that cannot be serialized safely', () => {
+    expect(isSerializableValue('http://h:8080')).toBe(true);
+    expect(isSerializableValue('http://a"b')).toBe(false);
+    expect(isSerializableValue('line\nbreak')).toBe(false);
+  });
 });
