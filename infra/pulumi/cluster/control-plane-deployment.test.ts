@@ -13,6 +13,7 @@ import {
   PG_URL_SECRET_KEY,
   SA_CA_CERT_PATH,
   AGENT_NAMESPACE,
+  GIT_SHA_LABEL,
 } from './control-plane-deployment';
 
 /**
@@ -29,7 +30,9 @@ const IMAGES = {
   agentWorker: 'ghcr.io/0x63616c/tidepool-agent-worker@sha256:bbb',
 } as const;
 
-const spec = buildControlPlaneDeploymentSpec(IMAGES) as {
+const GIT_SHA = 'bcf78e0a1b2c3d4e5f60718293a4b5c6d7e8f901';
+
+const spec = buildControlPlaneDeploymentSpec(IMAGES, GIT_SHA) as {
   replicas: number;
   strategy: { type: string };
   selector: { matchLabels: Record<string, string> };
@@ -76,8 +79,25 @@ describe('buildControlPlaneDeploymentSpec — singleton reconciler', () => {
     expect(container.ports).toContainEqual({ name: API_PORT_NAME, containerPort: API_PORT });
   });
 
-  it('selector matches the pod template labels (a valid Deployment)', () => {
-    expect(spec.selector.matchLabels).toEqual(spec.template.metadata.labels);
+  it('selector is a stable subset of the pod template labels (a valid Deployment)', () => {
+    // The selector is immutable, so the mutable git-sha label lives ONLY on the
+    // pod template — the selector must stay a subset, never carry the changing sha.
+    for (const [k, v] of Object.entries(spec.selector.matchLabels)) {
+      expect(spec.template.metadata.labels[k]).toBe(v);
+    }
+    expect(spec.selector.matchLabels[GIT_SHA_LABEL]).toBeUndefined();
+  });
+});
+
+describe('buildControlPlaneDeploymentSpec — git-sha provenance label', () => {
+  it('stamps the git sha as a pod-template label (kubectl get pods -L shows the commit)', () => {
+    expect(spec.template.metadata.labels[GIT_SHA_LABEL]).toBe(GIT_SHA);
+  });
+
+  it('exposes the git sha to the reconciler as env so it re-stamps worker Jobs', () => {
+    // The reconciler reads TIDEPOOL_GIT_SHA at runtime and puts the SAME label on
+    // every worker Job it dispatches (see k8s-agent-worker jobLabels).
+    expect(envOf('TIDEPOOL_GIT_SHA')?.value).toBe(GIT_SHA);
   });
 });
 

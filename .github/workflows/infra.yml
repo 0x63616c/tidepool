@@ -239,6 +239,9 @@ jobs:
           # Auto-deploy: current-commit image digests → config.ts pickImage override.
           TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE: ${{ env.TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE }}
           TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE: ${{ env.TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE }}
+          # Provenance: stamp this commit as the tidepool/git-sha label on the
+          # reconciler + (rethreaded) every worker pod → config.ts GIT_SHA.
+          TIDEPOOL_GIT_SHA: ${{ github.sha }}
       - name: comment deploy result on the merged PR (GitLab-style PR visibility)
         # GitHub's native `environment:` deployment auto-links to a PR only when the
         # PR's head sha lands on main — which squash-merge (our default) never does,

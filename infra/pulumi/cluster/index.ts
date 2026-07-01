@@ -1,7 +1,7 @@
 import * as hcloud from '@pulumi/hcloud';
 import * as pulumi from '@pulumi/pulumi';
 import { installCnpg } from './cnpg';
-import { ADMIN_CIDRS, AGENT_WORKER_IMAGE, CONTROL_PLANE_IMAGE } from './config';
+import { ADMIN_CIDRS, AGENT_WORKER_IMAGE, CONTROL_PLANE_IMAGE, GIT_SHA } from './config';
 import { assertAdminCidrsLocked } from './guards';
 import { createNetwork } from './network';
 import { installPlatform } from './platform';
@@ -37,7 +37,11 @@ const provider = new hcloud.Provider('hcloud', { token });
 const net = createNetwork(provider);
 const cp = createControlPlane(provider, net);
 const k8sProvider = installPlatform(cp, net);
-createWorkloads(k8sProvider, { controlPlane: CONTROL_PLANE_IMAGE, agentWorker: AGENT_WORKER_IMAGE });
+createWorkloads(
+  k8sProvider,
+  { controlPlane: CONTROL_PLANE_IMAGE, agentWorker: AGENT_WORKER_IMAGE },
+  GIT_SHA,
+);
 installCnpg(k8sProvider);
 
 // ── Outputs ──────────────────────────────────────────────────────────────────────

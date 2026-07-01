@@ -1,5 +1,5 @@
 import * as pulumi from '@pulumi/pulumi';
-import { pickImage } from './guards';
+import { gitShaLabelValue, pickImage } from './guards';
 
 /**
  * Single source of the cluster's pinned versions, machine sizes, and CIDRs
@@ -98,6 +98,13 @@ export const AGENT_WORKER_IMAGE = pickImage(
   process.env.TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE,
   cfg.require('agentWorkerImage'),
 );
+
+// ── Provenance: the git commit this deploy corresponds to ────────────────────────
+// The up-job passes `github.sha` as TIDEPOOL_GIT_SHA; it becomes a pod-template
+// label on the reconciler AND (rethreaded through the reconciler's env) on every
+// worker Job, so `kubectl get pods -L tidepool/git-sha` maps a pod → commit with no
+// digest archaeology. Fail-open: a local `pulumi up` (no CI env) labels `dev`.
+export const GIT_SHA = gitShaLabelValue(process.env.TIDEPOOL_GIT_SHA);
 
 // ── Datastore: CloudNativePG (PR-5b) ─────────────────────────────────────────────
 // CNPG 1.30 dropped the native barmanObjectStore → the Barman Cloud PLUGIN is

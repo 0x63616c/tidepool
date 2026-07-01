@@ -12,6 +12,10 @@
  * rendered manifest carries no secret value (tenet 9).
  */
 
+import { GIT_SHA_LABEL } from './guards';
+
+export { GIT_SHA_LABEL } from './guards';
+
 export interface ControlPlaneImages {
   /** Digest-pinned control-plane image (ghcr) the reconciler pod runs. */
   readonly controlPlane: string;
@@ -63,16 +67,28 @@ const LABELS = {
 };
 const OPENCODE_VOLUME = 'opencode-auth';
 
-/** Build the `apps/v1` Deployment spec for the control-plane reconciler. */
-export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Record<string, unknown> {
+/**
+ * Build the `apps/v1` Deployment spec for the control-plane reconciler.
+ *
+ * `gitSha` is the commit this image was built from (fail-open `dev` locally). It is
+ * stamped as a pod-template label (NOT the selector — the selector is immutable, so
+ * a per-deploy value there would break updates) AND handed to the container as
+ * `TIDEPOOL_GIT_SHA` so the reconciler re-stamps the SAME label on every worker Job.
+ */
+export function buildControlPlaneDeploymentSpec(
+  images: ControlPlaneImages,
+  gitSha: string,
+): Record<string, unknown> {
   return {
     replicas: 1,
     // Recreate (not RollingUpdate): the old pod is fully torn down before the new
     // one starts, so there is never a window with two reconcilers/migrators.
     strategy: { type: 'Recreate' },
+    // Selector stays the stable identity labels; the git-sha goes on the template
+    // only (an immutable selector cannot carry a value that changes every deploy).
     selector: { matchLabels: LABELS },
     template: {
-      metadata: { labels: LABELS },
+      metadata: { labels: { ...LABELS, [GIT_SHA_LABEL]: gitSha } },
       spec: {
         serviceAccountName: RECONCILER_SA,
         containers: [
@@ -90,6 +106,10 @@ export function buildControlPlaneDeploymentSpec(images: ControlPlaneImages): Rec
               { name: 'TIDEPOOL_AGENT_WORKER', value: 'k8s' },
               { name: 'TIDEPOOL_AGENT_WORKER_IMAGE', value: images.agentWorker },
               { name: 'TIDEPOOL_AGENT_NAMESPACE', value: AGENT_NAMESPACE },
+              // The commit this reconciler was built from — re-stamped as the
+              // `tidepool/git-sha` label on every worker Job it dispatches so a
+              // worker pod is greppable back to its dispatching commit.
+              { name: 'TIDEPOOL_GIT_SHA', value: gitSha },
               // ── the reconciler's own creds (by reference only) ────────────
               {
                 name: 'GITHUB_TOKEN',

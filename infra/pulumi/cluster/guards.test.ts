@@ -4,6 +4,8 @@ import {
   buildWorkerDriverRules,
   buildWorkerEgressPolicySpec,
   controlPortSourceCidrs,
+  GIT_SHA_LABEL,
+  gitShaLabelValue,
   pickImage,
 } from './guards';
 
@@ -109,5 +111,38 @@ describe('buildWorkerDriverRules (reconciler SA least-privilege in worker ns)', 
   it('drives Jobs (create+delete) and reads pod logs, nothing cluster-wide', () => {
     expect(ruleFor('batch', 'jobs')?.verbs).toEqual(['create', 'get', 'list', 'watch', 'delete']);
     expect(ruleFor('', 'pods/log')?.verbs).toEqual(['get']);
+  });
+});
+
+describe('gitShaLabelValue (fail-open git-sha label)', () => {
+  it('uses the standard tidepool/* label key', () => {
+    expect(GIT_SHA_LABEL).toBe('tidepool/git-sha');
+  });
+
+  it('passes a real 40-char git sha through unchanged', () => {
+    const sha = 'bcf78e0a1b2c3d4e5f60718293a4b5c6d7e8f901';
+    expect(gitShaLabelValue(sha)).toBe(sha);
+  });
+
+  it('falls open to `dev` when the sha is absent (local pulumi up, no CI env)', () => {
+    expect(gitShaLabelValue(undefined)).toBe('dev');
+    expect(gitShaLabelValue('')).toBe('dev');
+    expect(gitShaLabelValue('   ')).toBe('dev');
+  });
+
+  it('trims surrounding whitespace', () => {
+    expect(gitShaLabelValue('  abc123  ')).toBe('abc123');
+  });
+
+  it('coerces an odd ref into a valid k8s label value (never a crashy manifest)', () => {
+    const out = gitShaLabelValue('feature/weird ref@head');
+    expect(out).toMatch(/^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/);
+    expect(out.length).toBeLessThanOrEqual(63);
+  });
+
+  it('bounds an over-long value to 63 chars with alphanumeric edges', () => {
+    const out = gitShaLabelValue('a'.repeat(80));
+    expect(out.length).toBe(63);
+    expect(out).toMatch(/^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/);
   });
 });
