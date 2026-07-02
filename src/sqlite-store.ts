@@ -176,6 +176,26 @@ export const openSqlite = (
     );
     yield* sql`CREATE INDEX IF NOT EXISTS run_events_run ON run_events (run_id)`.pipe(Effect.orDie);
 
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS circuit_breakers (
+        target TEXT PRIMARY KEY,
+        is_open INTEGER NOT NULL,
+        reason TEXT,
+        sha TEXT,
+        since INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `.pipe(Effect.orDie);
+
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS breaker_events (
+        target TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        level TEXT NOT NULL,
+        line TEXT NOT NULL
+      )
+    `.pipe(Effect.orDie);
+
     return sql;
   });
 

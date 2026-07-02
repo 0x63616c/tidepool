@@ -2,8 +2,9 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect, Either, Layer, Option } from 'effect';
 import { addAction, chooseBodySource, getAction, listAction } from './cli.ts';
 import { AppConfig, type Config, defineConfig } from './config.ts';
-import { InMemoryTicketStore } from './fakes.ts';
+import { InMemoryTicketStore, makeInMemoryStore } from './fakes.ts';
 import { LocalQueueControl, QueueControl } from './queue-control.ts';
+import { TicketStore } from './services.ts';
 
 /**
  * `tp ticket` command actions (unit-level): each verb is a thin Effect over the
@@ -51,6 +52,21 @@ describe('tp ticket add / list', () => {
         ]);
       }),
     ),
+  );
+
+  it.effect('renders open breaker status before the ticket table', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      yield* store.openBreaker({ target: 't/repo', reason: null, sha: null, now: 123 });
+      yield* store.add({ title: 'blocked', body: 'g', target: 't/repo' });
+      const layer = LocalQueueControl.pipe(
+        Layer.provide(
+          Layer.mergeAll(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, testConfig)),
+        ),
+      );
+      const listed = yield* listAction({ target: null, limit: 50 }).pipe(Effect.provide(layer));
+      expect(listed.split('\n')[0]).toBe('breaker: OPEN target=t/repo reason=- sha=- since=123');
+    }),
   );
 });
 

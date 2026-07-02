@@ -136,10 +136,18 @@ export const listAction = (opts: {
   Effect.gen(function* () {
     const qc = yield* QueueControl;
     const page = yield* qc.list({ limit: opts.limit, cursor: null, target: opts.target });
+    const breakers = (yield* qc.breakers()).filter(
+      (b) => b.isOpen && (opts.target === null || b.target === opts.target),
+    );
     const body = renderTickets(page.items);
+    const breakerLines = breakers.map(
+      (b) =>
+        `breaker: OPEN target=${b.target} reason=${b.reason ?? '-'} sha=${b.sha ?? '-'} since=${b.since}`,
+    );
+    const rendered = breakerLines.length === 0 ? body : [...breakerLines, body].join('\n');
     return page.nextCursor === null
-      ? body
-      : `${body}\nmore: ${page.items.length} shown — raise --limit to see the rest`;
+      ? rendered
+      : `${rendered}\nmore: ${page.items.length} shown — raise --limit to see the rest`;
   });
 
 /** `tp ticket get <id>` — the merged lifecycle + cost detail view for one ticket. */

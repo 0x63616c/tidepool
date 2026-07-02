@@ -26,6 +26,7 @@ export const QueueApiLive = HttpApiBuilder.group(queueApi, 'tickets', (handlers)
         }),
       ),
     )
+    .handle('breakers', () => Effect.flatMap(QueueControl, (qc) => qc.breakers()))
     .handle('get', ({ path }) => Effect.flatMap(QueueControl, (qc) => qc.get(path.id)))
     .handle('runs', ({ path }) => Effect.flatMap(QueueControl, (qc) => qc.runsFor(path.id)))
     .handle('events', ({ urlParams }) =>

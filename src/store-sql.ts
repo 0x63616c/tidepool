@@ -1,6 +1,14 @@
 import type { SqlClient } from '@effect/sql/SqlClient';
 import { Effect, Either, Schema } from 'effect';
-import { projectTicket, Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
+import {
+  BreakerEvent,
+  CircuitBreaker,
+  projectTicket,
+  Run,
+  RunEvent,
+  Ticket,
+  TicketNotFound,
+} from './domain.ts';
 import { newTicketId, type TicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -24,6 +32,10 @@ const decodeTicketEither = Schema.decodeUnknownEither(Ticket);
 const decodeRun = Schema.decodeUnknownSync(Run);
 
 const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
+
+const decodeBreaker = Schema.decodeUnknownSync(CircuitBreaker);
+
+const decodeBreakerEvent = Schema.decodeUnknownSync(BreakerEvent);
 
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
@@ -53,6 +65,22 @@ interface RunRow {
   readonly tokensIn: number | null;
   readonly tokensOut: number | null;
   readonly wallTimeSec: number | null;
+}
+
+interface BreakerRow {
+  readonly target: string;
+  readonly isOpen: boolean | number;
+  readonly reason: string | null;
+  readonly sha: string | null;
+  readonly since: number;
+  readonly updatedAt: number;
+}
+
+interface BreakerEventRow {
+  readonly target: string;
+  readonly ts: number;
+  readonly level: string;
+  readonly line: string;
 }
 
 /**
@@ -87,6 +115,16 @@ const runFromRow = (r: RunRow): Run =>
             tokensOut: Number(r.tokensOut),
             wallTimeSec: Number(r.wallTimeSec),
           },
+  });
+
+const breakerFromRow = (r: BreakerRow) =>
+  decodeBreaker({
+    target: r.target,
+    isOpen: Boolean(r.isOpen),
+    reason: r.reason,
+    sha: r.sha,
+    since: Number(r.since),
+    updatedAt: Number(r.updatedAt),
   });
 
 /** Decode a ticket row, coercing the numeric columns off the raw driver row. */
@@ -329,5 +367,55 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
         `.pipe(Effect.orDie);
         return rows.map((r) => decodeRunEvent({ ...r, ts: Number(r.ts) }));
       }),
+    listBreakers: () =>
+      sql<BreakerRow>`
+        SELECT target, is_open AS "isOpen", reason, sha, since, updated_at AS "updatedAt"
+        FROM circuit_breakers ORDER BY ${order}
+      `.pipe(
+        Effect.orDie,
+        Effect.map((rows) => rows.map(breakerFromRow)),
+      ),
+    openBreaker: (input) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<BreakerRow>`
+          INSERT INTO circuit_breakers (target, is_open, reason, sha, since, updated_at)
+          VALUES (${input.target}, ${true}, ${input.reason}, ${input.sha}, ${input.now}, ${input.now})
+          ON CONFLICT (target) DO UPDATE SET
+            is_open = TRUE,
+            reason = EXCLUDED.reason,
+            sha = EXCLUDED.sha,
+            since = CASE WHEN circuit_breakers.is_open THEN circuit_breakers.since ELSE EXCLUDED.since END,
+            updated_at = EXCLUDED.updated_at
+          RETURNING target, is_open AS "isOpen", reason, sha, since, updated_at AS "updatedAt"
+        `.pipe(Effect.orDie);
+        return breakerFromRow(rows[0] as BreakerRow);
+      }),
+    closeBreaker: (target, now) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<BreakerRow>`
+          UPDATE circuit_breakers SET is_open = FALSE, updated_at = ${now}
+          WHERE target = ${target} AND is_open = TRUE
+          RETURNING target, is_open AS "isOpen", reason, sha, since, updated_at AS "updatedAt"
+        `.pipe(Effect.orDie);
+        const row = rows[0];
+        return row === undefined ? null : breakerFromRow(row);
+      }),
+    appendBreakerEvents: (events) =>
+      Effect.forEach(
+        events,
+        (e) =>
+          sql`
+            INSERT INTO breaker_events (target, ts, level, line)
+            VALUES (${e.target}, ${e.ts}, ${e.level}, ${e.line})
+          `.pipe(Effect.orDie),
+        { discard: true },
+      ).pipe(Effect.asVoid),
+    breakerEvents: () =>
+      sql<BreakerEventRow>`
+        SELECT target, ts, level, line FROM breaker_events ORDER BY ${order}
+      `.pipe(
+        Effect.orDie,
+        Effect.map((rows) => rows.map((r) => decodeBreakerEvent({ ...r, ts: Number(r.ts) }))),
+      ),
   };
 };
