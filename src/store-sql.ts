@@ -1,6 +1,6 @@
 import type { SqlClient } from '@effect/sql/SqlClient';
 import { Effect, Either, Schema } from 'effect';
-import { Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
+import { derivePhaseConditions, Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
 import { newTicketId, type TicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -27,7 +27,7 @@ const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
 
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
-  'id, title, body, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
+  'id, title, body, target, state, phase, conditions, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
 
 interface EventRow {
   readonly ticketId: string;
@@ -64,6 +64,8 @@ interface RunRow {
  */
 const num = (v: unknown): number | null => (v == null ? null : Number(v));
 
+const json = (v: unknown): unknown => (typeof v === 'string' ? JSON.parse(v) : v);
+
 /** Re-nest + validate a flat run row (coercing driver-native numerics). */
 const runFromRow = (r: RunRow): Run =>
   decodeRun({
@@ -92,6 +94,7 @@ const ticketFromRow = (row: unknown): Ticket => {
   const r = row as Record<string, unknown>;
   return decodeTicket({
     ...r,
+    conditions: json(r.conditions),
     prNumber: num(r.prNumber),
     attempts: num(r.attempts),
     workedAttempt: num(r.workedAttempt),
@@ -102,8 +105,15 @@ const ticketFromRow = (row: unknown): Ticket => {
 /** Decode for list(): one corrupt historical row must not take down the store. */
 const ticketFromRowEither = (row: unknown) => {
   const r = row as Record<string, unknown>;
+  let conditions: unknown;
+  try {
+    conditions = json(r.conditions);
+  } catch (e) {
+    return Either.left(e);
+  }
   return decodeTicketEither({
     ...r,
+    conditions,
     prNumber: num(r.prNumber),
     attempts: num(r.attempts),
     workedAttempt: num(r.workedAttempt),
@@ -115,6 +125,8 @@ const ticketFromRowEither = (row: unknown) => {
 export interface StoreSqlOptions {
   /** Insertion-order column for deterministic list/history reads. */
   readonly orderBy: 'rowid' | 'seq';
+  /** sqlite stores JSON as TEXT; Postgres stores it as JSONB. */
+  readonly conditionsAs: 'text' | 'jsonb';
 }
 
 /**
@@ -125,11 +137,20 @@ export interface StoreSqlOptions {
 export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStoreApi => {
   const order = sql.literal(opts.orderBy);
 
-  const insertTicket = (t: Ticket) =>
-    sql`
-      INSERT INTO tickets (id, title, body, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
-      VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
-    `.pipe(Effect.orDie);
+  const encodeConditions = (t: Pick<Ticket, 'conditions'>): string => JSON.stringify(t.conditions);
+
+  const insertTicket = (t: Ticket) => {
+    const conditions = encodeConditions(t);
+    return opts.conditionsAs === 'jsonb'
+      ? sql`
+          INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
+          VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${conditions}::jsonb, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+        `.pipe(Effect.orDie)
+      : sql`
+          INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
+          VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${conditions}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+        `.pipe(Effect.orDie);
+  };
 
   const findById = (id: TicketId) =>
     Effect.gen(function* () {
@@ -145,12 +166,14 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
   return {
     add: (input) =>
       Effect.gen(function* () {
-        const ticket = decodeTicket({
+        const base = {
           id: newTicketId(),
           title: input.title,
           body: input.body,
           target: input.target,
           state: 'backlog',
+          phase: 'queued',
+          conditions: [],
           branch: null,
           prNumber: null,
           prId: null,
@@ -160,7 +183,8 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
           reason: null,
           workHandle: null,
           dispatchedAt: null,
-        });
+        } satisfies Ticket;
+        const ticket = decodeTicket(base);
         yield* insertTicket(ticket);
         return ticket;
       }),
@@ -191,21 +215,44 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
     patch: (id, patch) =>
       Effect.gen(function* () {
         const current = yield* findById(id);
-        const updated: Ticket = { ...current, ...patch };
-        yield* sql`
-          UPDATE tickets SET
-            state = ${updated.state},
-            branch = ${updated.branch},
-            pr_number = ${updated.prNumber},
-            pr_id = ${updated.prId},
-            merge_sha = ${updated.mergeSha},
-            attempts = ${updated.attempts},
-            worked_attempt = ${updated.workedAttempt},
-            reason = ${updated.reason},
-            work_handle = ${updated.workHandle},
-            dispatched_at = ${updated.dispatchedAt}
-          WHERE id = ${id}
-        `.pipe(Effect.orDie);
+        const patched = { ...current, ...patch };
+        const updated: Ticket = { ...patched, ...derivePhaseConditions(patched) };
+        const conditions = encodeConditions(updated);
+        yield* (
+          opts.conditionsAs === 'jsonb'
+            ? sql`
+              UPDATE tickets SET
+                state = ${updated.state},
+                phase = ${updated.phase},
+                conditions = ${conditions}::jsonb,
+                branch = ${updated.branch},
+                pr_number = ${updated.prNumber},
+                pr_id = ${updated.prId},
+                merge_sha = ${updated.mergeSha},
+                attempts = ${updated.attempts},
+                worked_attempt = ${updated.workedAttempt},
+                reason = ${updated.reason},
+                work_handle = ${updated.workHandle},
+                dispatched_at = ${updated.dispatchedAt}
+              WHERE id = ${id}
+            `
+            : sql`
+              UPDATE tickets SET
+                state = ${updated.state},
+                phase = ${updated.phase},
+                conditions = ${conditions},
+                branch = ${updated.branch},
+                pr_number = ${updated.prNumber},
+                pr_id = ${updated.prId},
+                merge_sha = ${updated.mergeSha},
+                attempts = ${updated.attempts},
+                worked_attempt = ${updated.workedAttempt},
+                reason = ${updated.reason},
+                work_handle = ${updated.workHandle},
+                dispatched_at = ${updated.dispatchedAt}
+              WHERE id = ${id}
+            `
+        ).pipe(Effect.orDie);
         return updated;
       }),
     addRun: (run) =>

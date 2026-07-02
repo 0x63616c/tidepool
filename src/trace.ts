@@ -102,6 +102,8 @@ export const renderTicketHeader = (ticket: Ticket, opts: { full?: boolean } = {}
     `ticket: ${ticket.id}`,
     `  title: ${ticket.title}`,
     `  state: ${ticket.state}`,
+    `  phase: ${ticket.phase}`,
+    `  conditions: ${ticket.conditions.length === 0 ? '[]' : JSON.stringify(ticket.conditions)}`,
     `  target: ${ticket.target}`,
     `  branch: ${orDash(ticket.branch)}`,
     `  pr: ${orDash(ticket.prNumber)} (prId ${orDash(ticket.prId)})`,

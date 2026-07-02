@@ -105,11 +105,41 @@ const migration0003RunLedger = Effect.gen(function* () {
   yield* sql`ALTER TABLE runs ALTER COLUMN usage_wall_time_sec DROP NOT NULL`;
 });
 
+const migration0004TicketPhaseConditions = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`ALTER TABLE tickets ADD COLUMN phase TEXT`;
+  yield* sql`ALTER TABLE tickets ADD COLUMN conditions JSONB`;
+  yield* sql`
+    UPDATE tickets SET
+      phase = CASE
+        WHEN state = 'backlog' THEN 'queued'
+        WHEN state = 'in_progress' THEN 'working'
+        WHEN state = 'running' AND pr_number IS NULL THEN 'working'
+        WHEN state = 'running' THEN 'reviewing'
+        WHEN state = 'review' THEN 'reviewing'
+        WHEN state = 'done' THEN 'done'
+        WHEN state = 'failed' THEN 'failed'
+        WHEN state = 'rate_capped' AND pr_number IS NULL THEN 'working'
+        WHEN state = 'rate_capped' THEN 'reviewing'
+        ELSE phase
+      END,
+      conditions = CASE
+        WHEN state = 'rate_capped' THEN '[{"type":"rate_capped"}]'::jsonb
+        ELSE '[]'::jsonb
+      END
+  `;
+  yield* sql`ALTER TABLE tickets ALTER COLUMN phase SET NOT NULL`;
+  yield* sql`ALTER TABLE tickets ALTER COLUMN phase SET DEFAULT 'queued'`;
+  yield* sql`ALTER TABLE tickets ALTER COLUMN conditions SET NOT NULL`;
+  yield* sql`ALTER TABLE tickets ALTER COLUMN conditions SET DEFAULT '[]'::jsonb`;
+});
+
 /** The migration set, shared by the on-boot migrator and the store open path. */
 export const pgMigrations: Record<string, Effect.Effect<void, unknown, SqlClient.SqlClient>> = {
   '0001_init': migration0001Init,
   '0002_rename_goal_to_body': migration0002RenameGoalToBody,
   '0003_run_ledger': migration0003RunLedger,
+  '0004_ticket_phase_conditions': migration0004TicketPhaseConditions,
 };
 
 /**
@@ -167,7 +197,7 @@ export const openPg = (
 export const makePgStore = (
   config: PgStoreConfig,
 ): Effect.Effect<TicketStoreApi, never, Scope.Scope> =>
-  Effect.map(openPg(config), (sql) => makeStoreApi(sql, { orderBy: 'seq' }));
+  Effect.map(openPg(config), (sql) => makeStoreApi(sql, { orderBy: 'seq', conditionsAs: 'jsonb' }));
 
 /** `TicketStore` Layer over Postgres, for the config-gated live wiring. */
 export const makePgTicketStore = (config: PgStoreConfig): Layer.Layer<TicketStore> =>

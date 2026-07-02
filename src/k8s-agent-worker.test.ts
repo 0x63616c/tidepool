@@ -42,6 +42,8 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
   body: 'add slugify(s)',
   target: 'octo/repo',
   state: 'backlog',
+  phase: 'queued',
+  conditions: [],
   branch: null,
   prNumber: null,
   prId: null,

@@ -47,6 +47,8 @@ const ticket = (over: Partial<Ticket> & Pick<Ticket, 'id'>): Ticket => ({
   body: 'g',
   target: 't/repo',
   state: 'backlog',
+  phase: 'queued',
+  conditions: [],
   branch: null,
   prNumber: null,
   prId: null,
@@ -84,6 +86,8 @@ describe('renderTicketHeader', () => {
     assert.include(out, 'line two');
     assert.include(out, 't/repo');
     assert.include(out, 'failed');
+    assert.include(out, 'phase: queued');
+    assert.include(out, 'conditions: []');
     assert.include(out, 'tp/tckt_abc-add-slugify');
     assert.include(out, '42');
     assert.include(out, prId);

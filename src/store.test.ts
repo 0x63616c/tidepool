@@ -53,6 +53,38 @@ const sqliteMedium = Effect.sync(() => {
         VALUES ('run_legacy', 'tckt_legacy', 'work', NULL, NULL, 'm', 1, 2, 3)
       `.pipe(Effect.orDie);
     }),
+    createLegacyTicketsTable: Effect.gen(function* () {
+      const sql = yield* SqliteClient.make({ filename: path }).pipe(
+        Effect.provide(Reactivity.layer),
+      );
+      yield* sql`
+        CREATE TABLE tickets (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          target TEXT NOT NULL,
+          state TEXT NOT NULL,
+          branch TEXT,
+          pr_number INTEGER,
+          pr_id TEXT,
+          merge_sha TEXT,
+          attempts INTEGER NOT NULL,
+          worked_attempt INTEGER,
+          reason TEXT,
+          work_handle TEXT,
+          dispatched_at INTEGER
+        )
+      `.pipe(Effect.orDie);
+      yield* sql`
+        INSERT INTO tickets (id, title, body, target, state, pr_number, attempts)
+        VALUES
+          ('tckt_legacy0001', 'Legacy backlog', 'body', 't/repo', 'backlog', NULL, 0),
+          ('tckt_legacy0002', 'Legacy running work', 'body', 't/repo', 'running', NULL, 0),
+          ('tckt_legacy0003', 'Legacy running review', 'body', 't/repo', 'running', 7, 0),
+          ('tckt_legacy0004', 'Legacy rate capped work', 'body', 't/repo', 'rate_capped', NULL, 0),
+          ('tckt_legacy0005', 'Legacy rate capped review', 'body', 't/repo', 'rate_capped', 7, 0)
+      `.pipe(Effect.orDie);
+    }),
   } satisfies StoreMedium;
 });
 

@@ -82,6 +82,8 @@ describe('tp ticket get', () => {
         expect(view).toContain('do the thing');
         expect(view).toContain('across two lines');
         expect(view).toContain('target: t/repo');
+        expect(view).toContain('phase: queued');
+        expect(view).toContain('conditions: []');
       }),
     ),
   );

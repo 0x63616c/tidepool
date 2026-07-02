@@ -16,6 +16,8 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
   body: '# Acceptance Criteria\n- slugify(s) lowercases and trims',
   target: 't/repo',
   state: 'running',
+  phase: 'working',
+  conditions: [],
   branch: null,
   prNumber: null,
   prId: null,

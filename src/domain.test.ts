@@ -55,6 +55,8 @@ const validTicket = {
   body: 'g',
   target: 'r/repo',
   state: 'backlog',
+  phase: 'queued',
+  conditions: [],
   branch: null,
   prNumber: null,
   prId: null,

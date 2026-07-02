@@ -25,6 +25,23 @@ export type TicketState = typeof TicketState.Type;
 
 export const isTerminal = (s: TicketState): boolean => s === 'done' || s === 'failed';
 
+export const TicketPhase = Schema.Literal(
+  'queued',
+  'working',
+  'reviewing',
+  'merging',
+  'verifying',
+  'done',
+  'failed',
+);
+export type TicketPhase = typeof TicketPhase.Type;
+
+export const TicketCondition = Schema.Union(Schema.Struct({ type: Schema.Literal('rate_capped') }));
+export type TicketCondition = typeof TicketCondition.Type;
+
+export const TicketConditions = Schema.Array(TicketCondition);
+export type TicketConditions = typeof TicketConditions.Type;
+
 /** Token + model accounting for one agent invocation. Non-zero tokens prove a real run. */
 export const Usage = Schema.Struct({
   model: Schema.String,
@@ -92,6 +109,8 @@ export const Ticket = Schema.Struct({
   body: Schema.String,
   target: Schema.String,
   state: TicketState,
+  phase: TicketPhase,
+  conditions: TicketConditions,
   branch: Schema.NullOr(Schema.String),
   prNumber: Schema.NullOr(Schema.Int),
   prId: Schema.NullOr(PrId),
@@ -112,6 +131,30 @@ export const Ticket = Schema.Struct({
   dispatchedAt: Schema.NullOr(Schema.Number),
 });
 export type Ticket = typeof Ticket.Type;
+
+export const derivePhaseConditions = (
+  ticket: Pick<Ticket, 'state' | 'prNumber'>,
+): Pick<Ticket, 'phase' | 'conditions'> => {
+  switch (ticket.state) {
+    case 'backlog':
+      return { phase: 'queued', conditions: [] };
+    case 'in_progress':
+      return { phase: 'working', conditions: [] };
+    case 'running':
+      return { phase: ticket.prNumber === null ? 'working' : 'reviewing', conditions: [] };
+    case 'review':
+      return { phase: 'reviewing', conditions: [] };
+    case 'done':
+      return { phase: 'done', conditions: [] };
+    case 'failed':
+      return { phase: 'failed', conditions: [] };
+    case 'rate_capped':
+      return {
+        phase: ticket.prNumber === null ? 'working' : 'reviewing',
+        conditions: [{ type: 'rate_capped' }],
+      };
+  }
+};
 
 /** Input to create a ticket. The store assigns id + initial state. */
 export const NewTicket = Schema.Struct({

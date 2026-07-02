@@ -57,6 +57,8 @@ describe('reconciler failure branches', () => {
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'rate_capped');
+      assert.strictEqual(final.phase, 'working');
+      assert.deepStrictEqual(final.conditions, [{ type: 'rate_capped' }]);
     }),
   );
 
@@ -106,6 +108,8 @@ describe('reconciler failure branches', () => {
 
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'review');
+        assert.strictEqual(final.phase, 'reviewing');
+        assert.deepStrictEqual(final.conditions, []);
       }),
   );
 

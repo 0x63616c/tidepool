@@ -3,6 +3,7 @@ import {
   AgentFailed,
   type CIStatus,
   CredentialError,
+  derivePhaseConditions,
   MergeConflict,
   makeWorkHandle,
   type PrLifecycle,
@@ -53,6 +54,8 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
           body: input.body,
           target: input.target,
           state: 'backlog',
+          phase: 'queued',
+          conditions: [],
           branch: null,
           prNumber: null,
           prId: null,
@@ -77,7 +80,8 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
         const idx = arr.findIndex((t) => t.id === id);
         const current = arr[idx];
         if (current === undefined) return yield* Effect.fail(new TicketNotFound({ id }));
-        const updated: Ticket = { ...current, ...patch };
+        const patched = { ...current, ...patch };
+        const updated: Ticket = { ...patched, ...derivePhaseConditions(patched) };
         yield* Ref.set(
           tickets,
           arr.map((t, i) => (i === idx ? updated : t)),

@@ -74,11 +74,12 @@ DESIGN.md updated in-wave (tenet 11).
 |---|---|
 | 0 | T1 fix MergeConflict livelock · T2 retries 2→3 |
 | 1 | T3 run row per dispatch, full lifecycle |
-| 2 | T4 additive `phase`+`conditions` schema, dual-write · **T5 reconciler rewrite (worked locally — exceeds 8-min worker cap)** |
+| 2 | T4 additive `phase`+`conditions` schema, dual-write (landed: `state` remains authoritative; projection is derived in store writes) · **T5 reconciler rewrite (worked locally — exceeds 8-min worker cap)** |
 | 3 | T6a up-to-date merge gate · T6b rebase budget · T7a `verifying` phase · T7b breaker · T7c fix-forward |
 | 4 | T8 `blocked_by` gate · T9 `tp ticket edit` · T10 `workers.max ≥ 2` + serialization docs |
 
-Feasibility notes (`#39723b6`): `Run` entity/table/API already exist (success-only writes);
-state literals concentrated (domain union, one reconciler switch, two constants, ~70 test
-assertions); pg has versioned `PgMigrator`, sqlite inline ALTERs — keep in sync; k8s
-labels/metrics: zero state coupling; `trace.ts` already derives phases from runs.
+Feasibility notes (`#39723b6`, updated after T4): `Run` entity/table/API already exist;
+`phase` + `conditions` columns now exist in sqlite and Postgres and are derived from `state` in the
+store write path; state literals remain concentrated (domain union, one reconciler switch, two
+constants, ~70 test assertions); k8s labels/metrics: zero state coupling; `trace.ts` also derives
+run timeline phases from runs.
