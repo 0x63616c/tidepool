@@ -197,7 +197,9 @@ describe('reconciler', () => {
         yield* runSteps(1, env);
         const reworking = yield* store.byId(ticket.id);
         assert.strictEqual(reworking.state, 'running');
-        assert.strictEqual(reworking.phase, 'reviewing');
+        // Phase is authoritative now: a rework dispatch IS the working phase
+        // (the old forward derive mislabeled running-with-PR as reviewing).
+        assert.strictEqual(reworking.phase, 'working');
         assert.deepStrictEqual(reworking.conditions, []);
         assert.isNotNull(reworking.workHandle);
       }),
@@ -223,8 +225,10 @@ describe('reconciler', () => {
         fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
       );
 
-      // review → dispatch review; poll approve → merge conflict bounce; next tick must re-work.
-      yield* runSteps(3, env);
+      // reviewing → dispatch review; poll approve → merging; merge conflict
+      // bounce back to working; next tick must re-work. (Approve lands in the
+      // merging phase now — the merge itself happens one tick later.)
+      yield* runSteps(4, env);
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'running');
@@ -667,10 +671,11 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
           fakeAgentWorker({ verdict: 'approve' }),
         );
 
-        // step 1: review → prState 'open' (call #1) → CI green → dispatch review → running.
-        // step 2: poll Succeeded/Review(approve) → prState 'merged' (call #2, the
-        // post-crash re-observation) → settle done WITHOUT calling forge.merge.
-        yield* runSteps(2, env);
+        // step 1: reviewing → prState 'open' (call #1) → CI green → dispatch review.
+        // step 2: poll Succeeded/Review(approve) → phase merging (no forge call).
+        // step 3: merging → prState 'merged' (call #2, the post-crash
+        // re-observation) → settle done WITHOUT calling forge.merge.
+        yield* runSteps(3, env);
 
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'done');

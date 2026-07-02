@@ -30,6 +30,8 @@ export type TicketPatch = Partial<
   Pick<
     Ticket,
     | 'state'
+    | 'phase'
+    | 'conditions'
     | 'branch'
     | 'prNumber'
     | 'prId'

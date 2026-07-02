@@ -1,15 +1,17 @@
 import { Clock, Duration, Effect, Schedule } from 'effect';
 import { AppConfig, baseFor, modelsFor } from './config.ts';
-import type {
-  AgentFailed,
-  MergeConflict,
-  RateCapped,
-  Run,
-  RunEvent,
-  RunStatus,
-  Ticket,
-  TicketNotFound,
-  Usage,
+import {
+  type AgentFailed,
+  deriveStateFromPhase,
+  isTerminalPhase,
+  type MergeConflict,
+  type RateCapped,
+  type Run,
+  type RunEvent,
+  type RunStatus,
+  type Ticket,
+  type TicketNotFound,
+  type Usage,
 } from './domain.ts';
 import { shortGitSha } from './git-sha.ts';
 import { newRunId, type RunId, type TicketId } from './ids.ts';
@@ -28,15 +30,20 @@ import { truncate } from './strings.ts';
 const REASON_LOG_MAX = 200;
 
 /**
- * The reconciler — the ONLY mover (tenet 3). Every ticket state transition
- * happens here, driven off durable store state. There is no hidden in-flight
- * state: a reconstructed reconciler reads the store and resumes. One `step`
- * advances each non-terminal ticket by exactly one transition; `settle` loops
- * `step` to a fixpoint (all terminal or no progress).
+ * The reconciler — the ONLY mover (tenet 3). Every ticket transition happens
+ * here, driven off durable store state. `phase` + `conditions` are the
+ * authoritative machine (`queued → working → reviewing → merging → verifying →
+ * done | failed`, rework loops `reviewing → working`); `state` is the derived
+ * legacy projection the store maintains at its write choke point (see
+ * domain.ts's `projectTicket`). Gate rule: a ticket with any condition set
+ * never dispatches — that tick only clears the gate. There is no hidden
+ * in-flight state: a reconstructed reconciler reads the store and resumes. One
+ * `step` advances each non-terminal ticket by exactly one transition; `settle`
+ * loops `step` to a fixpoint (all terminal or no progress).
  *
- * Execution is async dispatch+poll (not a synchronous block): `in_progress` and
- * a green `review` DISPATCH an agent-worker, store its `workHandle` +
- * `dispatchedAt`, and move the ticket to `running`. Each subsequent tick POLLs
+ * Execution is async dispatch+poll (not a synchronous block): `working` and a
+ * green `reviewing` DISPATCH an agent-worker and store its `workHandle` +
+ * `dispatchedAt` (the phase itself doesn't move). Each subsequent tick POLLs
  * that handle (mirroring the CI-`pending` poll below) — `Succeeded` harvests the
  * outcome and advances, `Failed` retries/fails, and a worker past its deadline
  * is reaped (`now - dispatchedAt > deadline → cancel`). Resumable across
@@ -186,6 +193,21 @@ const failureEvent = (ticketId: TicketId, line: string): RunEvent => ({
   line,
 });
 
+/**
+ * One control-plane info event per phase transition / condition set+clear —
+ * the durable machine trace `tp ticket logs` renders (every move the machine
+ * makes is evidence, tenet 8).
+ */
+const transitionEvent = (ticketId: TicketId, line: string): RunEvent => ({
+  ticketId,
+  runId: null,
+  boxId: null,
+  source: 'control-plane',
+  ts: Date.now(),
+  level: 'info',
+  line,
+});
+
 // ── Log-throttle helpers (pure, DI-free — mirrors fifoSelector/deferredBacklog) ──
 //
 // Both throttles below track EPHEMERAL, in-process state, explicitly NOT
@@ -250,14 +272,15 @@ let ciPendingState: CiPendingState = new Map();
 let lastDeferred: DeferredSet = new Set();
 
 /**
- * Bump attempts; fail the ticket once it has burned through `retries`. Routing:
+ * Bump attempts; fail the ticket once it has burned through `retries`. Routing
+ * (by phase — `state` is only the derived projection):
  *  - `rework` retries (the diff is deficient — review requested changes, or CI is
- *    red) go back to `in_progress` and re-run work so the feedback can actually be
+ *    red) go back to `working` and re-run work so the feedback can actually be
  *    addressed; the worker force-pushes the ticket's branch, so the existing PR
  *    updates and re-review sees a NEW diff (re-grading the same diff would just
  *    reject identically and burn every attempt).
  *  - other (transient) retries — deadline, dispatch error — re-run the current
- *    stage: `review` if a PR is already open, else `in_progress`.
+ *    stage: `reviewing` if a PR is already open, else `working`.
  * Always clears the dispatch handle — a retry starts a fresh worker.
  */
 const retryOrFail = (
@@ -269,13 +292,13 @@ const retryOrFail = (
 ): Effect.Effect<unknown, TicketNotFound> =>
   Effect.gen(function* () {
     const attempts = ticket.attempts + 1;
-    const retryState: Ticket['state'] = opts?.rework
-      ? 'in_progress'
+    const retryPhase: Ticket['phase'] = opts?.rework
+      ? 'working'
       : ticket.prNumber !== null
-        ? 'review'
-        : 'in_progress';
+        ? 'reviewing'
+        : 'working';
     const cleared = { workHandle: null, dispatchedAt: null } as const;
-    const to: Ticket['state'] = attempts >= retries ? 'failed' : retryState;
+    const to: Ticket['phase'] = attempts >= retries ? 'failed' : retryPhase;
     // The ONE place every retry-or-fail decision is logged, regardless of the
     // 4 call sites (work Failed, CI red, dispatch AgentFailed, review-rejected)
     // that route through here — each caller ALSO logs its own proximate cause
@@ -283,9 +306,11 @@ const retryOrFail = (
     // (retry vs exhausted) that the caller can't know without duplicating
     // `retries`/`attempts` bookkeeping.
     yield* Effect.logInfo(to === 'failed' ? 'attempts exhausted; failing' : 'retrying').pipe(
-      Effect.annotateLogs({ from: ticket.state, to, attempts, retries, reason }),
+      Effect.annotateLogs({ from: ticket.phase, to, attempts, retries, reason }),
     );
-    return yield* store.patch(ticket.id, { attempts, state: to, reason, ...cleared });
+    const patched = yield* store.patch(ticket.id, { attempts, phase: to, reason, ...cleared });
+    yield* store.appendEvents([transitionEvent(ticket.id, `phase: ${ticket.phase} -> ${to}`)]);
+    return patched;
   });
 
 /**
@@ -311,11 +336,12 @@ const settleFromPrState = (
         Effect.annotateLogs({ pr: prNumber, sha: prState.mergeSha }),
       );
       yield* store.patch(ticket.id, {
-        state: 'done',
+        phase: 'done',
         mergeSha: prState.mergeSha,
         workHandle: null,
         dispatchedAt: null,
       });
+      yield* store.appendEvents([transitionEvent(ticket.id, `phase: ${ticket.phase} -> done`)]);
       return true;
     }
     if (prState.state === 'closed') {
@@ -323,11 +349,12 @@ const settleFromPrState = (
         Effect.annotateLogs({ pr: prNumber }),
       );
       yield* store.patch(ticket.id, {
-        state: 'failed',
+        phase: 'failed',
         reason: 'pr-closed-unmerged',
         workHandle: null,
         dispatchedAt: null,
       });
+      yield* store.appendEvents([transitionEvent(ticket.id, `phase: ${ticket.phase} -> failed`)]);
       return true;
     }
     return false;
@@ -344,8 +371,195 @@ const stepTicket = (
     const models = modelsFor(config, ticket.target);
     const base = baseFor(config, ticket.target);
 
-    switch (ticket.state) {
-      case 'backlog': {
+    /**
+     * Poll the in-flight agent-worker a `working`/`reviewing` ticket dispatched
+     * (async dispatch+poll). Shared by both phases: the outcome tag (Work vs
+     * Review), not the phase, decides the harvest — a `Succeeded` Work advances
+     * to `reviewing`, a `Succeeded` Review verdict routes to `merging` (approve)
+     * or rework (request_changes), and `Failed` classifies rate-cap vs retry.
+     */
+    const pollInFlight = (handle: NonNullable<Ticket['workHandle']>) =>
+      Effect.gen(function* () {
+        // Deadline reaper: a worker past its deadline is cancelled + retried. This
+        // is the spend guardrail under the async model (a native Job deadline is
+        // the primary; this is the control-plane backstop).
+        const now = yield* Clock.currentTimeMillis;
+        if (
+          ticket.dispatchedAt !== null &&
+          now - ticket.dispatchedAt > config.workers.maxTtlSec * 1000
+        ) {
+          yield* Effect.logWarning('worker past deadline; cancelling + retrying');
+          yield* worker.cancel(handle);
+          yield* finalizeOpenRun(store, ticket.id, 'reaped', 'deadline-exceeded', null);
+          yield* retryOrFail(store, ticket, config.retries, 'deadline-exceeded');
+          yield* store.appendEvents([
+            failureEvent(ticket.id, 'deadline-exceeded; worker cancelled'),
+          ]);
+          return;
+        }
+
+        const status = yield* worker.poll(handle);
+        switch (status._tag) {
+          case 'Running':
+            return; // still in flight; next tick re-polls
+
+          case 'Failed': {
+            // Classify the worker-side failure like the old in-process mapping:
+            // a rate-cap gates the ticket (never counts an attempt); anything
+            // else retries.
+            if (RATE_CAP_RE.test(status.reason)) {
+              yield* Effect.logInfo('worker rate-capped; gated (no attempt spent)');
+              yield* finalizeOpenRun(store, ticket.id, 'failed', 'rate-capped', null);
+              yield* store.patch(ticket.id, {
+                conditions: [{ type: 'rate_capped' }],
+                reason: 'rate-capped',
+                workHandle: null,
+                dispatchedAt: null,
+              });
+              yield* store.appendEvents([
+                failureEvent(ticket.id, 'rate-capped'),
+                transitionEvent(ticket.id, 'condition set: rate_capped'),
+              ]);
+            } else {
+              yield* Effect.logWarning('worker failed; retrying or failing').pipe(
+                Effect.annotateLogs({ reason: status.reason }),
+              );
+              yield* finalizeOpenRun(store, ticket.id, 'failed', status.reason, null);
+              yield* retryOrFail(store, ticket, config.retries, `agent: ${status.reason}`);
+              yield* store.appendEvents([failureEvent(ticket.id, `AgentFailed: ${status.reason}`)]);
+            }
+            return;
+          }
+
+          case 'Succeeded': {
+            const outcome = status.outcome;
+            if (outcome._tag === 'Work') {
+              const work = outcome.result;
+              const finalizedRun = yield* finalizeSuccessOrLog(store, ticket, work.usage);
+              if (finalizedRun !== null)
+                yield* store.appendEvents(workCaptures(ticket.id, finalizedRun.id, work));
+
+              // Open the PR on first work; on a retry the fix is on the same branch.
+              const branch = branchFor(ticket);
+              if (ticket.prNumber === null) {
+                const pr = yield* forge.openPR({
+                  repo: ticket.target,
+                  branch,
+                  base,
+                  title: work.title,
+                  body: work.body,
+                });
+                yield* Effect.logInfo('opened PR; moving to reviewing').pipe(
+                  Effect.annotateLogs({ pr: pr.number }),
+                );
+                yield* store.patch(ticket.id, {
+                  branch,
+                  prNumber: pr.number,
+                  prId: pr.id,
+                  workedAttempt: ticket.attempts,
+                  phase: 'reviewing',
+                  workHandle: null,
+                  dispatchedAt: null,
+                });
+              } else {
+                yield* store.patch(ticket.id, {
+                  branch,
+                  workedAttempt: ticket.attempts,
+                  phase: 'reviewing',
+                  workHandle: null,
+                  dispatchedAt: null,
+                });
+              }
+              yield* store.appendEvents([
+                transitionEvent(ticket.id, `phase: ${ticket.phase} -> reviewing`),
+              ]);
+              return;
+            }
+
+            // Review outcome: persist its transcript, then route the verdict.
+            const review = outcome.result;
+            const reviewRun = yield* finalizeSuccessOrLog(store, ticket, review.usage);
+            if (review.transcript !== undefined)
+              yield* store.appendEvents([
+                {
+                  ticketId: ticket.id,
+                  runId: reviewRun?.id ?? null,
+                  boxId: null,
+                  source: 'opencode',
+                  ts: Date.now(),
+                  level: null,
+                  line: JSON.stringify(review.transcript),
+                },
+              ]);
+
+            // The verdict + WHY were previously invisible in `kubectl logs` — a
+            // `request_changes` looked identical to an approve until you went
+            // digging in the persisted transcript. The full untruncated reason
+            // stays in that transcript (`RunEvent` above); this line is just the
+            // log-signal slice of it.
+            yield* Effect.logInfo('review verdict').pipe(
+              Effect.annotateLogs({
+                pr: ticket.prNumber,
+                verdict: review.verdict,
+                reason: truncate(review.reason, REASON_LOG_MAX),
+              }),
+            );
+
+            if (review.verdict === 'request_changes') {
+              yield* retryOrFail(store, ticket, config.retries, review.reason, {
+                rework: true,
+              });
+              return;
+            }
+
+            if (ticket.prNumber === null) {
+              // Inconsistent: a review finished with no PR. Re-drive work.
+              yield* store.patch(ticket.id, {
+                phase: 'working',
+                workHandle: null,
+                dispatchedAt: null,
+              });
+              yield* store.appendEvents([
+                transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`),
+              ]);
+              return;
+            }
+
+            // approve → hand off to the `merging` phase (merged on the NEXT
+            // tick, idempotently, against forge ground truth) — never inline.
+            yield* Effect.logInfo('review approved; moving to merging').pipe(
+              Effect.annotateLogs({ pr: ticket.prNumber }),
+            );
+            yield* store.patch(ticket.id, {
+              phase: 'merging',
+              workHandle: null,
+              dispatchedAt: null,
+            });
+            yield* store.appendEvents([
+              transitionEvent(ticket.id, `phase: ${ticket.phase} -> merging`),
+            ]);
+            return;
+          }
+        }
+      });
+
+    // Generic gate rule (TOP, before any phase logic): a gated ticket never
+    // dispatches — this tick only handles condition clearing. `rate_capped`
+    // (the only condition today) clears immediately: the ticket keeps its
+    // pipeline slot (see selection.ts) and progresses on the next tick,
+    // preserving the old immediate re-pick semantics.
+    if (ticket.conditions.length > 0) {
+      const to = deriveStateFromPhase({ ...ticket, conditions: [] });
+      yield* Effect.logInfo('clearing rate_capped condition; re-picking ticket').pipe(
+        Effect.annotateLogs({ from: 'rate_capped', to }),
+      );
+      yield* store.patch(ticket.id, { conditions: [] });
+      yield* store.appendEvents([transitionEvent(ticket.id, 'condition cleared: rate_capped')]);
+      return;
+    }
+
+    switch (ticket.phase) {
+      case 'queued': {
         // The ONE admission gate for `workers.max` (Decision 1: caps the whole
         // pipeline, not just live Jobs) — every other transition below moves a
         // ticket between two states that already hold its slot, so it never
@@ -361,22 +575,31 @@ const stepTicket = (
         yield* Effect.logInfo('admitted from backlog').pipe(
           Effect.annotateLogs({ from: 'backlog', to: 'in_progress' }),
         );
-        yield* store.patch(ticket.id, { state: 'in_progress' });
+        yield* store.patch(ticket.id, { phase: 'working' });
+        yield* store.appendEvents([transitionEvent(ticket.id, 'phase: queued -> working')]);
         return;
       }
 
-      case 'in_progress': {
+      case 'working': {
+        // A handle means work is in flight — poll it (async dispatch+poll).
+        if (ticket.workHandle !== null) {
+          yield* pollInFlight(ticket.workHandle);
+          return;
+        }
+
         // Resume guard: this attempt's work already produced the open PR →
-        // advance to review rather than re-dispatching the agent (resumability).
+        // advance to reviewing rather than re-dispatching the agent (resumability).
         if (ticket.workedAttempt === ticket.attempts && ticket.prNumber !== null) {
-          yield* store.patch(ticket.id, { state: 'review' });
+          yield* store.patch(ticket.id, { phase: 'reviewing' });
+          yield* store.appendEvents([transitionEvent(ticket.id, 'phase: working -> reviewing')]);
           return;
         }
 
         // No admission check here: this ticket was already admitted at the
-        // `backlog` exit and has held its slot ever since (Decision 1).
-        // Dispatch the work agent-worker; store the reattach handle + dispatch time
-        // and move to `running`. The work runs out of band; we poll it each tick.
+        // `queued` exit and has held its slot ever since (Decision 1).
+        // Dispatch the work agent-worker; store the reattach handle + dispatch
+        // time (phase stays `working`). The work runs out of band; we poll it
+        // each tick.
         const branch = branchFor(ticket);
         const now = yield* Clock.currentTimeMillis;
         yield* recordDispatch(store, {
@@ -418,192 +641,24 @@ const stepTicket = (
         );
         yield* store.patch(ticket.id, {
           branch,
-          state: 'running',
           workHandle: handle,
           dispatchedAt: now,
         });
         return;
       }
 
-      case 'running': {
-        const handle = ticket.workHandle;
-        if (handle === null) {
-          // Inconsistent: running without a handle. Re-drive from the prior state.
-          yield* store.patch(ticket.id, {
-            state: ticket.prNumber !== null ? 'review' : 'in_progress',
-            workHandle: null,
-            dispatchedAt: null,
-          });
+      case 'reviewing': {
+        // A handle means the review agent is in flight — poll it.
+        if (ticket.workHandle !== null) {
+          yield* pollInFlight(ticket.workHandle);
           return;
         }
 
-        // Deadline reaper: a worker past its deadline is cancelled + retried. This
-        // is the spend guardrail under the async model (a native Job deadline is
-        // the primary; this is the control-plane backstop).
-        const now = yield* Clock.currentTimeMillis;
-        if (
-          ticket.dispatchedAt !== null &&
-          now - ticket.dispatchedAt > config.workers.maxTtlSec * 1000
-        ) {
-          yield* Effect.logWarning('worker past deadline; cancelling + retrying');
-          yield* worker.cancel(handle);
-          yield* finalizeOpenRun(store, ticket.id, 'reaped', 'deadline-exceeded', null);
-          yield* retryOrFail(store, ticket, config.retries, 'deadline-exceeded');
-          yield* store.appendEvents([
-            failureEvent(ticket.id, 'deadline-exceeded; worker cancelled'),
-          ]);
-          return;
-        }
-
-        const status = yield* worker.poll(handle);
-        switch (status._tag) {
-          case 'Running':
-            return; // still in flight; next tick re-polls
-
-          case 'Failed': {
-            // Classify the worker-side failure like the old in-process mapping:
-            // a rate-cap requeues (never counts an attempt); anything else retries.
-            if (RATE_CAP_RE.test(status.reason)) {
-              yield* Effect.logInfo('worker rate-capped; requeued (no attempt spent)');
-              yield* finalizeOpenRun(store, ticket.id, 'failed', 'rate-capped', null);
-              yield* store.patch(ticket.id, {
-                state: 'rate_capped',
-                reason: 'rate-capped',
-                workHandle: null,
-                dispatchedAt: null,
-              });
-              yield* store.appendEvents([failureEvent(ticket.id, 'rate-capped')]);
-            } else {
-              yield* Effect.logWarning('worker failed; retrying or failing').pipe(
-                Effect.annotateLogs({ reason: status.reason }),
-              );
-              yield* finalizeOpenRun(store, ticket.id, 'failed', status.reason, null);
-              yield* retryOrFail(store, ticket, config.retries, `agent: ${status.reason}`);
-              yield* store.appendEvents([failureEvent(ticket.id, `AgentFailed: ${status.reason}`)]);
-            }
-            return;
-          }
-
-          case 'Succeeded': {
-            const outcome = status.outcome;
-            if (outcome._tag === 'Work') {
-              const work = outcome.result;
-              const finalizedRun = yield* finalizeSuccessOrLog(store, ticket, work.usage);
-              if (finalizedRun !== null)
-                yield* store.appendEvents(workCaptures(ticket.id, finalizedRun.id, work));
-
-              // Open the PR on first work; on a retry the fix is on the same branch.
-              const branch = branchFor(ticket);
-              if (ticket.prNumber === null) {
-                const pr = yield* forge.openPR({
-                  repo: ticket.target,
-                  branch,
-                  base,
-                  title: work.title,
-                  body: work.body,
-                });
-                yield* Effect.logInfo('opened PR; moving to review').pipe(
-                  Effect.annotateLogs({ pr: pr.number }),
-                );
-                yield* store.patch(ticket.id, {
-                  branch,
-                  prNumber: pr.number,
-                  prId: pr.id,
-                  workedAttempt: ticket.attempts,
-                  state: 'review',
-                  workHandle: null,
-                  dispatchedAt: null,
-                });
-              } else {
-                yield* store.patch(ticket.id, {
-                  branch,
-                  workedAttempt: ticket.attempts,
-                  state: 'review',
-                  workHandle: null,
-                  dispatchedAt: null,
-                });
-              }
-              return;
-            }
-
-            // Review outcome: persist its transcript, then merge or retry.
-            const review = outcome.result;
-            const reviewRun = yield* finalizeSuccessOrLog(store, ticket, review.usage);
-            if (review.transcript !== undefined)
-              yield* store.appendEvents([
-                {
-                  ticketId: ticket.id,
-                  runId: reviewRun?.id ?? null,
-                  boxId: null,
-                  source: 'opencode',
-                  ts: Date.now(),
-                  level: null,
-                  line: JSON.stringify(review.transcript),
-                },
-              ]);
-
-            // The verdict + WHY were previously invisible in `kubectl logs` — a
-            // `request_changes` looked identical to an approve until you went
-            // digging in the persisted transcript. The full untruncated reason
-            // stays in that transcript (`RunEvent` above); this line is just the
-            // log-signal slice of it.
-            yield* Effect.logInfo('review verdict').pipe(
-              Effect.annotateLogs({
-                pr: ticket.prNumber,
-                verdict: review.verdict,
-                reason: truncate(review.reason, REASON_LOG_MAX),
-              }),
-            );
-
-            if (review.verdict === 'request_changes') {
-              yield* retryOrFail(store, ticket, config.retries, review.reason, {
-                rework: true,
-              });
-              return;
-            }
-
-            const prNumber = ticket.prNumber;
-            if (prNumber === null) {
-              // Inconsistent: a review finished with no PR. Re-drive work.
-              yield* store.patch(ticket.id, {
-                state: 'in_progress',
-                workHandle: null,
-                dispatchedAt: null,
-              });
-              return;
-            }
-
-            // Ground truth before merging (idempotent merge): a prior
-            // `forge.merge` may already have succeeded on GitHub — either the
-            // control plane crashed before the `done` patch landed, or the
-            // merge call itself succeeded remotely but errored client-side
-            // (network timeout, ambiguous 405/409). Re-observing here settles
-            // from that instead of attempting a duplicate merge.
-            const preMergeState = yield* forge.prState({ repo: ticket.target, prNumber });
-            if (yield* settleFromPrState(store, ticket, prNumber, preMergeState)) return;
-
-            // approve + green → auto-merge → done.
-            const merged = yield* forge.merge({ repo: ticket.target, prNumber });
-            yield* Effect.logInfo('merged PR; ticket done').pipe(
-              Effect.annotateLogs({ pr: prNumber, sha: merged.sha }),
-            );
-            yield* store.patch(ticket.id, {
-              state: 'done',
-              mergeSha: merged.sha,
-              workHandle: null,
-              dispatchedAt: null,
-            });
-            return;
-          }
-        }
-        return;
-      }
-
-      case 'review': {
         const prNumber = ticket.prNumber;
         if (prNumber === null) {
           // Inconsistent: no PR to review. Re-run work.
-          yield* store.patch(ticket.id, { state: 'in_progress' });
+          yield* store.patch(ticket.id, { phase: 'working' });
+          yield* store.appendEvents([transitionEvent(ticket.id, 'phase: reviewing -> working')]);
           return;
         }
 
@@ -639,10 +694,11 @@ const stepTicket = (
         }
 
         // No admission check here either: this ticket has held its slot since
-        // the `backlog` exit admitted it (Decision 1).
-        // CI green → dispatch the review agent-worker (grades the diff vs the ticket body) and
-        // move to `running`; the verdict is harvested when its poll succeeds. The
-        // control-plane never runs opencode — the worker does (FIX 1).
+        // the `queued` exit admitted it (Decision 1).
+        // CI green → dispatch the review agent-worker (grades the diff vs the
+        // ticket body); phase stays `reviewing`, the verdict is harvested when
+        // its poll succeeds. The control-plane never runs opencode — the worker
+        // does (FIX 1).
         yield* Effect.logInfo('CI green; dispatching review agent').pipe(
           Effect.annotateLogs({ pr: prNumber }),
         );
@@ -678,47 +734,80 @@ const stepTicket = (
           Effect.annotateLogs({ pr: prNumber, runId: handle }),
         );
         yield* store.patch(ticket.id, {
-          state: 'running',
           workHandle: handle,
           dispatchedAt: now,
         });
         return;
       }
 
-      case 'rate_capped': {
-        // (Decision 2b) A rate_capped ticket is mid-pipeline — it still holds its
-        // workers.max slot (see selection.ts's PIPELINE_OCCUPIED) — and was only
-        // ever asked to wait out a provider rate limit, not to give up its place.
-        // Re-pick it immediately: no PR yet → back to work; PR already open →
-        // back to review (CI/review dispatch picks up right where it left off).
-        const to: Ticket['state'] = ticket.prNumber !== null ? 'review' : 'in_progress';
-        yield* Effect.logInfo('re-picking rate-capped ticket').pipe(
-          Effect.annotateLogs({ from: 'rate_capped', to }),
+      case 'merging': {
+        const prNumber = ticket.prNumber;
+        if (prNumber === null) {
+          // Inconsistent: nothing to merge. Re-drive work.
+          yield* store.patch(ticket.id, {
+            phase: 'working',
+            workHandle: null,
+            dispatchedAt: null,
+          });
+          yield* store.appendEvents([transitionEvent(ticket.id, 'phase: merging -> working')]);
+          return;
+        }
+
+        // Ground truth before merging (idempotent merge): a prior `forge.merge`
+        // may already have succeeded on GitHub — either the control plane
+        // crashed before the `done` patch landed, or the merge call itself
+        // succeeded remotely but errored client-side (network timeout,
+        // ambiguous 405/409). Re-observing here settles from that instead of
+        // attempting a duplicate merge.
+        const prState = yield* forge.prState({ repo: ticket.target, prNumber });
+        if (yield* settleFromPrState(store, ticket, prNumber, prState)) return;
+
+        // approved + green → auto-merge → done.
+        const merged = yield* forge.merge({ repo: ticket.target, prNumber });
+        yield* Effect.logInfo('merged PR; ticket done').pipe(
+          Effect.annotateLogs({ pr: prNumber, sha: merged.sha }),
         );
-        yield* store.patch(ticket.id, { state: to });
+        yield* store.patch(ticket.id, {
+          phase: 'done',
+          mergeSha: merged.sha,
+          workHandle: null,
+          dispatchedAt: null,
+        });
+        yield* store.appendEvents([transitionEvent(ticket.id, 'phase: merging -> done')]);
         return;
       }
 
-      default:
-        return; // done | failed — terminal
+      case 'verifying':
+        // Unreachable today — nothing transitions INTO `verifying` until the
+        // wave-3 post-merge verification ticket (T7a) fills it in. Defensive
+        // no-op: a ticket found here (bad hand-edit) just waits, never crashes.
+        return;
+
+      case 'done':
+      case 'failed':
+        return; // absorbing — terminal phases never move again
     }
   }).pipe(
-    // Typed failures never crash the loop — they map to ticket state (tenet: never crash).
-    // `dispatch` can fail synchronously (RateCapped / AgentFailed) before the ticket
-    // reaches `running`; the async worker-side failure is the `Failed` poll branch above.
+    // Typed failures never crash the loop — they map to ticket phase/conditions
+    // (tenet: never crash). `dispatch` can fail synchronously (RateCapped /
+    // AgentFailed) before a handle is stored; the async worker-side failure is
+    // the `Failed` poll branch above.
     Effect.catchTags({
       RateCapped: (_: RateCapped) =>
         Effect.flatMap(TicketStore, (s) =>
           Effect.zipRight(
-            Effect.logInfo('dispatch rate-capped; requeued (no attempt spent)'),
+            Effect.logInfo('dispatch rate-capped; gated (no attempt spent)'),
             Effect.zipRight(
               s.patch(ticket.id, {
-                state: 'rate_capped',
+                conditions: [{ type: 'rate_capped' }],
                 reason: 'rate-capped',
                 workHandle: null,
                 dispatchedAt: null,
               }),
-              s.appendEvents([failureEvent(ticket.id, 'rate-capped')]),
+              s.appendEvents([
+                failureEvent(ticket.id, 'rate-capped'),
+                transitionEvent(ticket.id, 'condition set: rate_capped'),
+              ]),
             ),
           ),
         ),
@@ -739,18 +828,24 @@ const stepTicket = (
             ),
           ),
         ),
+      // Merge contention is NOT a work-quality failure: bounce back to
+      // `working` with `workedAttempt` cleared (forces a real rework dispatch
+      // that rebases the branch) and NO attempt spent.
       MergeConflict: (_: MergeConflict) =>
         Effect.flatMap(TicketStore, (s) =>
           Effect.zipRight(
-            Effect.logWarning('merge conflict; bouncing ticket back to in_progress'),
+            Effect.logWarning('merge conflict; bouncing ticket back to working'),
             Effect.zipRight(
               s.patch(ticket.id, {
-                state: 'in_progress',
+                phase: 'working',
                 workedAttempt: null,
                 workHandle: null,
                 dispatchedAt: null,
               }),
-              s.appendEvents([failureEvent(ticket.id, 'MergeConflict')]),
+              s.appendEvents([
+                failureEvent(ticket.id, 'MergeConflict'),
+                transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`),
+              ]),
             ),
           ),
         ),
@@ -760,17 +855,15 @@ const stepTicket = (
     Effect.catchTag('TicketNotFound', () => Effect.void),
     // Every log emitted inside this step carries the ticket + target, so a line in
     // `kubectl logs` is self-identifying (which ticket, which repo) without grepping.
-    Effect.annotateLogs({ ticket: ticket.id, target: ticket.target, state: ticket.state }),
+    // `state` (the legacy projection) rides along for log continuity.
+    Effect.annotateLogs({
+      ticket: ticket.id,
+      target: ticket.target,
+      phase: ticket.phase,
+      state: ticket.state,
+    }),
     Effect.asVoid,
   );
-
-const NON_TERMINAL: ReadonlyArray<Ticket['state']> = [
-  'backlog',
-  'in_progress',
-  'running',
-  'review',
-  'rate_capped',
-];
 
 /**
  * Advance every non-terminal ticket by one transition. Stepped SEQUENTIALLY
@@ -806,7 +899,7 @@ export const step: Effect.Effect<void, never, TicketStore | Forge | AgentWorker 
         : Effect.logInfo('workers.max backlog pressure cleared');
     }
 
-    const active = tickets.filter((t) => NON_TERMINAL.includes(t.state));
+    const active = tickets.filter((t) => !isTerminalPhase(t.phase));
     yield* Effect.forEach(active, stepTicket, { discard: true });
   });
 
