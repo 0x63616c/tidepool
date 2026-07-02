@@ -1,5 +1,8 @@
+import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
-import { Cause, Effect, Exit } from 'effect';
+import { Cause, Duration, Effect, Exit, Fiber, TestClock } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import type { RunnerConfig } from './protocol.ts';
 import {
@@ -206,6 +209,151 @@ describe('makeRunner', () => {
     const { format } = makeFormat();
     const { opencode } = makeOpencode();
     const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
+    assert.strictEqual(
+      Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof GitFailed,
+      true,
+    );
+  });
+
+  it.effect('retries a transient clone failure and succeeds on a later attempt', () =>
+    Effect.gen(function* () {
+      const calls: GitCalls = { ops: [] };
+      let cloneAttempts = 0;
+      const { git } = makeGit(
+        {
+          clone: async () => {
+            calls.ops.push('clone');
+            cloneAttempts += 1;
+            if (cloneAttempts === 1) {
+              throw new Error('fatal: unable to access: Could not resolve host: github.com');
+            }
+          },
+        },
+        calls,
+      );
+      const { format } = makeFormat({}, calls);
+      const { opencode } = makeOpencode();
+
+      const fiber = yield* makeRunner({ git, opencode, format })(config).pipe(Effect.fork);
+      yield* TestClock.adjust(Duration.seconds(1));
+      const result = yield* Fiber.join(fiber);
+
+      assert.strictEqual(result.commitSha, 'deadbeef');
+      assert.strictEqual(cloneAttempts, 2);
+    }),
+  );
+
+  it.effect('cleans a partial clone directory before retrying clone', () =>
+    Effect.gen(function* () {
+      const calls: GitCalls = { ops: [] };
+      const dir = yield* Effect.tryPromise(() => mkdtemp(join(tmpdir(), 'tp-clone-retry-')));
+      let cloneAttempts = 0;
+      let sawCleanRetryDir = false;
+      const { git } = makeGit(
+        {
+          clone: async () => {
+            calls.ops.push('clone');
+            cloneAttempts += 1;
+            if (cloneAttempts === 1) {
+              await mkdir(dir, { recursive: true });
+              await writeFile(join(dir, 'partial-pack'), 'incomplete');
+              throw new Error('fatal: early EOF');
+            }
+            const entries = await readdir(dir);
+            sawCleanRetryDir = entries.length === 0;
+          },
+        },
+        calls,
+      );
+      const { format } = makeFormat({}, calls);
+      const { opencode } = makeOpencode();
+
+      const fiber = yield* makeRunner({ git, opencode, format })({ ...config, dir }).pipe(
+        Effect.fork,
+      );
+      yield* TestClock.adjust(Duration.seconds(1));
+      const result = yield* Fiber.join(fiber);
+
+      assert.strictEqual(result.commitSha, 'deadbeef');
+      assert.strictEqual(cloneAttempts, 2);
+      assert.strictEqual(sawCleanRetryDir, true);
+    }),
+  );
+
+  it.effect('retries a transient push failure and succeeds on a later attempt', () =>
+    Effect.gen(function* () {
+      const calls: GitCalls = { ops: [] };
+      let pushAttempts = 0;
+      const { git } = makeGit(
+        {
+          push: async () => {
+            calls.ops.push('push');
+            pushAttempts += 1;
+            if (pushAttempts === 1) {
+              throw new Error('fatal: unable to access: Failed to connect to github.com');
+            }
+          },
+        },
+        calls,
+      );
+      const { format } = makeFormat({}, calls);
+      const { opencode } = makeOpencode();
+
+      const fiber = yield* makeRunner({ git, opencode, format })(config).pipe(Effect.fork);
+      yield* TestClock.adjust(Duration.seconds(1));
+      const result = yield* Fiber.join(fiber);
+
+      assert.strictEqual(result.commitSha, 'deadbeef');
+      assert.strictEqual(pushAttempts, 2);
+    }),
+  );
+
+  it.effect('fails clone after three total network attempts', () =>
+    Effect.gen(function* () {
+      const calls: GitCalls = { ops: [] };
+      let cloneAttempts = 0;
+      const { git } = makeGit(
+        {
+          clone: async () => {
+            calls.ops.push('clone');
+            cloneAttempts += 1;
+            throw new Error('fatal: unable to access: Could not resolve host: github.com');
+          },
+        },
+        calls,
+      );
+      const { format } = makeFormat({}, calls);
+      const { opencode } = makeOpencode();
+
+      const fiber = yield* makeRunner({ git, opencode, format })(config).pipe(
+        Effect.exit,
+        Effect.fork,
+      );
+      yield* TestClock.adjust(Duration.seconds(3));
+      const exit = yield* Fiber.join(fiber);
+
+      assert.strictEqual(cloneAttempts, 3);
+      assert.strictEqual(
+        Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof GitFailed,
+        true,
+      );
+    }),
+  );
+
+  it('does not retry local git operations', async () => {
+    let branchAttempts = 0;
+    const { git } = makeGit({
+      checkoutBranch: async () => {
+        branchAttempts += 1;
+        throw new Error('local checkout failed');
+      },
+    });
+    const { format } = makeFormat();
+    const { opencode } = makeOpencode();
+
+    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
+
+    assert.strictEqual(branchAttempts, 1);
     assert.strictEqual(
       Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof GitFailed,
       true,
