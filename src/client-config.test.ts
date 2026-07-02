@@ -1,13 +1,19 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BunContext } from '@effect/platform-bun';
 import { afterEach, beforeEach, describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import {
   type ClientConfig,
+  type ClientContext,
   contextNames,
   deleteContext,
   describeContext,
   isSerializableValue,
   isValidContextName,
   parseClientConfig,
+  resolveBaseUrl,
   resolveContext,
   serializeClientConfig,
   setCurrentContext,
@@ -23,7 +29,6 @@ url = "http://127.0.0.1:8080"
 namespace = "core"
 service = "reconciler"
 remote-port = 8080
-local-port = 8080
 
 [contexts.local]
 kind = "sqlite"
@@ -39,7 +44,7 @@ describe('parseClientConfig', () => {
     if (prod?.kind === 'http') {
       expect(prod.url).toBe('http://127.0.0.1:8080');
       expect(prod.portForward?.service).toBe('reconciler');
-      expect(prod.portForward?.localPort).toBe(8080);
+      expect(prod.portForward?.remotePort).toBe(8080);
     }
   });
 });
@@ -149,7 +154,6 @@ describe('describeContext', () => {
           namespace: 'core',
           service: 'reconciler',
           remotePort: 8080,
-          localPort: 8080,
         },
       }),
     ).toBe('http → port-forward core/reconciler:8080');
@@ -180,4 +184,65 @@ describe('config write-path hardening (review fixes)', () => {
     expect(isSerializableValue('http://a"b')).toBe(false);
     expect(isSerializableValue('line\nbreak')).toBe(false);
   });
+});
+
+describe('resolveBaseUrl (ephemeral local port, tckt_39af8lic1l)', () => {
+  // A fake `kubectl` on PATH stands in for the real binary: it prints the same
+  // "Forwarding from 127.0.0.1:NNNNN -> <remote>" readiness line real kubectl
+  // does, picking NNNNN from its own pid (so two concurrent fakes never agree
+  // on a port — a stand-in for the OS assigning a free ephemeral port), then
+  // idles until killed (mirrors a real tunnel's lifetime).
+  let binDir: string;
+  let origPath: string | undefined;
+
+  beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), 'fake-kubectl-'));
+    const script = `#!/usr/bin/env bash
+last="\${@: -1}"
+remote="\${last##*:}"
+port=$(( ($$ % 20000) + 20000 ))
+echo "Forwarding from 127.0.0.1:\${port} -> \${remote}"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+`;
+    writeFileSync(join(binDir, 'kubectl'), script, { mode: 0o755 });
+    chmodSync(join(binDir, 'kubectl'), 0o755);
+    origPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${origPath ?? ''}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  const ctxOf = (name: string): Extract<ClientContext, { kind: 'http' }> => ({
+    name,
+    kind: 'http',
+    url: 'http://127.0.0.1:8080',
+    portForward: { namespace: 'core', service: 'reconciler', remotePort: 8080 },
+  });
+
+  it.effect('parses the actual bound port out of the forward, not a fixed value', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const url = yield* resolveBaseUrl(ctxOf('a'));
+        expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+        // The fake never binds 8080 itself — proves we read kubectl's own
+        // stdout rather than echoing back the (now-removed) fixed config port.
+        expect(url).not.toBe('http://127.0.0.1:8080');
+      }),
+    ).pipe(Effect.provide(BunContext.layer)),
+  );
+
+  it.effect('two concurrent resolves bind different local ports (no orphan collision)', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const [a, b] = yield* Effect.all([resolveBaseUrl(ctxOf('a')), resolveBaseUrl(ctxOf('b'))], {
+          concurrency: 'unbounded',
+        });
+        expect(a).not.toBe(b);
+      }),
+    ).pipe(Effect.provide(BunContext.layer)),
+  );
 });

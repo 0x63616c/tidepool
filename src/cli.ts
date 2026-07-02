@@ -464,9 +464,8 @@ const contextSetCommand = Command.make(
     namespace: Options.text('namespace').pipe(Options.optional),
     service: Options.text('service').pipe(Options.optional),
     remotePort: Options.integer('remote-port').pipe(Options.withDefault(8080)),
-    localPort: Options.integer('local-port').pipe(Options.optional),
   },
-  ({ kind, localPort, name, namespace, remotePort, service, url }) =>
+  ({ kind, name, namespace, remotePort, service, url }) =>
     loadClientConfig.pipe(
       Effect.flatMap((config): Effect.Effect<void, ClientConfigError, FileSystem.FileSystem> => {
         // Name must survive the `[contexts.<name>]` grammar (else it vanishes on reload).
@@ -496,19 +495,14 @@ const contextSetCommand = Command.make(
             'tp context set prod --namespace core --service reconciler',
           );
         if (pf && Option.isSome(namespace) && Option.isSome(service)) {
-          const lp = Option.getOrElse(localPort, () => remotePort);
           const ctx: ClientContext = {
-            // The forward serves the derived localhost url; storing that (not a
-            // dead user url) keeps describeContext / resolveBaseUrl consistent.
+            // The local side is always ephemeral (resolved fresh per command —
+            // see resolveBaseUrl), so this url is never read for a port-forward
+            // context; it's a placeholder to satisfy the schema.
             name,
             kind: 'http',
-            url: `http://127.0.0.1:${lp}`,
-            portForward: {
-              namespace: namespace.value,
-              service: service.value,
-              remotePort,
-              localPort: lp,
-            },
+            url: `http://127.0.0.1:${remotePort}`,
+            portForward: { namespace: namespace.value, service: service.value, remotePort },
           };
           return writeSet(config, ctx, name);
         }
@@ -634,11 +628,20 @@ if (import.meta.main) {
   const guarded = cli(process.argv).pipe(
     // Domain errors that escaped a command → actionable one-liners, not stacks.
     Effect.catchTags({
+      // The local side is ephemeral (kubectl/OS-assigned), so "address already
+      // in use" should never come from our own prior forward — but guard
+      // defensively rather than blaming the VPN when it's actually a port
+      // fight with some unrelated process.
       PortForwardError: (e) =>
-        renderFailure(
-          `port-forward failed: ${e.message}`,
-          'check the VPN + `tp context current`, or use `tp --context local`',
-        ),
+        /address already in use/i.test(e.message)
+          ? renderFailure(
+              `port-forward failed: ${e.message}`,
+              'the local port kubectl picked is already taken by another process — retry the command',
+            )
+          : renderFailure(
+              `port-forward failed: ${e.message}`,
+              'check the VPN + `tp context current`, or use `tp --context local`',
+            ),
       ClientConfigError: (e) =>
         renderFailure(
           `config error: ${e.message}`,

@@ -18,16 +18,18 @@ import { Data, Deferred, Duration, Effect, Schema, type Scope, Stream } from 'ef
  *   namespace = "core"
  *   service = "reconciler"
  *   remote-port = 8080
- *   local-port = 8080
  *   [contexts.local]
  *   kind = "sqlite"
+ *
+ * The local side of the forward is always ephemeral (kubectl picks a free
+ * port; there is no `local-port` field) — that's what makes concurrent `tp`
+ * invocations, and orphaned tunnels from a killed prior one, harmless.
  */
 
 export const PortForward = Schema.Struct({
   namespace: Schema.String,
   service: Schema.String,
   remotePort: Schema.Number,
-  localPort: Schema.Number,
 });
 export type PortForward = typeof PortForward.Type;
 
@@ -119,7 +121,6 @@ export const parseClientConfig = (text: string): ClientConfig => {
               namespace: fields.namespace,
               service: fields.service,
               remotePort: portNum(fields['remote-port'], 8080),
-              localPort: portNum(fields['local-port'] ?? fields['remote-port'], 8080),
             }
           : undefined;
       contexts[name] = { name, kind: 'http', url: fields.url, ...(pf ? { portForward: pf } : {}) };
@@ -239,7 +240,6 @@ export const serializeClientConfig = (config: ClientConfig): string => {
           `namespace = "${ctx.portForward.namespace}"`,
           `service = "${ctx.portForward.service}"`,
           `remote-port = ${ctx.portForward.remotePort}`,
-          `local-port = ${ctx.portForward.localPort}`,
         );
       }
     }
@@ -276,12 +276,24 @@ export const writeClientConfig = (
     yield* fs.rename(tmp, path).pipe(Effect.mapError(fail));
   });
 
+/** Matches kubectl's readiness line, e.g. `Forwarding from 127.0.0.1:54321 -> 8080`. */
+const FORWARDING_RE = /Forwarding from [^\s:]+:(\d+) ->/;
+
 /**
  * Establish the base URL for an http context, opening an invisible
  * `kubectl port-forward` first when the context declares one — the operator never
  * runs the tunnel by hand. Scoped: the forward is killed when the scope closes
  * (i.e. when the one-shot command finishes). Reaches the pod through the
  * /32-firewalled apiserver, so nothing new is exposed (tenet 9).
+ *
+ * The local side is always ephemeral (`:<remotePort>`, local side 0 — kubectl/the
+ * OS picks a free port) rather than a fixed configured port: a fixed port meant
+ * (a) an orphaned forward from a non-graceful prior exit (Ctrl-C, killed
+ * terminal — the scope finalizer that kills kubectl never runs) permanently
+ * squats on it, and (b) two concurrent `tp` invocations always collided. Both
+ * are moot once every invocation gets its own free port. The actual bound port
+ * is parsed out of kubectl's own "Forwarding from" stdout line — it is the only
+ * source of truth for what the OS actually assigned.
  */
 export const resolveBaseUrl = (
   ctx: Extract<ClientContext, { kind: 'http' }>,
@@ -294,32 +306,32 @@ export const resolveBaseUrl = (
     '-n',
     pf.namespace,
     `svc/${pf.service}`,
-    `${pf.localPort}:${pf.remotePort}`,
+    `:${pf.remotePort}`,
   );
-  const marker = 'Forwarding from';
   return Effect.gen(function* () {
     const proc = yield* Command.start(cmd).pipe(
       Effect.mapError((e) => new PortForwardError({ message: String(e) })),
     );
-    const ready = yield* Deferred.make<void>();
+    const boundPort = yield* Deferred.make<number>();
     // CRITICAL: keep draining kubectl's stdout for the whole tunnel lifetime.
     // kubectl logs a line per proxied connection ("Handling connection for …");
     // if we stop reading, its stdout pipe fills / closes and kubectl dies with
     // SIGPIPE exactly when the first request arrives ("socket closed
-    // unexpectedly"). A forked drain that never ends avoids that, and signals
-    // readiness on the "Forwarding from" line.
+    // unexpectedly"). A forked drain that never ends avoids that, and extracts
+    // the actually-bound local port off the "Forwarding from" line.
     yield* proc.stdout
       .pipe(
         Stream.decodeText(),
         Stream.splitLines,
-        Stream.runForEach((l) =>
-          l.includes(marker) ? Deferred.succeed(ready, undefined) : Effect.void,
-        ),
+        Stream.runForEach((l) => {
+          const port = FORWARDING_RE.exec(l)?.[1];
+          return port !== undefined ? Deferred.succeed(boundPort, Number(port)) : Effect.void;
+        }),
       )
       .pipe(Effect.forkScoped);
     // Ready when the tunnel binds; fail fast if kubectl exits first (bad svc,
     // RBAC, VPN down) or nothing binds within the deadline.
-    yield* Deferred.await(ready).pipe(
+    const port = yield* Deferred.await(boundPort).pipe(
       Effect.raceFirst(
         proc.exitCode.pipe(
           Effect.mapError((e) => new PortForwardError({ message: String(e) })),
@@ -338,6 +350,6 @@ export const resolveBaseUrl = (
           new PortForwardError({ message: 'timed out opening kubectl port-forward' }),
       }),
     );
-    return `http://127.0.0.1:${pf.localPort}`;
+    return `http://127.0.0.1:${port}`;
   });
 };
