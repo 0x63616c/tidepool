@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, HashMap, Logger, Schema } from 'effect';
-import { describeConfig, makeAgentWorkerProgram } from './agent-worker.ts';
+import { describeConfig, makeAgentWorkerProgram, makeJsonStderrLogger } from './agent-worker.ts';
 import type { OpencodePort } from './opencode-session.ts';
 import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
 import type { FormatPort, GitPort } from './runner-core.ts';
@@ -190,6 +190,61 @@ describe('describeConfig', () => {
       describeConfig(decode(reviewConfig)),
       'review run: dir=/tmp/tp-review-x model=openai/gpt-5.4-mini prompt=16 chars',
     );
+  });
+});
+
+/**
+ * The reconciler runs `Logger.json` (see `daemon.ts`) so every log line is
+ * structured JSON with a timestamp — this gives the worker the same shape.
+ * We can't use `Logger.json` verbatim: its built-in `jsonLogger` writes via
+ * `console.log` (stdout), which would corrupt the one-line result contract
+ * (`emit` is the ONLY thing allowed on stdout). `makeJsonStderrLogger` reuses
+ * the same JSON formatting (`Logger.jsonLogger`, the pure string-producing
+ * half) but redirects it to an injected sink so it can be pointed at stderr
+ * in production and captured directly in a test.
+ */
+describe('makeJsonStderrLogger', () => {
+  it('writes one JSON line per log entry, with a timestamp field and the annotations attached', async () => {
+    const lines: string[] = [];
+    const logger = makeJsonStderrLogger((line) => lines.push(line));
+    await Effect.runPromise(
+      Effect.logInfo('hello').pipe(
+        Effect.annotateLogs({ kind: 'tool-call', tool: 'bash' }),
+        Effect.provide(Logger.replace(Logger.defaultLogger, logger)),
+      ),
+    );
+    assert.strictEqual(lines.length, 1);
+    const [line] = lines;
+    assert.ok(line !== undefined);
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    assert.strictEqual(parsed.message, 'hello');
+    assert.strictEqual(typeof parsed.timestamp, 'string');
+    assert.strictEqual((parsed.annotations as Record<string, unknown>).kind, 'tool-call');
+    assert.strictEqual((parsed.annotations as Record<string, unknown>).tool, 'bash');
+  });
+
+  it('never writes to stdout — only through the injected sink', async () => {
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    let stdoutWrites = 0;
+    process.stdout.write = ((): boolean => {
+      stdoutWrites += 1;
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await Effect.runPromise(
+        Effect.logInfo('hello').pipe(
+          Effect.provide(
+            Logger.replace(
+              Logger.defaultLogger,
+              makeJsonStderrLogger(() => {}),
+            ),
+          ),
+        ),
+      );
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+    assert.strictEqual(stdoutWrites, 0);
   });
 });
 

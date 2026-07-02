@@ -328,9 +328,9 @@ describe('DEFAULT_POLL_INTERVAL_MS', () => {
  * repro) — zero session/tool events — so `collectEvents`'s SSE-based logging
  * goes silent for the whole session. `diffMessages` is the pure reducer behind
  * a poll-based replacement: given the part-id -> last-logged-signature map and
- * the latest full `GET /session/:id/message` snapshot, it returns log lines
- * only for parts that are new or whose status changed, so a poller built on it
- * never re-logs an unchanged part.
+ * the latest full `GET /session/:id/message` snapshot, it returns structured
+ * transcript entries only for parts that are new or whose status changed, so
+ * a poller built on it never re-logs an unchanged part.
  */
 describe('diffMessages', () => {
   const toolPart = (
@@ -344,86 +344,223 @@ describe('diffMessages', () => {
     tool,
     state: { status, ...extra },
   });
+  const messages = (r: ReturnType<typeof diffMessages>) => r.entries.map((e) => e.message);
 
-  it('emits no lines for an empty snapshot', () => {
-    const { lines, seen } = diffMessages(new Map(), []);
-    assert.deepStrictEqual(lines, []);
+  it('emits no entries for an empty snapshot', () => {
+    const { entries, seen } = diffMessages(new Map(), []);
+    assert.deepStrictEqual(entries, []);
     assert.strictEqual(seen.size, 0);
   });
 
-  it('emits one line for a brand-new part', () => {
+  it('emits one entry for a brand-new part', () => {
     const snapshot = [{ info: {}, parts: [toolPart('p1', 'bash', 'running')] }];
-    const { lines, seen } = diffMessages(new Map(), snapshot);
-    assert.deepStrictEqual(lines, ['tool bash running']);
-    assert.strictEqual(seen.get('p1'), 'tool:running');
+    const result = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(messages(result), ['tool bash running']);
+    assert.strictEqual(result.seen.get('p1'), 'tool:running:0');
   });
 
   it('re-logs a part whose status changed, plus a genuinely new part, in one pass', () => {
-    const seen1 = new Map([['p1', 'tool:running']]);
+    const seen1 = new Map([['p1', 'tool:running:0']]);
     const snapshot = [
       { info: {}, parts: [toolPart('p1', 'bash', 'completed', { title: 'ls' })] },
       { info: {}, parts: [toolPart('p2', 'write', 'running')] },
     ];
-    const { lines, seen: seen2 } = diffMessages(seen1, snapshot);
-    assert.deepStrictEqual(lines, ['tool bash completed — ls', 'tool write running']);
-    assert.strictEqual(seen2.get('p1'), 'tool:completed');
-    assert.strictEqual(seen2.get('p2'), 'tool:running');
+    const result = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(messages(result), ['tool bash completed — ls', 'tool write running']);
+    assert.strictEqual(result.seen.get('p1'), 'tool:completed:0');
+    assert.strictEqual(result.seen.get('p2'), 'tool:running:0');
   });
 
   it('does not re-log a part whose status is unchanged from the last poll', () => {
     const snapshot = [{ info: {}, parts: [toolPart('p1', 'bash', 'completed', { title: 'ls' })] }];
-    const seen1 = new Map([['p1', 'tool:completed']]);
-    const { lines } = diffMessages(seen1, snapshot);
-    assert.deepStrictEqual(lines, []);
+    const seen1 = new Map([['p1', 'tool:completed:0']]);
+    const { entries } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(entries, []);
   });
 
   it('is total over malformed/unknown input — never throws', () => {
     assert.doesNotThrow(() => diffMessages(new Map(), [null, 'nope', {}, { parts: 'nope' }]));
     assert.deepStrictEqual(
-      diffMessages(new Map(), [null, 'nope', {}, { parts: 'nope' }]).lines,
+      diffMessages(new Map(), [null, 'nope', {}, { parts: 'nope' }]).entries,
       [],
     );
+  });
+
+  it('captures the message role (user/assistant) as an annotation on every entry from that message', () => {
+    const snapshot = [{ info: { role: 'assistant' }, parts: [toolPart('p1', 'bash', 'running')] }];
+    const { entries } = diffMessages(new Map(), snapshot);
+    assert.strictEqual(entries[0]?.annotations.role, 'assistant');
+  });
+
+  it('omits the role annotation when the message carries none', () => {
+    const snapshot = [{ info: {}, parts: [toolPart('p1', 'bash', 'running')] }];
+    const { entries } = diffMessages(new Map(), snapshot);
+    assert.strictEqual('role' in (entries[0]?.annotations ?? {}), false);
+  });
+
+  it('tags the status line entry kind=tool-call and carries the tool input for every tool, not just edit tools', () => {
+    const snapshot = [
+      { info: {}, parts: [toolPart('p1', 'bash', 'running', { input: { command: 'ls -la' } })] },
+    ];
+    const { entries } = diffMessages(new Map(), snapshot);
+    const call = entries.find((e) => e.annotations.kind === 'tool-call');
+    assert.strictEqual(call?.annotations.tool, 'bash');
+    assert.deepStrictEqual(call?.annotations.input, { command: 'ls -la' });
+  });
+
+  it('logs the tool input for a non-edit tool with different args (grep pattern)', () => {
+    const snapshot = [
+      {
+        info: {},
+        parts: [toolPart('p1', 'grep', 'running', { input: { pattern: 'TODO', path: 'src' } })],
+      },
+    ];
+    const { entries } = diffMessages(new Map(), snapshot);
+    const call = entries.find((e) => e.annotations.kind === 'tool-call');
+    assert.deepStrictEqual(call?.annotations.input, { pattern: 'TODO', path: 'src' });
+  });
+
+  it('emits a tool-result entry carrying the output once a tool call completes', () => {
+    const snapshot = [
+      { info: {}, parts: [toolPart('p1', 'bash', 'completed', { output: 'file1\nfile2' })] },
+    ];
+    const { entries } = diffMessages(new Map(), snapshot);
+    const result = entries.find((e) => e.annotations.kind === 'tool-result');
+    assert.ok(result !== undefined);
+    assert.strictEqual(result?.annotations.output, 'file1\nfile2');
+    assert.strictEqual(result?.annotations.tool, 'bash');
+  });
+
+  it('emits a tool-result entry carrying the error message when a tool call fails', () => {
+    const snapshot = [{ info: {}, parts: [toolPart('p1', 'bash', 'error', { error: 'exit 1' })] }];
+    const { entries } = diffMessages(new Map(), snapshot);
+    const result = entries.find((e) => e.annotations.kind === 'tool-result');
+    assert.strictEqual(result?.annotations.output, 'exit 1');
+  });
+
+  it('does not emit a tool-result entry while the tool is still running', () => {
+    const snapshot = [
+      { info: {}, parts: [toolPart('p1', 'bash', 'running', { output: 'partial' })] },
+    ];
+    const { entries } = diffMessages(new Map(), snapshot);
+    assert.strictEqual(
+      entries.some((e) => e.annotations.kind === 'tool-result'),
+      false,
+    );
+  });
+
+  it('re-fires a completed tool part when its output arrives on a LATER poll, status unchanged (the dropped-output bug)', () => {
+    const first = diffMessages(new Map(), [
+      { info: {}, parts: [toolPart('p1', 'bash', 'completed')] },
+    ]);
+    assert.strictEqual(
+      first.entries.some((e) => e.annotations.kind === 'tool-result'),
+      false,
+    );
+    const second = diffMessages(first.seen, [
+      { info: {}, parts: [toolPart('p1', 'bash', 'completed', { output: 'total 0' })] },
+    ]);
+    const result = second.entries.find((e) => e.annotations.kind === 'tool-result');
+    assert.ok(result !== undefined);
+    assert.strictEqual(result?.annotations.output, 'total 0');
+  });
+
+  it('still dedups: does not re-fire when polled again with the same completed+output', () => {
+    const first = diffMessages(new Map(), [
+      { info: {}, parts: [toolPart('p1', 'bash', 'completed', { output: 'total 0' })] },
+    ]);
+    const second = diffMessages(first.seen, [
+      { info: {}, parts: [toolPart('p1', 'bash', 'completed', { output: 'total 0' })] },
+    ]);
+    assert.deepStrictEqual(second.entries, []);
+  });
+
+  it('renders a step-start part as a one-shot boundary line', () => {
+    const snapshot = [{ info: {}, parts: [{ id: 's1', type: 'step-start' }] }];
+    const { entries, seen } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(
+      entries.map((e) => [e.message, e.annotations.kind]),
+      [['step start', 'step']],
+    );
+    assert.strictEqual(seen.get('s1'), 'step-start:');
+  });
+
+  it('renders a step-finish part as a one-shot boundary line', () => {
+    const snapshot = [{ info: {}, parts: [{ id: 's1', type: 'step-finish' }] }];
+    const { entries } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(
+      entries.map((e) => [e.message, e.annotations.kind]),
+      [['step finish', 'step']],
+    );
+  });
+
+  it('renders a file part with its path', () => {
+    const snapshot = [{ info: {}, parts: [{ id: 'f1', type: 'file', filename: 'src/x.ts' }] }];
+    const { entries } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(
+      entries.map((e) => [e.message, e.annotations.kind, e.annotations.path]),
+      [['file src/x.ts', 'file', 'src/x.ts']],
+    );
+  });
+
+  it('does not render snapshot/agent/session-patch parts (opencode-internal bookkeeping), but still marks them seen', () => {
+    const snapshot = [
+      {
+        info: {},
+        parts: [
+          { id: 'x1', type: 'snapshot' },
+          { id: 'x2', type: 'agent' },
+          { id: 'x3', type: 'patch' },
+        ],
+      },
+    ];
+    const { entries, seen } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(entries, []);
+    assert.strictEqual(seen.size, 3);
   });
 });
 
 /** tckt_fxtlog: stream the assistant's actual reply/reasoning text, delta-only per poll. */
 describe('diffMessages — text/reasoning deltas', () => {
   const textPart = (id: string, type: 'text' | 'reasoning', text: string) => ({ id, type, text });
+  const messages = (r: ReturnType<typeof diffMessages>) => r.entries.map((e) => e.message);
 
   it('emits the full text as the delta the first time a text part appears', () => {
     const snapshot = [{ info: {}, parts: [textPart('t1', 'text', 'Hello')] }];
-    const { lines, seen } = diffMessages(new Map(), snapshot);
-    assert.deepStrictEqual(lines, ['[text] Hello']);
-    assert.strictEqual(seen.get('t1'), 'text:5');
+    const result = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(messages(result), ['[text] Hello']);
+    assert.strictEqual(result.entries[0]?.annotations.kind, 'text');
+    assert.strictEqual(result.seen.get('t1'), 'text:5');
   });
 
   it('emits only the newly-appended substring on the next poll, not the whole text', () => {
     const seen1 = new Map([['t1', 'text:5']]);
     const snapshot = [{ info: {}, parts: [textPart('t1', 'text', 'Hello world')] }];
-    const { lines, seen: seen2 } = diffMessages(seen1, snapshot);
-    assert.deepStrictEqual(lines, ['[text]  world']);
-    assert.strictEqual(seen2.get('t1'), 'text:11');
+    const result = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(messages(result), ['[text]  world']);
+    assert.strictEqual(result.seen.get('t1'), 'text:11');
   });
 
   it('does not re-log a text part whose length is unchanged', () => {
     const seen1 = new Map([['t1', 'text:11']]);
     const snapshot = [{ info: {}, parts: [textPart('t1', 'text', 'Hello world')] }];
-    const { lines } = diffMessages(seen1, snapshot);
-    assert.deepStrictEqual(lines, []);
+    const { entries } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(entries, []);
   });
 
   it('labels reasoning parts distinctly from text parts', () => {
     const snapshot = [{ info: {}, parts: [textPart('r1', 'reasoning', 'thinking...')] }];
-    const { lines, seen } = diffMessages(new Map(), snapshot);
-    assert.deepStrictEqual(lines, ['[reasoning] thinking...']);
-    assert.strictEqual(seen.get('r1'), 'reasoning:11');
+    const result = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(messages(result), ['[reasoning] thinking...']);
+    assert.strictEqual(result.entries[0]?.annotations.kind, 'reasoning');
+    assert.strictEqual(result.seen.get('r1'), 'reasoning:11');
   });
 
   it('emits only the reasoning delta across polls, same as text', () => {
     const seen1 = new Map([['r1', 'reasoning:11']]);
     const snapshot = [{ info: {}, parts: [textPart('r1', 'reasoning', 'thinking... more')] }];
-    const { lines } = diffMessages(seen1, snapshot);
-    assert.deepStrictEqual(lines, ['[reasoning]  more']);
+    const result = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(messages(result), ['[reasoning]  more']);
   });
 });
 
@@ -440,17 +577,22 @@ describe('diffMessages — file edit diff logging', () => {
     tool,
     state: { status, ...extra },
   });
+  const messages = (r: ReturnType<typeof diffMessages>) => r.entries.map((e) => e.message);
 
   it('logs the patch content once an apply_patch tool call completes', () => {
     const patch = '--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new';
     const snapshot = [
       { info: {}, parts: [toolPart('e1', 'apply_patch', 'completed', { input: { patch } })] },
     ];
-    const { lines } = diffMessages(new Map(), snapshot);
+    const result = diffMessages(new Map(), snapshot);
+    const lines = messages(result);
     assert.strictEqual(lines.length, 2);
     assert.strictEqual(lines[0], 'tool apply_patch completed');
     assert.ok(lines[1]?.startsWith('[diff] apply_patch:'));
     assert.ok(lines[1]?.includes(patch));
+    const diff = result.entries.find((e) => e.annotations.kind === 'file-diff');
+    assert.strictEqual(diff?.annotations.patch, patch);
+    assert.strictEqual(diff?.annotations.tool, 'apply_patch');
   });
 
   it('falls back to before/after content when there is no unified patch', () => {
@@ -464,24 +606,27 @@ describe('diffMessages — file edit diff logging', () => {
         ],
       },
     ];
-    const { lines } = diffMessages(new Map(), snapshot);
+    const result = diffMessages(new Map(), snapshot);
+    const lines = messages(result);
     assert.strictEqual(lines.length, 2);
     assert.ok(lines[1]?.includes('const a = 1;'));
     assert.ok(lines[1]?.includes('const a = 2;'));
+    const diff = result.entries.find((e) => e.annotations.kind === 'file-diff');
+    assert.ok(String(diff?.annotations.patch).includes('const a = 1;'));
   });
 
   it('does not log a diff while the edit tool is still running', () => {
     const snapshot = [{ info: {}, parts: [toolPart('e1', 'apply_patch', 'running')] }];
-    const { lines } = diffMessages(new Map(), snapshot);
-    assert.deepStrictEqual(lines, ['tool apply_patch running']);
+    const result = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(messages(result), ['tool apply_patch running']);
   });
 
   it('does not log a diff for a non-editing tool', () => {
     const snapshot = [
       { info: {}, parts: [toolPart('b1', 'bash', 'completed', { input: { patch: 'nope' } })] },
     ];
-    const { lines } = diffMessages(new Map(), snapshot);
-    assert.deepStrictEqual(lines, ['tool bash completed']);
+    const result = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(messages(result), ['tool bash completed']);
   });
 });
 

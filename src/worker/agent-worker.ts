@@ -2,7 +2,7 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { BunRuntime } from '@effect/platform-bun';
-import { Cause, Effect, HashMap, Logger, Schema } from 'effect';
+import { Cause, Effect, Logger, Schema } from 'effect';
 import { shortGitSha } from '../git-sha.ts';
 import type { OpencodePort } from './opencode-session.ts';
 import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
@@ -88,15 +88,22 @@ export const makeAgentWorkerProgram = (deps: AgentWorkerDeps): Effect.Effect<voi
   );
 
 /**
- * Logger that writes every diagnostic to stderr, keeping stdout for the one
- * result line. Renders annotations (notably `sha`, see above) inline so
- * `kubectl logs` shows them without a JSON viewer.
+ * Structured JSON logger, matching the reconciler's `Logger.json`
+ * (`daemon.ts`) — every diagnostic is a JSON object with a `timestamp` and
+ * the log's `annotations` (`sha` — see above — plus role/kind/tool/input/
+ * output/patch, … the transcript detail `pollProgress` now attaches),
+ * keeping stdout reserved for the one result line. Built on
+ * `Logger.jsonLogger`, the pure string-producing half of `Logger.json` —
+ * NOT the `Logger.json` layer itself, whose built-in `jsonLogger` writes via
+ * `console.log` (stdout), which would corrupt the one-line result contract.
+ * `write` is injected so this is testable without touching the real
+ * `process.stderr`.
  */
-const stderrLogger = Logger.make(({ logLevel, message, annotations }) => {
-  const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(' ');
-  process.stderr.write(
-    `[agent-worker] ${logLevel.label} ${ann ? `${ann} ` : ''}${String(message)}\n`,
-  );
+export const makeJsonStderrLogger = (write: (line: string) => void) =>
+  Logger.map(Logger.jsonLogger, write);
+
+const stderrLogger = makeJsonStderrLogger((line) => {
+  process.stderr.write(`${line}\n`);
 });
 
 /**
@@ -105,21 +112,22 @@ const stderrLogger = Logger.make(({ logLevel, message, annotations }) => {
  * authenticates — the Proof-B cred handoff. The worker NEVER reads sops: the
  * control plane's `CredentialBroker` resolves creds at dispatch and mounts them
  * as a k8s Secret, so rotation stays a one-module swap. Best-effort + silent on
- * contents: a missing mount logs a warning (the session then fails with a clear
- * opencode error) and we never print the file's bytes.
+ * contents: a missing mount reports `ok: false` (the caller logs a warning,
+ * the session then fails with a clear opencode error) and we never print the
+ * file's bytes. Returns a result rather than writing to stderr directly so
+ * the caller can log it through the Effect logger — keeping every line JSON,
+ * same as the rest of the worker's output.
  */
-const provisionOpencodeAuth = async (): Promise<void> => {
+const provisionOpencodeAuth = async (): Promise<{ readonly ok: boolean; readonly src: string }> => {
   const src = '/secrets/auth.json';
   const destDir = join(homedir(), '.local/share/opencode');
   const dest = join(destDir, 'auth.json');
   try {
     await mkdir(destDir, { recursive: true });
     await copyFile(src, dest);
-    process.stderr.write('[agent-worker] INFO provisioned opencode auth from /secrets\n');
+    return { ok: true, src };
   } catch {
-    process.stderr.write(
-      `[agent-worker] WARN no credential at ${src}; opencode may fail to auth\n`,
-    );
+    return { ok: false, src };
   }
 };
 
@@ -131,7 +139,12 @@ if (import.meta.main) {
     .filter((p) => p.length > 0)
     .join(':');
   const program = Effect.gen(function* () {
-    yield* Effect.promise(() => provisionOpencodeAuth());
+    const provisioned = yield* Effect.promise(() => provisionOpencodeAuth());
+    if (provisioned.ok) {
+      yield* Effect.logInfo('provisioned opencode auth from /secrets');
+    } else {
+      yield* Effect.logWarning(`no credential at ${provisioned.src}; opencode may fail to auth`);
+    }
     yield* makeAgentWorkerProgram({
       git: bunGitPort,
       opencode: makeSdkOpencodePort(),
