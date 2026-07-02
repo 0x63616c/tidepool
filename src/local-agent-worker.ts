@@ -49,7 +49,7 @@ export const makeLocalAgentWorker = (
               .pipe(Effect.orDie);
             const runner = makeRunner(creds);
             const outcome: DispatchOutcome =
-              input.kind === 'work'
+              input.kind !== 'review'
                 ? DispatchOutcome.Work({
                     result: yield* runner.work({
                       ticket: input.ticket,
@@ -57,6 +57,8 @@ export const makeLocalAgentWorker = (
                       base: input.base,
                       branch: input.branch,
                       model: input.model,
+                      mergeSha: input.mergeSha,
+                      failingChecks: input.failingChecks,
                     }),
                   })
                 : DispatchOutcome.Review({

@@ -265,7 +265,7 @@ export const fakeAgentWorker = (opts: FakeAgentWorkerOptions = {}): Layer.Layer<
           if (opts.failWork === 'rate') return Effect.fail(new RateCapped({}));
           if (opts.failWork === 'agent') return Effect.fail(new AgentFailed({ reason: 'fake' }));
           const outcome: DispatchOutcome =
-            input.kind === 'work'
+            input.kind !== 'review'
               ? DispatchOutcome.Work({
                   result: {
                     title: `feat: ${input.ticket.title} (${input.ticket.id})`,

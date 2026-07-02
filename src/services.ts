@@ -194,12 +194,14 @@ export const WorkStatus = Data.taggedEnum<WorkStatus>();
  */
 export type DispatchInput =
   | {
-      readonly kind: 'work';
+      readonly kind: 'work' | 'repair';
       readonly ticket: Ticket;
       readonly repo: string;
       readonly base: string;
       readonly branch: string;
       readonly model: string;
+      readonly mergeSha?: string;
+      readonly failingChecks?: ReadonlyArray<string>;
     }
   | {
       readonly kind: 'review';
@@ -247,7 +249,7 @@ export interface WorkerCredentials {
  * the grant. Passthrough ignores it; the rotation swap keys creds on it.
  */
 export interface CredentialRequest {
-  readonly kind: 'work' | 'review';
+  readonly kind: 'work' | 'repair' | 'review';
   readonly repo: string;
   readonly ticketId: TicketId;
 }

@@ -57,7 +57,7 @@ export const Usage = Schema.Struct({
 });
 export type Usage = typeof Usage.Type;
 
-export const AgentKind = Schema.Literal('work', 'review');
+export const AgentKind = Schema.Literal('work', 'repair', 'review');
 export type AgentKind = typeof AgentKind.Type;
 
 export const RunStatus = Schema.Literal('running', 'succeeded', 'failed', 'reaped');

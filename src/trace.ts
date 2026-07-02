@@ -40,7 +40,7 @@ const phaseOf = (e: RunEvent, runs: ReadonlyArray<Run>): string => {
   if (e.source === 'control-plane') return e.level === 'error' ? 'failed' : 'control-plane';
   const owner = e.runId === null ? undefined : runs.find((r) => r.id === e.runId);
   if (owner === undefined) return e.source;
-  return owner.kind === 'work' ? 'in_progress' : 'review';
+  return owner.kind === 'review' ? 'review' : 'in_progress';
 };
 
 const renderRuns = (runs: ReadonlyArray<Run>): string => {

@@ -63,6 +63,19 @@ const slug = (s: string): string =>
 
 const branchFor = (ticket: Ticket): string => `tp/${ticket.id}-${slug(ticket.title)}`;
 
+const repairBranchFor = (ticket: Ticket, mergeSha: string): string =>
+  `tp/${ticket.id}-${slug(ticket.title)}-repair-${mergeSha.slice(0, 7)}`;
+
+const MAIN_RED_FAILING_CHECKS = ['main checks red'] as const;
+
+const repairCount = (runs: ReadonlyArray<Run>): number =>
+  runs.filter((r) => r.kind === 'repair').length;
+
+const mainRedCondition = (
+  ticket: Ticket,
+): { readonly type: 'main_red'; readonly sha: string } | null =>
+  ticket.conditions.find((c) => c.type === 'main_red') ?? null;
+
 /** Rate-cap signatures — a `Failed` poll carrying one of these is a rate-cap, not a retry. */
 const RATE_CAP_RE = /rate.?limit|429|quota|too many requests/i;
 
@@ -356,6 +369,32 @@ const recordContention = (
     return { exhausted, ticket: patched };
   });
 
+const markRepairNeedsHuman = (
+  store: TicketStoreApi,
+  ticket: Ticket,
+  reason: string,
+): Effect.Effect<Ticket, TicketNotFound> =>
+  Effect.gen(function* () {
+    const hasNeedsHuman = ticket.conditions.some((c) => c.type === 'needs_human');
+    const conditions = hasNeedsHuman
+      ? ticket.conditions
+      : [...ticket.conditions, { type: 'needs_human' as const, reason }];
+    yield* Effect.logWarning('repair failed; needs human').pipe(Effect.annotateLogs({ reason }));
+    const patched = yield* store.patch(ticket.id, {
+      conditions,
+      reason,
+      workHandle: null,
+      dispatchedAt: null,
+    });
+    yield* store.appendEvents([
+      failureEvent(ticket.id, `repair failed: ${reason}`),
+      ...(hasNeedsHuman
+        ? []
+        : [transitionEvent(ticket.id, `condition set: needs_human (${reason})`)]),
+    ]);
+    return patched;
+  });
+
 /**
  * Tri-state settle from the forge's ground truth for a ticket's PR — the closed
  * loop that catches an external merge, a crash between `forge.merge` succeeding
@@ -460,6 +499,13 @@ const stepTicket = (
           yield* Effect.logWarning('worker past deadline; cancelling + retrying');
           yield* worker.cancel(handle);
           yield* finalizeOpenRun(store, ticket.id, 'reaped', 'deadline-exceeded', null);
+          if (
+            mainRedCondition(ticket) !== null &&
+            repairCount(yield* store.runsFor(ticket.id)) > 0
+          ) {
+            yield* markRepairNeedsHuman(store, ticket, 'repair deadline-exceeded');
+            return;
+          }
           yield* retryOrFail(store, ticket, config.retries, 'deadline-exceeded');
           yield* store.appendEvents([
             failureEvent(ticket.id, 'deadline-exceeded; worker cancelled'),
@@ -477,6 +523,15 @@ const stepTicket = (
             // a rate-cap gates the ticket (never counts an attempt); anything
             // else retries.
             if (RATE_CAP_RE.test(status.reason)) {
+              if (
+                mainRedCondition(ticket) !== null &&
+                repairCount(yield* store.runsFor(ticket.id)) > 0
+              ) {
+                yield* Effect.logInfo('repair worker rate-capped; needs human');
+                yield* finalizeOpenRun(store, ticket.id, 'failed', 'rate-capped', null);
+                yield* markRepairNeedsHuman(store, ticket, 'repair rate-capped');
+                return;
+              }
               yield* Effect.logInfo('worker rate-capped; gated (no attempt spent)');
               yield* finalizeOpenRun(store, ticket.id, 'failed', 'rate-capped', null);
               yield* store.patch(ticket.id, {
@@ -494,6 +549,16 @@ const stepTicket = (
                 Effect.annotateLogs({ reason: status.reason }),
               );
               yield* finalizeOpenRun(store, ticket.id, 'failed', status.reason, null);
+              if (
+                mainRedCondition(ticket) !== null &&
+                repairCount(yield* store.runsFor(ticket.id)) > 0
+              ) {
+                yield* markRepairNeedsHuman(store, ticket, `repair agent: ${status.reason}`);
+                yield* store.appendEvents([
+                  failureEvent(ticket.id, `AgentFailed: ${status.reason}`),
+                ]);
+                return;
+              }
               yield* retryOrFail(store, ticket, config.retries, `agent: ${status.reason}`);
               yield* store.appendEvents([failureEvent(ticket.id, `AgentFailed: ${status.reason}`)]);
             }
@@ -585,6 +650,17 @@ const stepTicket = (
             );
 
             if (review.verdict === 'request_changes') {
+              if (
+                mainRedCondition(ticket) !== null &&
+                repairCount(yield* store.runsFor(ticket.id)) > 0
+              ) {
+                yield* markRepairNeedsHuman(
+                  store,
+                  ticket,
+                  `repair review rejected: ${review.reason}`,
+                );
+                return;
+              }
               yield* retryOrFail(store, ticket, config.retries, review.reason, {
                 rework: true,
               });
@@ -623,17 +699,33 @@ const stepTicket = (
       });
 
     // Generic gate rule (TOP, before any phase logic): a gated ticket never
-    // dispatches. `rate_capped` is transient and clears immediately; hold
-    // conditions remain until an operator or a later ticket changes them.
+    // dispatches, except the explicit one-shot `main_red` repair lane.
+    // `rate_capped` is transient and clears immediately; hold conditions remain
+    // until an operator or a later ticket changes them.
     if (ticket.conditions.length > 0) {
-      if (ticket.conditions.some((c) => c.type === 'needs_human' || c.type === 'main_red')) return;
-      const to = deriveStateFromPhase({ ...ticket, conditions: [] });
-      yield* Effect.logInfo('clearing rate_capped condition; re-picking ticket').pipe(
-        Effect.annotateLogs({ from: 'rate_capped', to }),
-      );
-      yield* store.patch(ticket.id, { conditions: [] });
-      yield* store.appendEvents([transitionEvent(ticket.id, 'condition cleared: rate_capped')]);
-      return;
+      if (ticket.conditions.some((c) => c.type === 'needs_human')) return;
+      const mainRed = mainRedCondition(ticket);
+      if (mainRed !== null) {
+        const repairs = repairCount(yield* store.runsFor(ticket.id));
+        if (ticket.phase === 'working' && ticket.workHandle === null && repairs > 0) {
+          yield* markRepairNeedsHuman(store, ticket, 'repair attempt failed');
+          return;
+        }
+        const repairPhase =
+          ticket.phase === 'working' ||
+          ticket.phase === 'reviewing' ||
+          ticket.phase === 'merging' ||
+          ticket.phase === 'verifying';
+        if (!repairPhase) return;
+      } else {
+        const to = deriveStateFromPhase({ ...ticket, conditions: [] });
+        yield* Effect.logInfo('clearing rate_capped condition; re-picking ticket').pipe(
+          Effect.annotateLogs({ from: 'rate_capped', to }),
+        );
+        yield* store.patch(ticket.id, { conditions: [] });
+        yield* store.appendEvents([transitionEvent(ticket.id, 'condition cleared: rate_capped')]);
+        return;
+      }
     }
 
     switch (ticket.phase) {
@@ -678,11 +770,13 @@ const stepTicket = (
         // Dispatch the work agent-worker; store the reattach handle + dispatch
         // time (phase stays `working`). The work runs out of band; we poll it
         // each tick.
+        const mainRed = mainRedCondition(ticket);
         const branch = ticket.branch ?? branchFor(ticket);
+        const kind = mainRed === null ? 'work' : 'repair';
         const now = yield* Clock.currentTimeMillis;
         yield* recordDispatch(store, {
           ticketId: ticket.id,
-          kind: 'work',
+          kind,
           dispatchedAt: now,
           boxId: null,
           boxProvider: null,
@@ -692,12 +786,15 @@ const stepTicket = (
         yield* Effect.logInfo('dispatching work agent').pipe(Effect.annotateLogs({ branch }));
         const handle = yield* worker
           .dispatch({
-            kind: 'work',
+            kind,
             ticket,
             repo: ticket.target,
             base,
             branch,
             model: models.work,
+            ...(mainRed === null
+              ? {}
+              : { mergeSha: mainRed.sha, failingChecks: MAIN_RED_FAILING_CHECKS }),
           })
           .pipe(
             Effect.tapError((e) =>
@@ -767,6 +864,13 @@ const stepTicket = (
           yield* Effect.logWarning('PR CI red; retrying or failing').pipe(
             Effect.annotateLogs({ pr: prNumber }),
           );
+          if (
+            mainRedCondition(ticket) !== null &&
+            repairCount(yield* store.runsFor(ticket.id)) > 0
+          ) {
+            yield* markRepairNeedsHuman(store, ticket, 'repair ci-red');
+            return;
+          }
           yield* retryOrFail(store, ticket, config.retries, 'ci-red');
           return;
         }
@@ -939,22 +1043,36 @@ const stepTicket = (
         const ci = yield* forge.checksForCommitOnMain({ repo: ticket.target, sha });
         if (ci === 'pending') return;
         if (ci === 'red') {
+          if (repairCount(yield* store.runsFor(ticket.id)) > 0) {
+            yield* markRepairNeedsHuman(store, ticket, `repair left main red: ${sha}`);
+            return;
+          }
           yield* Effect.logWarning('main checks red after merge; holding ticket').pipe(
             Effect.annotateLogs({ sha }),
           );
           yield* store.patch(ticket.id, {
+            phase: 'working',
             conditions: [{ type: 'main_red', sha }],
             reason: 'main-red',
+            branch: repairBranchFor(ticket, sha),
+            prNumber: null,
+            prId: null,
+            workedAttempt: null,
+            workHandle: null,
+            dispatchedAt: null,
           });
           yield* store.appendEvents([
             failureEvent(ticket.id, `main checks red after merge: ${sha}`),
             transitionEvent(ticket.id, `condition set: main_red (${sha})`),
+            transitionEvent(ticket.id, 'phase: verifying -> working'),
           ]);
           return;
         }
         yield* Effect.logInfo('main checks green; ticket done').pipe(Effect.annotateLogs({ sha }));
-        yield* store.patch(ticket.id, { phase: 'done' });
+        const hadMainRed = mainRedCondition(ticket) !== null;
+        yield* store.patch(ticket.id, { phase: 'done', conditions: [], reason: null });
         yield* store.appendEvents([
+          ...(hadMainRed ? [transitionEvent(ticket.id, 'condition cleared: main_red')] : []),
           transitionEvent(ticket.id, `phase: verifying -> done (${sha})`),
         ]);
         return;
@@ -974,21 +1092,24 @@ const stepTicket = (
     Effect.catchTags({
       RateCapped: (_: RateCapped) =>
         Effect.flatMap(TicketStore, (s) =>
-          Effect.zipRight(
-            Effect.logInfo('dispatch rate-capped; gated (no attempt spent)'),
-            Effect.zipRight(
-              s.patch(ticket.id, {
-                conditions: [{ type: 'rate_capped' }],
-                reason: 'rate-capped',
-                workHandle: null,
-                dispatchedAt: null,
-              }),
-              s.appendEvents([
-                failureEvent(ticket.id, 'rate-capped'),
-                transitionEvent(ticket.id, 'condition set: rate_capped'),
-              ]),
-            ),
-          ),
+          Effect.gen(function* () {
+            if (mainRedCondition(ticket) !== null && repairCount(yield* s.runsFor(ticket.id)) > 0) {
+              yield* Effect.logInfo('repair dispatch rate-capped; needs human');
+              yield* markRepairNeedsHuman(s, ticket, 'repair rate-capped');
+              return;
+            }
+            yield* Effect.logInfo('dispatch rate-capped; gated (no attempt spent)');
+            yield* s.patch(ticket.id, {
+              conditions: [{ type: 'rate_capped' }],
+              reason: 'rate-capped',
+              workHandle: null,
+              dispatchedAt: null,
+            });
+            yield* s.appendEvents([
+              failureEvent(ticket.id, 'rate-capped'),
+              transitionEvent(ticket.id, 'condition set: rate_capped'),
+            ]);
+          }),
         ),
       // The silent-failure sink pre-fix: a dispatch that throws (e.g. apiserver
       // TLS) only wrote a DB event, invisible in `kubectl logs`. Now mirrored to
@@ -996,15 +1117,21 @@ const stepTicket = (
       AgentFailed: (e: AgentFailed) =>
         Effect.flatMap(AppConfig, (c) =>
           Effect.flatMap(TicketStore, (s) =>
-            Effect.zipRight(
-              Effect.logWarning('dispatch failed; retrying or failing').pipe(
+            Effect.gen(function* () {
+              yield* Effect.logWarning('dispatch failed; retrying or failing').pipe(
                 Effect.annotateLogs({ reason: e.reason }),
-              ),
-              Effect.zipRight(
-                retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`),
-                s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]),
-              ),
-            ),
+              );
+              if (
+                mainRedCondition(ticket) !== null &&
+                repairCount(yield* s.runsFor(ticket.id)) > 0
+              ) {
+                yield* markRepairNeedsHuman(s, ticket, `repair dispatch: ${e.reason}`);
+                yield* s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]);
+                return;
+              }
+              yield* retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`);
+              yield* s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]);
+            }),
           ),
         ),
       // Merge contention is NOT a work-quality failure: bounce back to

@@ -21,6 +21,8 @@ export interface OpencodeWorkInput {
   readonly base: string;
   readonly branch: string;
   readonly model: string;
+  readonly mergeSha?: string;
+  readonly failingChecks?: ReadonlyArray<string>;
 }
 export interface OpencodeReviewInput {
   readonly ticket: Ticket;
@@ -120,6 +122,21 @@ export const workPrompt = (ticket: Ticket): string =>
   ]
     .filter((part): part is string => part !== null)
     .join('\n\n');
+
+export const repairPrompt = (input: {
+  readonly ticket: Ticket;
+  readonly mergeSha: string;
+  readonly failingChecks: ReadonlyArray<string>;
+}): string =>
+  [
+    `You are the work agent for ticket ${input.ticket.id}.`,
+    `Main is red after this ticket merged at ${input.mergeSha}. Fix main forward on a NEW branch/PR; do not reuse the already-merged branch.`,
+    `Failing checks: ${input.failingChecks.join(', ')}`,
+    'The ticket body below is authored markdown. Use it for context, but the repair objective is to fix main forward from the merge failure above.',
+    ticketBlock(input.ticket),
+    STANDARDS,
+    'Implement the repair directly in this repository. Do not commit or push — the harness handles git.',
+  ].join('\n\n');
 
 export const reviewPrompt = (ticket: Ticket, diff: string): string =>
   [
@@ -260,7 +277,14 @@ export const makeOpencodeAgentRunner = (creds: WorkerCredentials): OpencodeRunne
           const { usage } = await runAgent({
             directory: dir,
             model: input.model,
-            prompt: workPrompt(input.ticket),
+            prompt:
+              input.mergeSha === undefined
+                ? workPrompt(input.ticket)
+                : repairPrompt({
+                    ticket: input.ticket,
+                    mergeSha: input.mergeSha,
+                    failingChecks: input.failingChecks ?? ['main checks red'],
+                  }),
           });
 
           const dirty = (await $`git -C ${dir} status --porcelain`.text()).trim();

@@ -359,7 +359,7 @@ describe('transition table: merging (resumable, idempotent)', () => {
       assert.strictEqual(t.prNumber, 7);
       assert.isNull(t.workedAttempt);
       assert.deepStrictEqual(
-        dispatches.map((d) => (d.kind === 'work' ? [d.kind, d.branch] : [d.kind, d.prNumber])),
+        dispatches.map((d) => (d.kind !== 'review' ? [d.kind, d.branch] : [d.kind, d.prNumber])),
         [['work', 'tp/x']],
       );
       const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
@@ -555,24 +555,65 @@ describe('transition table: verifying', () => {
   );
 
   it.effect(
-    'verifying + checks on mergeSha red → holds with main_red condition, no attempt spent',
+    'verifying + checks on mergeSha red → dispatches one repair with mergeSha and failing checks',
     () =>
       Effect.gen(function* () {
         const store = yield* makeInMemoryStore;
         const ticket = yield* store.add(newTicket);
         yield* store.patch(ticket.id, { phase: 'verifying', mergeSha: 'abc123' });
+        const dispatches: DispatchInput[] = [];
         const env = Layer.mergeAll(
           baseLayers(store),
           fakeForge({ mainCi: 'red' }),
-          fakeAgentWorker({}),
+          fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
         );
 
         yield* runSteps(2, env);
 
         const t = yield* store.byId(ticket.id);
-        assert.strictEqual(t.phase, 'verifying');
+        assert.strictEqual(t.phase, 'working');
         assert.deepStrictEqual(t.conditions, [{ type: 'main_red', sha: 'abc123' }]);
         assert.strictEqual(t.attempts, 0);
+        assert.strictEqual(dispatches.length, 1);
+        assert.strictEqual(dispatches[0]?.kind, 'repair');
+        const repairDispatch = dispatches[0];
+        if (repairDispatch?.kind !== 'repair') assert.fail('expected repair dispatch');
+        assert.strictEqual(repairDispatch.mergeSha, 'abc123');
+        assert.deepStrictEqual(repairDispatch.failingChecks, ['main checks red']);
+        assert.match(repairDispatch.branch, /-repair-abc123$/);
+        const repairs = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'repair');
+        assert.strictEqual(repairs.length, 1);
+      }),
+  );
+
+  it.effect(
+    'repair PR CI red under normal retries → needs_human and no second repair dispatch',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* store.patch(ticket.id, { phase: 'verifying', mergeSha: 'abc123' });
+        const dispatches: DispatchInput[] = [];
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ mainCi: 'red', ci: 'red' }),
+          fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+        );
+
+        yield* runSteps(8, env);
+
+        const t = yield* store.byId(ticket.id);
+        assert.strictEqual(t.phase, 'reviewing');
+        assert.deepStrictEqual(t.conditions, [
+          { type: 'main_red', sha: 'abc123' },
+          { type: 'needs_human', reason: 'repair ci-red' },
+        ]);
+        assert.deepStrictEqual(
+          dispatches.map((d) => d.kind),
+          ['repair'],
+        );
+        const repairs = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'repair');
+        assert.strictEqual(repairs.length, 1);
       }),
   );
 });

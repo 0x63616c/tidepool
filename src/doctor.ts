@@ -101,7 +101,7 @@ export const gatherDoctorFacts: Effect.Effect<DoctorFacts, never, TicketStore | 
           latestRunTokens,
           (run.usage?.tokensIn ?? 0) + (run.usage?.tokensOut ?? 0),
         );
-        if (run.kind === 'work') {
+        if (run.kind !== 'review') {
           // Runs are returned oldest-first; keep the last (most recent) work run's provider.
           latestWorkRunBoxProvider = run.boxProvider;
           latestWorkRunTime++;

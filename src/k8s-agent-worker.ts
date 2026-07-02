@@ -4,6 +4,7 @@ import {
   commitMessage,
   fetchPrDiff,
   parseVerdict,
+  repairPrompt,
   reviewPrompt,
   workBody,
   workPrompt,
@@ -105,11 +106,14 @@ export const k8sName = (s: string): string =>
  * sops-style `_` is not DNS-1123-legal, so it is sanitized; the raw id is still
  * carried verbatim on the `tidepool/ticket` label (where `_` is allowed).
  */
-export const workHandleFor = (kind: 'work' | 'review', ticketId: string, suffix: string): string =>
-  `${kind}-${k8sName(ticketId)}-${k8sName(suffix)}`.slice(0, 63).replace(/-+$/g, '');
+export const workHandleFor = (
+  kind: 'work' | 'repair' | 'review',
+  ticketId: string,
+  suffix: string,
+): string => `${kind}-${k8sName(ticketId)}-${k8sName(suffix)}`.slice(0, 63).replace(/-+$/g, '');
 
 const jobLabels = (
-  kind: 'work' | 'review',
+  kind: 'work' | 'repair' | 'review',
   ticketId: string,
   gitSha: string,
 ): Record<string, string> => ({
@@ -136,7 +140,7 @@ export const buildAgentWorkerConfig = (
   creds: WorkerCredentials,
   diff = '',
 ): AgentWorkerConfig =>
-  input.kind === 'work'
+  input.kind !== 'review'
     ? {
         kind: 'work',
         cloneUrl: `https://x-access-token:${creds.githubToken}@github.com/${input.repo}.git`,
@@ -144,7 +148,14 @@ export const buildAgentWorkerConfig = (
         branch: input.branch,
         dir: `${WORKDIR}/work-${input.ticket.id}`,
         model: input.model,
-        prompt: workPrompt(input.ticket),
+        prompt:
+          input.kind === 'repair'
+            ? repairPrompt({
+                ticket: input.ticket,
+                mergeSha: input.mergeSha ?? 'unknown',
+                failingChecks: input.failingChecks ?? ['main checks red'],
+              })
+            : workPrompt(input.ticket),
         commitMsg: commitMessage(input.ticket),
       }
     : {
@@ -156,7 +167,7 @@ export const buildAgentWorkerConfig = (
 
 /** Title/body annotations so `poll` can rebuild `WorkResult` after a restart. */
 const workAnnotations = (input: DispatchInput): Record<string, string> =>
-  input.kind === 'work'
+  input.kind !== 'review'
     ? { 'tidepool/pr-title': workTitle(input.ticket), 'tidepool/pr-body': workBody(input.ticket) }
     : {};
 
@@ -425,12 +436,12 @@ const decodeLastResult = <A, I>(
  * parsed to a verdict on THIS side of the seam (tenet 4).
  */
 export const harvestOutcome = (args: {
-  readonly kind: 'work' | 'review';
+  readonly kind: 'work' | 'repair' | 'review';
   readonly logs: string;
   readonly annotations: Record<string, string>;
 }): Effect.Effect<DispatchOutcome, AgentFailed> =>
   Effect.gen(function* () {
-    if (args.kind === 'work') {
+    if (args.kind !== 'review') {
       const { commitSha, usage } = yield* decodeLastResult(args.logs, RunnerResult);
       return DispatchOutcome.Work({
         result: {
