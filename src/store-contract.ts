@@ -1,6 +1,6 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, HashMap, Logger, type Scope } from 'effect';
-import type { Run, RunEvent } from './domain.ts';
+import { derivePhaseConditions, type Run, type RunEvent, type Ticket } from './domain.ts';
 import { newBoxId, newRunId, newTicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -19,6 +19,8 @@ export interface StoreMedium {
   readonly insertUndecodableTicketRow?: Effect.Effect<string, never, Scope.Scope>;
   /** Test hook: create an old sqlite-style runs table before the store migrates it. */
   readonly createLegacyRunsTable?: Effect.Effect<void, never, Scope.Scope>;
+  /** Test hook: create a pre-phase tickets table before the store migrates it. */
+  readonly createLegacyTicketsTable?: Effect.Effect<void, never, Scope.Scope>;
 }
 
 const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
@@ -56,6 +58,72 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
           // The change is durable, not just returned.
           const reread = yield* store.byId(created.id);
           assert.deepStrictEqual(reread, patched);
+        }),
+      ),
+    );
+
+    it.effect('derives phase+conditions for every state on add/patch', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          const created = yield* store.add(newTicket);
+          assert.deepStrictEqual(
+            { phase: created.phase, conditions: created.conditions },
+            derivePhaseConditions(created),
+          );
+
+          const cases: ReadonlyArray<{
+            readonly patch: Parameters<TicketStoreApi['patch']>[1];
+            readonly expected: Pick<Ticket, 'phase' | 'conditions'>;
+          }> = [
+            {
+              patch: { state: 'backlog', prNumber: null },
+              expected: { phase: 'queued', conditions: [] },
+            },
+            {
+              patch: { state: 'in_progress', prNumber: null },
+              expected: { phase: 'working', conditions: [] },
+            },
+            {
+              patch: { state: 'running', prNumber: null },
+              expected: { phase: 'working', conditions: [] },
+            },
+            {
+              patch: { state: 'running', prNumber: 7 },
+              expected: { phase: 'reviewing', conditions: [] },
+            },
+            {
+              patch: { state: 'review', prNumber: 7 },
+              expected: { phase: 'reviewing', conditions: [] },
+            },
+            { patch: { state: 'done', prNumber: 7 }, expected: { phase: 'done', conditions: [] } },
+            {
+              patch: { state: 'failed', prNumber: 7 },
+              expected: { phase: 'failed', conditions: [] },
+            },
+            {
+              patch: { state: 'rate_capped', prNumber: null },
+              expected: { phase: 'working', conditions: [{ type: 'rate_capped' }] },
+            },
+            {
+              patch: { state: 'rate_capped', prNumber: 7 },
+              expected: { phase: 'reviewing', conditions: [{ type: 'rate_capped' }] },
+            },
+          ];
+
+          for (const c of cases) {
+            const patched = yield* store.patch(created.id, c.patch);
+            assert.deepStrictEqual(
+              { phase: patched.phase, conditions: patched.conditions },
+              c.expected,
+            );
+            const reread = yield* store.byId(created.id);
+            assert.deepStrictEqual(
+              { phase: reread.phase, conditions: reread.conditions },
+              c.expected,
+            );
+          }
         }),
       ),
     );
@@ -250,6 +318,28 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
         assert.strictEqual(runs.length, 1);
         assert.strictEqual(runs[0]?.status, 'running');
         assert.isNull(runs[0]?.usage ?? null);
+      }),
+    );
+
+    it.effect('upgraded legacy ticket rows are backfilled with derived phase+conditions', () =>
+      Effect.gen(function* () {
+        const medium = yield* makeMedium;
+        if (medium.createLegacyTicketsTable === undefined) return;
+        yield* Effect.scoped(medium.createLegacyTicketsTable);
+        const tickets = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            return yield* store.list();
+          }),
+        );
+        const byTitle = new Map(tickets.map((t) => [t.title, t]));
+        assert.deepStrictEqual(byTitle.get('Legacy backlog')?.phase, 'queued');
+        assert.deepStrictEqual(byTitle.get('Legacy running work')?.phase, 'working');
+        assert.deepStrictEqual(byTitle.get('Legacy running review')?.phase, 'reviewing');
+        assert.deepStrictEqual(byTitle.get('Legacy rate capped work')?.conditions, [
+          { type: 'rate_capped' },
+        ]);
+        assert.deepStrictEqual(byTitle.get('Legacy rate capped review')?.phase, 'reviewing');
       }),
     );
 

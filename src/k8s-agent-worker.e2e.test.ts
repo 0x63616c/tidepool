@@ -26,6 +26,8 @@ const ticket: Ticket = {
   body: 'prove dispatch/poll/cancel',
   target: 'octo/repo',
   state: 'backlog',
+  phase: 'queued',
+  conditions: [],
   branch: null,
   prNumber: null,
   prId: null,

@@ -32,6 +32,8 @@ export const openSqlite = (
         body TEXT NOT NULL,
         target TEXT NOT NULL,
         state TEXT NOT NULL,
+        phase TEXT NOT NULL DEFAULT 'queued',
+        conditions TEXT NOT NULL DEFAULT '[]',
         branch TEXT,
         pr_number INTEGER,
         pr_id TEXT,
@@ -124,6 +126,32 @@ export const openSqlite = (
     yield* sql`ALTER TABLE tickets ADD COLUMN work_handle TEXT`.pipe(Effect.ignore);
     yield* sql`ALTER TABLE tickets ADD COLUMN dispatched_at INTEGER`.pipe(Effect.ignore);
 
+    // Migration: additive phase+conditions projection derived mechanically from
+    // state. `state` remains authoritative; these are backfilled and dual-written
+    // by the shared store patch path.
+    yield* sql`ALTER TABLE tickets ADD COLUMN phase TEXT`.pipe(Effect.ignore);
+    yield* sql`ALTER TABLE tickets ADD COLUMN conditions TEXT`.pipe(Effect.ignore);
+    yield* sql`
+      UPDATE tickets SET
+        phase = CASE
+          WHEN state = 'backlog' THEN 'queued'
+          WHEN state = 'in_progress' THEN 'working'
+          WHEN state = 'running' AND pr_number IS NULL THEN 'working'
+          WHEN state = 'running' THEN 'reviewing'
+          WHEN state = 'review' THEN 'reviewing'
+          WHEN state = 'done' THEN 'done'
+          WHEN state = 'failed' THEN 'failed'
+          WHEN state = 'rate_capped' AND pr_number IS NULL THEN 'working'
+          WHEN state = 'rate_capped' THEN 'reviewing'
+          ELSE phase
+        END,
+        conditions = CASE
+          WHEN state = 'rate_capped' THEN '[{"type":"rate_capped"}]'
+          ELSE '[]'
+        END
+      WHERE phase IS NULL OR conditions IS NULL
+    `.pipe(Effect.orDie);
+
     yield* sql`
       CREATE TABLE IF NOT EXISTS run_events (
         ticket_id TEXT NOT NULL,
@@ -147,4 +175,6 @@ export const openSqlite = (
 export const makeSqliteStore = (
   filename: string,
 ): Effect.Effect<TicketStoreApi, never, Scope.Scope> =>
-  Effect.map(openSqlite(filename), (sql) => makeStoreApi(sql, { orderBy: 'rowid' }));
+  Effect.map(openSqlite(filename), (sql) =>
+    makeStoreApi(sql, { orderBy: 'rowid', conditionsAs: 'text' }),
+  );

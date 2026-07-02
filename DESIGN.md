@@ -274,9 +274,11 @@ everything upstream). Two levels:
   PRs. Swap-in via the configurable git identity, not a redesign.
 
 ### Tickets & work
-- **Ticket = `{ id, title, goal, state, branch, pr, attempts, usage }`.** `goal` is a natural-
-  language acceptance criterion, `/goal`-style ("add `slugify(s)`…"). **"Green, merged PR" is a
-  system invariant**, NOT part of `goal` text — the pipeline + system prompt own definition-of-done.
+- **Ticket = `{ id, title, body, state, phase, conditions, branch, pr, attempts, … }`.** `body` is the
+  authored markdown task. `state` remains the reconciler's authoritative lifecycle for now;
+  `phase` + `conditions` are mechanically derived and dual-written as the additive migration path
+  toward the settled phase/gates state machine. **"Green, merged PR" is a system invariant**, NOT
+  part of ticket text — the pipeline + system prompt own definition-of-done.
 - **Tickets are first-class sqlite rows — that IS the store and the single source of truth.**
   (Reversed the earlier "backlog = markdown in git" idea: it split state across file+DB, made
   done-ness ambiguous, and gave files a churny move/delete lifecycle. Markdown can't hold deps/

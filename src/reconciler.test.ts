@@ -70,6 +70,8 @@ describe('reconciler', () => {
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'done');
+      assert.strictEqual(final.phase, 'done');
+      assert.deepStrictEqual(final.conditions, []);
       assert.isNotNull(final.mergeSha);
       // The dispatch handle is cleared once the ticket leaves `running`.
       assert.isNull(final.workHandle);
@@ -104,6 +106,8 @@ describe('reconciler', () => {
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'failed');
+      assert.strictEqual(final.phase, 'failed');
+      assert.deepStrictEqual(final.conditions, []);
       assert.strictEqual(final.attempts, 2);
 
       // Red CI is a REVIEW-phase failure: it re-enters review (re-checks CI), it
@@ -141,6 +145,8 @@ describe('reconciler', () => {
 
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'review');
+        assert.strictEqual(final.phase, 'reviewing');
+        assert.deepStrictEqual(final.conditions, []);
 
         const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
         assert.strictEqual(work.length, 0);
@@ -180,6 +186,8 @@ describe('reconciler', () => {
         // Re-WORKS from in_progress to address the feedback (not re-review the same
         // unchanged diff), keeping the existing PR/branch; consumes an attempt.
         assert.strictEqual(final.state, 'in_progress');
+        assert.strictEqual(final.phase, 'working');
+        assert.deepStrictEqual(final.conditions, []);
         assert.strictEqual(final.prNumber, 7);
         assert.strictEqual(final.attempts, 1);
         assert.strictEqual(final.reason, 'Missing verification proof.\nVERDICT: REQUEST_CHANGES');
@@ -189,6 +197,8 @@ describe('reconciler', () => {
         yield* runSteps(1, env);
         const reworking = yield* store.byId(ticket.id);
         assert.strictEqual(reworking.state, 'running');
+        assert.strictEqual(reworking.phase, 'reviewing');
+        assert.deepStrictEqual(reworking.conditions, []);
         assert.isNotNull(reworking.workHandle);
       }),
   );
@@ -282,6 +292,8 @@ describe('reconciler', () => {
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'running');
+      assert.strictEqual(final.phase, 'working');
+      assert.deepStrictEqual(final.conditions, []);
       assert.isNotNull(final.workHandle); // reattach handle persisted
       assert.isNotNull(final.dispatchedAt); // deadline clock persisted
       assert.isNotNull(final.branch); // branch fixed at dispatch
@@ -357,6 +369,8 @@ describe('reconciler', () => {
         assert.strictEqual(dispatches.length, 0, 'no dispatch while the one slot is occupied');
         const finalBacklog = yield* store.byId(backlogTicket.id);
         assert.strictEqual(finalBacklog.state, 'backlog');
+        assert.strictEqual(finalBacklog.phase, 'queued');
+        assert.deepStrictEqual(finalBacklog.conditions, []);
       }),
   );
 

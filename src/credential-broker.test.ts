@@ -27,6 +27,8 @@ const testTicket = (): Ticket => ({
   body: 'add slugify(s)',
   target: 'o/r',
   state: 'in_progress',
+  phase: 'working',
+  conditions: [],
   branch: 'tp/x',
   prNumber: null,
   prId: null,
