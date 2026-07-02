@@ -25,7 +25,7 @@ const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
 
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
-  'id, title, goal, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
+  'id, title, body, target, state, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
 
 interface EventRow {
   readonly ticketId: string;
@@ -102,8 +102,8 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
 
   const insertTicket = (t: Ticket) =>
     sql`
-      INSERT INTO tickets (id, title, goal, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
-      VALUES (${t.id}, ${t.title}, ${t.goal}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+      INSERT INTO tickets (id, title, body, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
+      VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
     `.pipe(Effect.orDie);
 
   const findById = (id: TicketId) =>
@@ -123,7 +123,7 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
         const ticket = decodeTicket({
           id: newTicketId(),
           title: input.title,
-          goal: input.goal,
+          body: input.body,
           target: input.target,
           state: 'backlog',
           branch: null,

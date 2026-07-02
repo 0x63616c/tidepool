@@ -21,7 +21,7 @@ const testConfig: Config = defineConfig({
   retries: 2,
 });
 
-const newTicket = { title: 'Add slugify', goal: 'add slugify(s)', target: 't/repo' };
+const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
 
 const baseLayers = (store: TicketStoreApi) =>
   Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, testConfig));

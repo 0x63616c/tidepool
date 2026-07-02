@@ -42,10 +42,10 @@ const countRows = (sql: SqlClient, table: 'tickets' | 'runs' | 'run_events') =>
 
 const upsertTicket = (sql: SqlClient, t: Ticket) =>
   sql`
-    INSERT INTO tickets (id, title, goal, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
-    VALUES (${t.id}, ${t.title}, ${t.goal}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+    INSERT INTO tickets (id, title, body, target, state, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
+    VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
     ON CONFLICT (id) DO UPDATE SET
-      title = EXCLUDED.title, goal = EXCLUDED.goal, target = EXCLUDED.target,
+      title = EXCLUDED.title, body = EXCLUDED.body, target = EXCLUDED.target,
       state = EXCLUDED.state, branch = EXCLUDED.branch, pr_number = EXCLUDED.pr_number,
       pr_id = EXCLUDED.pr_id, merge_sha = EXCLUDED.merge_sha, attempts = EXCLUDED.attempts,
       worked_attempt = EXCLUDED.worked_attempt, reason = EXCLUDED.reason,

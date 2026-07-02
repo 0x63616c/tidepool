@@ -80,7 +80,7 @@ export const commitMessage = (ticket: { readonly id: string; readonly title: str
 
 /** PR title/body are derived from the ticket so they're deterministic. */
 export const workTitle = (ticket: Ticket): string => `feat: ${ticket.title} (${ticket.id})`;
-export const workBody = (ticket: Ticket): string => ticket.goal;
+export const workBody = (ticket: Ticket): string => ticket.body;
 
 /** Split a `provider/model` config string into the SDK's `{providerID, modelID}`. */
 const splitModel = (model: string): { providerID: string; modelID: string } => {
@@ -91,21 +91,34 @@ const splitModel = (model: string): { providerID: string; modelID: string } => {
 };
 
 const STANDARDS =
-  'Follow the repo conventions. Make the smallest change that satisfies the goal and add/keep tests green. Do not touch CI or unrelated files.';
+  'Follow the repo conventions. Make the smallest change that satisfies the ticket’s acceptance criteria and add/keep tests green. Do not touch CI or unrelated files.';
+
+/**
+ * Wrap the ticket instructions in an XML tag so the agent can tell the authored
+ * ticket body (which is itself markdown with `#` headings) apart from the
+ * surrounding harness prose. The body may be stale by the time the agent runs
+ * (it can sit many tickets deep in the queue), so it is framed as a starting
+ * point to verify against current code — the `# Acceptance Criteria` section is
+ * the authoritative definition of done.
+ */
+const ticketBlock = (ticket: Ticket): string =>
+  `<ticket id="${ticket.id}">\n${ticket.body}\n</ticket>`;
 
 export const workPrompt = (ticket: Ticket): string =>
   [
     `You are the work agent for ticket ${ticket.id}.`,
-    `Goal: ${ticket.goal}`,
+    'The ticket body below is authored markdown (sections like `# Context`, `# Acceptance Criteria`, `# Relevant Files`, `# Approach`, `# Out of Scope`). It may be stale — verify pointers against the current code; the `# Acceptance Criteria` section is authoritative.',
+    ticketBlock(ticket),
     STANDARDS,
-    'Implement the goal directly in this repository. Do not commit or push — the harness handles git.',
+    'Implement the ticket directly in this repository. Do not commit or push — the harness handles git.',
   ].join('\n\n');
 
 export const reviewPrompt = (ticket: Ticket, diff: string): string =>
   [
     `You are the review agent for ticket ${ticket.id}.`,
-    `Goal: ${ticket.goal}`,
-    'Grade the diff below against the goal. Reply with a short justification, then a final line exactly "VERDICT: APPROVE" or "VERDICT: REQUEST_CHANGES".',
+    'Grade the diff below against the ticket body — specifically its `# Acceptance Criteria` section (the definition of done). Other sections are context/pointers and may be stale.',
+    ticketBlock(ticket),
+    'Reply with a short justification, then a final line exactly "VERDICT: APPROVE" or "VERDICT: REQUEST_CHANGES".',
     '--- DIFF ---',
     diff,
   ].join('\n\n');

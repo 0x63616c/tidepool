@@ -29,8 +29,8 @@ const freshSqlitePath = (): string =>
 const seedSqlite = (path: string) =>
   Effect.gen(function* () {
     const store = yield* makeSqliteStore(path);
-    const a = yield* store.add({ title: 'Alpha', goal: 'g-a', target: 't/repo' });
-    const b = yield* store.add({ title: 'Beta', goal: 'g-b', target: 't/repo' });
+    const a = yield* store.add({ title: 'Alpha', body: 'g-a', target: 't/repo' });
+    const b = yield* store.add({ title: 'Beta', body: 'g-b', target: 't/repo' });
     // Exercise the pg-portability-sensitive columns: epoch-ms BIGINT + workHandle.
     yield* store.patch(a.id, {
       state: 'running',
@@ -135,7 +135,7 @@ if (PG_URL === undefined) {
         // the post-move tickets count (3) ≠ source (2) → the tenet-8 gate fires.
         const dest = yield* openPg(pg);
         yield* dest`
-          INSERT INTO tickets (id, title, goal, target, state, attempts)
+          INSERT INTO tickets (id, title, body, target, state, attempts)
           VALUES ('tckt_interloper', 'x', 'g', 't/r', 'backlog', 0)
         `.pipe(Effect.orDie);
 

@@ -23,7 +23,7 @@ const STUB_COMMIT = 'e2ecommit';
 const ticket: Ticket = {
   id: 'tckt_e2e001' as Ticket['id'],
   title: 'e2e roundtrip',
-  goal: 'prove dispatch/poll/cancel',
+  body: 'prove dispatch/poll/cancel',
   target: 'octo/repo',
   state: 'backlog',
   branch: null,

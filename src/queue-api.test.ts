@@ -50,7 +50,7 @@ describe('queue HTTP contract', () => {
     withClient(
       Effect.gen(function* () {
         const qc = yield* QueueControl;
-        const created = yield* qc.add({ title: 'over the wire', goal: 'g', target: 't/repo' });
+        const created = yield* qc.add({ title: 'over the wire', body: 'g', target: 't/repo' });
         expect(created.id).toMatch(/^tckt_/);
         const page = yield* qc.list({ limit: 50, cursor: null, target: null });
         expect(page.items.some((t) => t.id === created.id)).toBe(true);
@@ -62,7 +62,7 @@ describe('queue HTTP contract', () => {
     withClient(
       Effect.gen(function* () {
         const qc = yield* QueueControl;
-        const r = yield* Effect.either(qc.add({ title: 'no', goal: 'g', target: 'x/unknown' }));
+        const r = yield* Effect.either(qc.add({ title: 'no', body: 'g', target: 'x/unknown' }));
         expect(r._tag).toBe('Left');
         if (r._tag === 'Left') expect(r.left._tag).toBe('TargetNotConfigured');
       }),

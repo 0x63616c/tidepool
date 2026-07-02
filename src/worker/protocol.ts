@@ -48,7 +48,7 @@ export const ReviewRunnerConfig = Schema.Struct({
   dir: Schema.String,
   /** `provider/model` string for the review session. */
   model: Schema.String,
-  /** Full review-agent prompt (goal + embedded diff). */
+  /** Full review-agent prompt (ticket body + embedded diff). */
   prompt: Schema.String,
 });
 export type ReviewRunnerConfig = typeof ReviewRunnerConfig.Type;

@@ -75,7 +75,14 @@ export type Run = typeof Run.Type;
 export const Ticket = Schema.Struct({
   id: TicketId,
   title: Schema.String,
-  goal: Schema.String,
+  /**
+   * The full ticket instructions — structured markdown authored by the ticket
+   * writer (the `/new-ticket` skill emits `# Context`/`# Acceptance Criteria`/
+   * `# Relevant Files`/… sections). This is the sole intent-bearing field the
+   * work + review agents read; the review agent grades the diff against the
+   * `# Acceptance Criteria` section. Replaced the terse single-line `goal`.
+   */
+  body: Schema.String,
   target: Schema.String,
   state: TicketState,
   branch: Schema.NullOr(Schema.String),
@@ -102,7 +109,7 @@ export type Ticket = typeof Ticket.Type;
 /** Input to create a ticket. The store assigns id + initial state. */
 export const NewTicket = Schema.Struct({
   title: Schema.String,
-  goal: Schema.String,
+  body: Schema.String,
   target: Schema.String,
 });
 export type NewTicket = typeof NewTicket.Type;

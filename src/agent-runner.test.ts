@@ -1,5 +1,32 @@
 import { assert, describe, it } from '@effect/vitest';
-import { commitMessage, fetchPrDiff, parseUsage, parseVerdict } from './agent-runner.ts';
+import {
+  commitMessage,
+  fetchPrDiff,
+  parseUsage,
+  parseVerdict,
+  reviewPrompt,
+  workPrompt,
+} from './agent-runner.ts';
+import type { Ticket } from './domain.ts';
+import { newTicketId } from './ids.ts';
+
+const ticket = (over: Partial<Ticket> = {}): Ticket => ({
+  id: newTicketId(),
+  title: 'Add slugify',
+  body: '# Acceptance Criteria\n- slugify(s) lowercases and trims',
+  target: 't/repo',
+  state: 'running',
+  branch: null,
+  prNumber: null,
+  prId: null,
+  mergeSha: null,
+  attempts: 0,
+  workedAttempt: null,
+  reason: null,
+  workHandle: null,
+  dispatchedAt: null,
+  ...over,
+});
 
 /**
  * Usage parsing is the proof-of-real-work signal (`tp doctor` asserts non-zero
@@ -174,5 +201,35 @@ describe('fetchPrDiff', () => {
     );
     assert.isDefined(err);
     assert.match(err ?? '', /401/);
+  });
+});
+
+describe('workPrompt / reviewPrompt', () => {
+  it('wraps the ticket body in an <ticket> block and names it markdown', () => {
+    const id = newTicketId();
+    const t = ticket({ id, body: '# Acceptance Criteria\n- do the thing' });
+    const p = workPrompt(t);
+    assert.include(p, `<ticket id="${id}">`);
+    assert.include(p, '</ticket>');
+    assert.include(p, '# Acceptance Criteria\n- do the thing');
+    // the body sits inside the tag, not bare after a "Goal:" label
+    assert.notInclude(p, 'Goal:');
+  });
+
+  it('tells the work agent the body may be stale and criteria are authoritative', () => {
+    const p = workPrompt(ticket());
+    assert.include(p, '# Acceptance Criteria');
+    assert.match(p, /stale/i);
+  });
+
+  it('reviewPrompt grades the diff against the acceptance criteria and embeds both', () => {
+    const id = newTicketId();
+    const t = ticket({ id, body: '# Acceptance Criteria\n- returns a slug' });
+    const p = reviewPrompt(t, 'diff --git a b');
+    assert.include(p, `<ticket id="${id}">`);
+    assert.include(p, '# Acceptance Criteria');
+    assert.include(p, 'diff --git a b');
+    assert.match(p, /VERDICT: APPROVE/);
+    assert.notInclude(p, 'Goal:');
   });
 });

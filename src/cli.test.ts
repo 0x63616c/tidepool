@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Layer } from 'effect';
-import { addAction, getAction, listAction } from './cli.ts';
+import { Effect, Either, Layer, Option } from 'effect';
+import { addAction, chooseBodySource, getAction, listAction } from './cli.ts';
 import { AppConfig, type Config, defineConfig } from './config.ts';
 import { InMemoryTicketStore } from './fakes.ts';
 import { LocalQueueControl, QueueControl } from './queue-control.ts';
@@ -28,7 +28,7 @@ describe('tp ticket add / list', () => {
   it.effect('add enqueues a ticket that list then shows', () =>
     run(
       Effect.gen(function* () {
-        const created = yield* addAction({ title: 'do a thing', goal: 'g', target: 't/repo' });
+        const created = yield* addAction({ title: 'do a thing', body: 'g', target: 't/repo' });
         expect(created).toContain('ticket: created tckt_');
         expect(created).toContain('  target: t/repo');
         const listed = yield* listAction({ target: null, limit: 50 });
@@ -42,7 +42,7 @@ describe('tp ticket add / list', () => {
     run(
       Effect.gen(function* () {
         const qcApi = yield* QueueControl;
-        const ticket = yield* qcApi.add({ title: 'scan me last', goal: 'g', target: 't/repo' });
+        const ticket = yield* qcApi.add({ title: 'scan me last', body: 'g', target: 't/repo' });
         const listed = yield* listAction({ target: null, limit: 50 });
 
         expect(listed.split('\n').slice(0, 2)).toEqual([
@@ -59,7 +59,7 @@ describe('tp ticket get', () => {
     run(
       Effect.gen(function* () {
         const qcApi = yield* QueueControl;
-        const t = yield* qcApi.add({ title: 'traced', goal: 'g', target: 't/repo' });
+        const t = yield* qcApi.add({ title: 'traced', body: 'g', target: 't/repo' });
         const view = yield* getAction(t.id);
         // trace section names the ticket; cost section reports (zero) usage.
         expect(view).toContain(t.id);
@@ -68,13 +68,13 @@ describe('tp ticket get', () => {
     ),
   );
 
-  it.effect('still shows the full goal + core fields for a ticket with zero runs', () =>
+  it.effect('still shows the full body + core fields for a ticket with zero runs', () =>
     run(
       Effect.gen(function* () {
         const qcApi = yield* QueueControl;
         const t = yield* qcApi.add({
           title: 'no runs yet',
-          goal: 'do the thing\nacross two lines',
+          body: 'do the thing\nacross two lines',
           target: 't/repo',
         });
         const view = yield* getAction(t.id);
@@ -124,5 +124,37 @@ describe('tp help hints', () => {
     expect(
       hinted.filter((command) => !invokable.some((known) => command.startsWith(known))),
     ).toEqual([]);
+  });
+});
+
+describe('chooseBodySource (AXI: --body xor --body-file, one required)', () => {
+  const some = Option.some;
+  const none = Option.none<string>();
+
+  it('inline --body → inline source', () => {
+    const r = chooseBodySource({ body: some('hello'), bodyFile: none });
+    expect(Either.isRight(r) && r.right).toEqual({ kind: 'inline', value: 'hello' });
+  });
+
+  it('--body-file <path> → file source', () => {
+    const r = chooseBodySource({ body: none, bodyFile: some('ticket.md') });
+    expect(Either.isRight(r) && r.right).toEqual({ kind: 'file', path: 'ticket.md' });
+  });
+
+  it('--body-file - → stdin source', () => {
+    const r = chooseBodySource({ body: none, bodyFile: some('-') });
+    expect(Either.isRight(r) && r.right).toEqual({ kind: 'stdin' });
+  });
+
+  it('both → error (structured, not a prompt)', () => {
+    const r = chooseBodySource({ body: some('x'), bodyFile: some('y') });
+    expect(Either.isLeft(r)).toBe(true);
+    expect(Either.isLeft(r) && r.left).toMatch(/not both/);
+  });
+
+  it('neither → error naming the required flags', () => {
+    const r = chooseBodySource({ body: none, bodyFile: none });
+    expect(Either.isLeft(r)).toBe(true);
+    expect(Either.isLeft(r) && r.left).toMatch(/--body/);
   });
 });

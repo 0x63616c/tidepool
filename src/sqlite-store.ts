@@ -29,7 +29,7 @@ export const openSqlite = (
       CREATE TABLE IF NOT EXISTS tickets (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
-        goal TEXT NOT NULL,
+        body TEXT NOT NULL,
         target TEXT NOT NULL,
         state TEXT NOT NULL,
         branch TEXT,
@@ -60,6 +60,13 @@ export const openSqlite = (
 
     // Migration: add reason column to existing ticket tables (no-op if already present).
     yield* sql`ALTER TABLE tickets ADD COLUMN reason TEXT`.pipe(Effect.ignore);
+
+    // Migration: the single intent field `goal` became the structured markdown
+    // `body`. On a fresh DB the CREATE TABLE above already spells it `body`, so
+    // this RENAME no-ops (no `goal` column); on an existing DB it carries the old
+    // content over in place. `Effect.ignore` makes both orders idempotent. The
+    // Postgres backing does the same rename as migration `0002_rename_goal_to_body`.
+    yield* sql`ALTER TABLE tickets RENAME COLUMN goal TO body`.pipe(Effect.ignore);
 
     // Migration: async dispatch+poll columns (no-op if already present). The
     // Postgres backing re-authors these in `PgMigrator` DDL (TEXT→text, and
