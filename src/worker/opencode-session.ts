@@ -93,6 +93,17 @@ export class OpencodeFailed extends Data.TaggedError('OpencodeFailed')<{
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 
+/**
+ * One structured transcript log line: a short human-readable message plus
+ * typed annotations (`role`/`kind`/`tool`/`input`/`output`/`patch`, …) so
+ * `pollProgress` can attach them via `Effect.annotateLogs` and `Logger.json`
+ * emits one queryable JSON object per event instead of a flat string.
+ */
+export interface TranscriptEntry {
+  readonly message: string;
+  readonly annotations: Readonly<Record<string, unknown>>;
+}
+
 /** Did this event signal our session went idle (the agent finished its turn)? */
 const isSessionIdle = (ev: unknown, sessionId: string): boolean =>
   isRecord(ev) &&
@@ -176,15 +187,36 @@ export const describeEvent = (ev: unknown): string | null => {
 };
 
 /**
+ * The tool's result body once it's done — the `output` annotation on a
+ * `tool-result` entry, and folded into `partSignature` (below) so a completed
+ * part whose result body arrives on a LATER poll (status unchanged) still
+ * re-fires. Previously the signature was keyed on status alone, so a
+ * late-arriving output/error was silently dropped forever — a part that went
+ * `completed` before its `output`/`metadata` populated never got re-logged.
+ * Prefers the error message on a failed call, then `state.output`, then a
+ * stringified `state.metadata`.
+ */
+const toolResultText = (state: Record<string, unknown>): string | null => {
+  const error = str(state.error);
+  if (error !== null) return error;
+  const output = str(state.output);
+  if (output !== null) return output;
+  return isRecord(state.metadata) ? JSON.stringify(state.metadata) : null;
+};
+
+/**
  * Signature that changes exactly when a part is "worth re-logging" — new id,
- * (for tool parts) a status transition, or (for text/reasoning parts) growth
- * in the streamed text's length. Encoding the length in the signature itself
- * (`text:42`) lets `diffMessages` detect growth without a second map.
+ * (for tool parts) a status transition OR its result body's length changing,
+ * or (for text/reasoning parts) growth in the streamed text's length.
+ * Encoding the length in the signature itself (`text:42`) lets `diffMessages`
+ * detect growth without a second map.
  */
 const partSignature = (part: Record<string, unknown>): string => {
   if (part.type === 'tool') {
-    const status = isRecord(part.state) ? str(part.state.status) : null;
-    return `tool:${status ?? ''}`;
+    const state = isRecord(part.state) ? part.state : {};
+    const status = str(state.status) ?? '';
+    const resultLen = toolResultText(state)?.length ?? 0;
+    return `tool:${status}:${resultLen}`;
   }
   if ((part.type === 'text' || part.type === 'reasoning') && typeof part.text === 'string') {
     return `${part.type}:${part.text.length}`;
@@ -221,6 +253,28 @@ const describeToolDiff = (part: Record<string, unknown>): string | null => {
   return null;
 };
 
+/**
+ * Same field precedence as `describeToolDiff`'s message, but returns just the
+ * raw patch/diff/content text (no `[diff] tool:` prefix) — the `patch`
+ * annotation on a `file-diff` entry.
+ */
+const extractPatch = (part: Record<string, unknown>): string | null => {
+  if (part.type !== 'tool') return null;
+  const tool = str(part.tool);
+  if (!tool || !EDIT_TOOLS.has(tool)) return null;
+  const state = isRecord(part.state) ? part.state : {};
+  if (str(state.status) !== 'completed') return null;
+  const input = isRecord(state.input) ? state.input : {};
+  const patch = str(input.patch) ?? str(input.diff);
+  if (patch) return patch;
+  const oldString = str(input.oldString);
+  const newString = str(input.newString);
+  if (oldString !== null || newString !== null) {
+    return `--- before\n${oldString ?? ''}\n+++ after\n${newString ?? ''}`;
+  }
+  return str(input.content);
+};
+
 /** Prefix for a streamed text/reasoning delta line, keyed by part type. */
 const TEXT_DELTA_LABELS: Record<string, string> = { text: '[text]', reasoning: '[reasoning]' };
 
@@ -242,39 +296,113 @@ const describeTextDelta = (
 };
 
 /**
+ * Every structured transcript entry a single new-or-changed part produces —
+ * the piece `diffMessages` folds over each poll. A tool part can yield up to
+ * three entries: its status line (`tool-call`, carrying `input` — the bash
+ * command, grep pattern, read path, … `state.input` verbatim, for every tool
+ * not just edit tools), its result once completed/errored (`tool-result`,
+ * carrying `output`), and — for file-editing tools — its patch (`file-diff`,
+ * carrying `patch`). Text/reasoning parts yield the delta since the last
+ * poll, labelled by `kind`. Step boundaries and file references get a
+ * one-shot line (their `partSignature` fallback `${type}:` never changes, so
+ * they fire exactly once, the first time they're seen). `patch` (a
+ * session-level checkpoint, distinct from a tool's edit patch), `snapshot`,
+ * and `agent` parts carry no independently useful transcript content
+ * (opencode-internal bookkeeping) — intentionally not rendered, though still
+ * marked `seen` by the caller so they don't loop.
+ */
+const describePart = (
+  part: Record<string, unknown>,
+  role: string | null,
+  prevSig: string | undefined,
+): readonly TranscriptEntry[] => {
+  const base = role !== null ? { role } : {};
+  if (part.type === 'tool') {
+    const tool = str(part.tool) ?? 'tool';
+    const state = isRecord(part.state) ? part.state : {};
+    const status = str(state.status) ?? 'pending';
+    const entries: TranscriptEntry[] = [];
+
+    const callMessage = describeToolPart(part);
+    if (callMessage !== null) {
+      entries.push({
+        message: callMessage,
+        annotations: { ...base, kind: 'tool-call', tool, status, input: state.input ?? null },
+      });
+    }
+
+    const result = toolResultText(state);
+    if ((status === 'completed' || status === 'error') && result !== null) {
+      entries.push({
+        message: `tool ${tool} result`,
+        annotations: { ...base, kind: 'tool-result', tool, status, output: result },
+      });
+    }
+
+    const patch = extractPatch(part);
+    const diffMessage = describeToolDiff(part);
+    if (patch !== null && diffMessage !== null) {
+      entries.push({
+        message: diffMessage,
+        annotations: { ...base, kind: 'file-diff', tool, patch },
+      });
+    }
+    return entries;
+  }
+
+  if (part.type === 'text' || part.type === 'reasoning') {
+    const message = describeTextDelta(part, prevSig);
+    return message !== null ? [{ message, annotations: { ...base, kind: part.type } }] : [];
+  }
+
+  if (part.type === 'step-start' || part.type === 'step-finish') {
+    const phase = part.type === 'step-start' ? 'start' : 'finish';
+    return [{ message: `step ${phase}`, annotations: { ...base, kind: 'step', phase } }];
+  }
+
+  if (part.type === 'file') {
+    const path = str(part.filename) ?? str(part.path) ?? str(part.url);
+    return path !== null
+      ? [{ message: `file ${path}`, annotations: { ...base, kind: 'file', path } }]
+      : [];
+  }
+
+  return [];
+};
+
+/**
  * Pure diff step behind the poll-based progress logger (Ticket E). Given the
  * part-id -> last-logged-signature map from the previous poll and the latest
- * full `listMessages` snapshot (`Array<{info, parts}>`), returns the log lines
- * for parts that are new or whose signature changed, plus the updated map —
- * so a part already logged at its current status/text-length is never
- * re-logged. A single changed part can emit multiple lines (e.g. a completed
- * edit tool logs both its status summary and its diff). Total over `unknown`
- * — a malformed message or part is skipped, never thrown, so `pollProgress`'s
- * loop can never die on a shape it didn't expect.
+ * full `listMessages` snapshot (`Array<{info, parts}>`), returns the
+ * structured transcript entries for parts that are new or whose signature
+ * changed, plus the updated map — so a part already logged at its current
+ * status/text-length is never re-logged. A single changed part can emit
+ * multiple entries (e.g. a completed edit tool logs its status summary, its
+ * result, AND its diff). Every entry carries the parent message's `role`
+ * (user/assistant) as an annotation. Total over `unknown` — a malformed
+ * message or part is skipped, never thrown, so `pollProgress`'s loop can
+ * never die on a shape it didn't expect.
  */
 export const diffMessages = (
   seen: ReadonlyMap<string, string>,
   messages: readonly unknown[],
-): { readonly lines: readonly string[]; readonly seen: ReadonlyMap<string, string> } => {
+): { readonly entries: readonly TranscriptEntry[]; readonly seen: ReadonlyMap<string, string> } => {
   const next = new Map(seen);
-  const lines: string[] = [];
+  const entries: TranscriptEntry[] = [];
   for (const msg of messages) {
     if (!isRecord(msg) || !Array.isArray(msg.parts)) continue;
+    const info = isRecord(msg.info) ? msg.info : {};
+    const role = str(info.role);
     for (const part of msg.parts) {
       if (!isRecord(part) || typeof part.id !== 'string') continue;
       const prevSig = seen.get(part.id);
       const sig = partSignature(part);
       if (prevSig === sig) continue;
       next.set(part.id, sig);
-      const toolLine = describeToolPart(part);
-      if (toolLine !== null) lines.push(toolLine);
-      const diffLine = describeToolDiff(part);
-      if (diffLine !== null) lines.push(diffLine);
-      const textLine = describeTextDelta(part, prevSig);
-      if (textLine !== null) lines.push(textLine);
+      entries.push(...describePart(part, role, prevSig));
     }
   }
-  return { lines, seen: next };
+  return { entries, seen: next };
 };
 
 /**
@@ -304,8 +432,12 @@ const pollProgress = (
       );
       const diffed = diffMessages(seen, messages);
       seen = diffed.seen;
-      for (const line of diffed.lines) yield* Effect.logInfo(line);
-      if (diffed.lines.length > 0) {
+      for (const entry of diffed.entries) {
+        yield* Effect.logInfo(entry.message).pipe(
+          Effect.annotateLogs({ sessionId, ...entry.annotations }),
+        );
+      }
+      if (diffed.entries.length > 0) {
         const partCount = messages.reduce(
           (n: number, m) => n + (isRecord(m) && Array.isArray(m.parts) ? m.parts.length : 0),
           0,
@@ -313,7 +445,7 @@ const pollProgress = (
         const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
         yield* Effect.logInfo(
           `progress: ${messages.length} messages, ${partCount} parts, ${elapsedSec}s elapsed`,
-        );
+        ).pipe(Effect.annotateLogs({ sessionId, kind: 'progress' }));
       }
     }
   }).pipe(Effect.ignore);

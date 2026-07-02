@@ -76,14 +76,25 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > repro) — so the old event-collector-only logging went silent right after "opencode server started",
 > making a healthy 40-minute run look hung. The runner now also **polls** the opencode server's
 > `GET /session/:id/message` snapshot every second (`opencode-session.ts#DEFAULT_POLL_INTERVAL_MS`,
-> was 3s), diffs it against the last poll via the pure `diffMessages` reducer, and logs one line per
-> tool/part that's new or changed — so `kubectl logs` shows real progress instead of going dark. It
-> also streams the assistant's actual `text`/`reasoning` content (delta-only per poll, labelled
-> `[text]`/`[reasoning]`, tracked via a length-encoded signature so growing parts aren't re-logged in
-> full each time), and logs the real diff/patch for completed file-editing tool calls (`edit` /
-> `apply_patch` / `write` / `patch` — prefers a ready-made unified patch, falls back to an
-> old/new-string pair or raw written content), labelled `[diff]`. The SSE collector is kept (harmless,
-> and correct for local dev where SSE does deliver events).
+> was 3s), diffs it against the last poll via the pure `diffMessages` reducer, and logs one
+> structured entry per tool/part that's new or changed — so `kubectl logs` shows real progress
+> instead of going dark. Each part maps to a `TranscriptEntry` (message + typed `annotations`:
+> `role`, `kind` — `text`/`reasoning`/`tool-call`/`tool-result`/`file-diff`/`step`/`file` —
+> `tool`, `input`, `output`, `patch`), so tool inputs are logged for every tool (not just
+> edit tools), tool results/output are logged, and message role is attached. The dedup
+> signature (`partSignature`) is keyed on `status:resultLen`, not status alone, so a tool part
+> that completes on one poll and gets its output on a later poll re-fires instead of being
+> silently dropped. It also streams the assistant's actual `text`/`reasoning` content
+> (delta-only per poll, tracked via a length-encoded signature so growing parts aren't
+> re-logged in full each time), and logs the real diff/patch for completed file-editing tool
+> calls (`edit` / `apply_patch` / `write` / `patch` — prefers a ready-made unified patch, falls
+> back to an old/new-string pair or raw written content) as a `file-diff` entry carrying the
+> patch in `annotations.patch`. **Logging is structured JSON**, matching the reconciler's
+> `Logger.json` (`daemon.ts`): `agent-worker.ts#makeJsonStderrLogger` composes the pure
+> `Logger.jsonLogger` (string-producing, no I/O — NOT the `Logger.json` layer, whose built-in
+> logger writes via `console.log`/stdout) with a stderr sink, so every diagnostic line is a
+> timestamped JSON object while stdout stays reserved for the worker's one result line. The
+> SSE collector is kept (harmless, and correct for local dev where SSE does deliver events).
 
 ---
 
@@ -367,8 +378,8 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   logs themselves — a 7-char slice of the same `TIDEPOOL_GIT_SHA` stamped onto EVERY log line (both
   apps): the reconciler/daemon process (`reconciler.ts` `reconcileForever`, wrapping the whole loop
   so every boot + settle-round line carries it) and the agent-worker pod (`worker/agent-worker.ts`,
-  rendered by its stderr logger). So `kubectl logs` alone traces a misbehaving line back to a commit,
-  no cross-referencing the pod label needed.
+  rendered in `annotations.sha` by its structured JSON stderr logger — see above). So `kubectl logs`
+  alone traces a misbehaving line back to a commit, no cross-referencing the pod label needed.
 
 ### Surface & cost visibility
 - **CLI-first, AXI-compliant; no TUI in v1.** `tp ticket add | list | get | logs | transcript`
