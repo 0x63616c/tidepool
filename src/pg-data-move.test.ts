@@ -37,6 +37,7 @@ const seedSqlite = (path: string) =>
       workHandle: makeWorkHandle('tp-work-tckt_a-1'),
       dispatchedAt: 1_750_000_000_123,
       attempts: 2,
+      contentionCount: 4,
     });
     const run: Run = {
       id: newRunId(),
@@ -100,6 +101,7 @@ if (PG_URL === undefined) {
         assert.strictEqual(movedA.dispatchedAt, 1_750_000_000_123);
         assert.strictEqual(typeof movedA.dispatchedAt, 'number');
         assert.strictEqual(movedA.attempts, 2);
+        assert.strictEqual(movedA.contentionCount, 4);
 
         const runs = yield* store.runsFor(seeded.a.id);
         assert.deepStrictEqual(runs, [seeded.run]);

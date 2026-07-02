@@ -51,10 +51,12 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
             branch: 'tp/x',
             prNumber: 7,
             attempts: 1,
+            contentionCount: 2,
           });
           assert.strictEqual(patched.state, 'review');
           assert.strictEqual(patched.branch, 'tp/x');
           assert.strictEqual(patched.prNumber, 7);
+          assert.strictEqual(patched.contentionCount, 2);
           // The change is durable, not just returned.
           const reread = yield* store.byId(created.id);
           assert.deepStrictEqual(reread, patched);

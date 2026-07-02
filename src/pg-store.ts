@@ -134,12 +134,18 @@ const migration0004TicketPhaseConditions = Effect.gen(function* () {
   yield* sql`ALTER TABLE tickets ALTER COLUMN conditions SET DEFAULT '[]'::jsonb`;
 });
 
+const migration0005ContentionCount = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`ALTER TABLE tickets ADD COLUMN contention_count INTEGER NOT NULL DEFAULT 0`;
+});
+
 /** The migration set, shared by the on-boot migrator and the store open path. */
 export const pgMigrations: Record<string, Effect.Effect<void, unknown, SqlClient.SqlClient>> = {
   '0001_init': migration0001Init,
   '0002_rename_goal_to_body': migration0002RenameGoalToBody,
   '0003_run_ledger': migration0003RunLedger,
   '0004_ticket_phase_conditions': migration0004TicketPhaseConditions,
+  '0005_contention_count': migration0005ContentionCount,
 };
 
 /**

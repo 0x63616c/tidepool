@@ -61,6 +61,7 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
           prId: null,
           mergeSha: null,
           attempts: 0,
+          contentionCount: 0,
           workedAttempt: null,
           reason: null,
           workHandle: null,

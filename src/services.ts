@@ -37,6 +37,7 @@ export type TicketPatch = Partial<
     | 'prId'
     | 'mergeSha'
     | 'attempts'
+    | 'contentionCount'
     | 'workedAttempt'
     | 'reason'
     | 'workHandle'

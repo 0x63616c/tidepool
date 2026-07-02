@@ -214,9 +214,11 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 - **The "concurrency milestone" (raising N>1) unlocks two things together:** (a) **credential broker**
   — main box is the sole `auth.json` refresher, serving short-lived creds to workers (the networked
   form of how one laptop runs many opencode sessions off one shared file); (b) **concurrent-merge /
-  rebase-contention strategy** — concurrent branches off one main need rebase-retry-on-conflict.
-  Neither is built until N>1 is actually wanted. (opencode's exact refresh-locking mechanism — file
-  lock vs re-read-on-401 — to be confirmed *at that milestone*, not now.)
+  rebase-contention strategy** — concurrent branches off one main need rebase-retry-on-conflict. The
+  merge gate now tracks contention separately from work attempts: branch-update / merge-conflict
+  bounces increment `contention_count`, successful work resets it, and budget exhaustion sets a
+  `needs_human` condition instead of failing the ticket. (opencode's exact refresh-locking mechanism
+  — file lock vs re-read-on-401 — to be confirmed *at that milestone*, not now.)
 - **CI/GitOps boundary:** persistent infra (main box, network, firewall, worker snapshot) is
   **declarative via Pulumi, applied in CI**. Worker boxes are **runtime cattle** created by the
   reconciler — imperative, outside CI, by design.

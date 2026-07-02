@@ -42,13 +42,14 @@ const countRows = (sql: SqlClient, table: 'tickets' | 'runs' | 'run_events') =>
 
 const upsertTicket = (sql: SqlClient, t: Ticket) =>
   sql`
-    INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
-    VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${JSON.stringify(t.conditions)}::jsonb, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+    INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, contention_count, worked_attempt, reason, work_handle, dispatched_at)
+    VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${JSON.stringify(t.conditions)}::jsonb, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.contentionCount}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
     ON CONFLICT (id) DO UPDATE SET
       title = EXCLUDED.title, body = EXCLUDED.body, target = EXCLUDED.target,
       state = EXCLUDED.state, phase = EXCLUDED.phase, conditions = EXCLUDED.conditions,
       branch = EXCLUDED.branch, pr_number = EXCLUDED.pr_number,
       pr_id = EXCLUDED.pr_id, merge_sha = EXCLUDED.merge_sha, attempts = EXCLUDED.attempts,
+      contention_count = EXCLUDED.contention_count,
       worked_attempt = EXCLUDED.worked_attempt, reason = EXCLUDED.reason,
       work_handle = EXCLUDED.work_handle, dispatched_at = EXCLUDED.dispatched_at
   `.pipe(Effect.orDie);

@@ -313,6 +313,47 @@ const retryOrFail = (
     return patched;
   });
 
+const recordContention = (
+  store: TicketStoreApi,
+  ticket: Ticket,
+  contentionRetries: number,
+  reason: string,
+  progress: Parameters<TicketStoreApi['patch']>[1],
+): Effect.Effect<{ readonly exhausted: boolean; readonly ticket: Ticket }, TicketNotFound> =>
+  Effect.gen(function* () {
+    const contentionCount = ticket.contentionCount + 1;
+    const humanReason = `merge contention exceeded budget (${contentionCount}/${contentionRetries}): ${reason}`;
+    const exhausted = contentionCount > contentionRetries;
+    const hasNeedsHuman = ticket.conditions.some((c) => c.type === 'needs_human');
+    const conditions =
+      exhausted && !hasNeedsHuman
+        ? [...ticket.conditions, { type: 'needs_human' as const, reason: humanReason }]
+        : ticket.conditions;
+    const patched = yield* store.patch(
+      ticket.id,
+      exhausted
+        ? {
+            contentionCount,
+            conditions,
+            reason: humanReason,
+            workHandle: null,
+            dispatchedAt: null,
+          }
+        : { ...progress, contentionCount },
+    );
+    const events = [
+      transitionEvent(
+        ticket.id,
+        `contention count: ${ticket.contentionCount} -> ${contentionCount} (${reason})`,
+      ),
+    ];
+    if (exhausted && !hasNeedsHuman) {
+      events.push(transitionEvent(ticket.id, `condition set: needs_human (${humanReason})`));
+    }
+    yield* store.appendEvents(events);
+    return { exhausted, ticket: patched };
+  });
+
 /**
  * Tri-state settle from the forge's ground truth for a ticket's PR — the closed
  * loop that catches an external merge, a crash between `forge.merge` succeeding
@@ -438,6 +479,14 @@ const stepTicket = (
               const finalizedRun = yield* finalizeSuccessOrLog(store, ticket, work.usage);
               if (finalizedRun !== null)
                 yield* store.appendEvents(workCaptures(ticket.id, finalizedRun.id, work));
+              if (ticket.contentionCount > 0) {
+                yield* store.appendEvents([
+                  transitionEvent(
+                    ticket.id,
+                    `contention count: ${ticket.contentionCount} -> 0 (successful work)`,
+                  ),
+                ]);
+              }
 
               // Open the PR on first work; on a retry the fix is on the same branch.
               const branch = ticket.branch ?? branchFor(ticket);
@@ -457,6 +506,7 @@ const stepTicket = (
                   prNumber: pr.number,
                   prId: pr.id,
                   workedAttempt: ticket.attempts,
+                  contentionCount: 0,
                   phase: 'reviewing',
                   workHandle: null,
                   dispatchedAt: null,
@@ -465,6 +515,7 @@ const stepTicket = (
                 yield* store.patch(ticket.id, {
                   branch,
                   workedAttempt: ticket.attempts,
+                  contentionCount: 0,
                   phase: 'reviewing',
                   workHandle: null,
                   dispatchedAt: null,
@@ -544,11 +595,10 @@ const stepTicket = (
       });
 
     // Generic gate rule (TOP, before any phase logic): a gated ticket never
-    // dispatches — this tick only handles condition clearing. `rate_capped`
-    // (the only condition today) clears immediately: the ticket keeps its
-    // pipeline slot (see selection.ts) and progresses on the next tick,
-    // preserving the old immediate re-pick semantics.
+    // dispatches. `rate_capped` is transient and clears immediately; human-lane
+    // conditions remain until an operator changes the ticket.
     if (ticket.conditions.length > 0) {
+      if (ticket.conditions.some((c) => c.type === 'needs_human')) return;
       const to = deriveStateFromPhase({ ...ticket, conditions: [] });
       yield* Effect.logInfo('clearing rate_capped condition; re-picking ticket').pipe(
         Effect.annotateLogs({ from: 'rate_capped', to }),
@@ -787,15 +837,23 @@ const stepTicket = (
                 yield* Effect.logWarning('merge gate: update conflict; dispatching rework').pipe(
                   Effect.annotateLogs({ pr: prNumber, branch, base }),
                 );
-                yield* store.patch(ticket.id, {
-                  phase: 'working',
-                  workedAttempt: null,
-                  workHandle: null,
-                  dispatchedAt: null,
-                });
+                const recorded = yield* recordContention(
+                  store,
+                  ticket,
+                  config.contentionRetries,
+                  'merge gate: update conflict',
+                  {
+                    phase: 'working',
+                    workedAttempt: null,
+                    workHandle: null,
+                    dispatchedAt: null,
+                  },
+                );
                 yield* store.appendEvents([
                   transitionEvent(ticket.id, 'merge gate: update conflict'),
-                  transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`),
+                  ...(recorded.exhausted
+                    ? []
+                    : [transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`)]),
                 ]);
                 return false;
               }),
@@ -805,14 +863,22 @@ const stepTicket = (
           yield* Effect.logInfo('merge gate: branch updated; returning to reviewing').pipe(
             Effect.annotateLogs({ pr: prNumber, branch, base }),
           );
-          yield* store.patch(ticket.id, {
-            phase: 'reviewing',
-            workHandle: null,
-            dispatchedAt: null,
-          });
+          const recorded = yield* recordContention(
+            store,
+            ticket,
+            config.contentionRetries,
+            'merge gate: branch updated',
+            {
+              phase: 'reviewing',
+              workHandle: null,
+              dispatchedAt: null,
+            },
+          );
           yield* store.appendEvents([
             transitionEvent(ticket.id, 'merge gate: branch updated'),
-            transitionEvent(ticket.id, `phase: ${ticket.phase} -> reviewing`),
+            ...(recorded.exhausted
+              ? []
+              : [transitionEvent(ticket.id, `phase: ${ticket.phase} -> reviewing`)]),
           ]);
           return;
         }
@@ -892,21 +958,29 @@ const stepTicket = (
       // `working` with `workedAttempt` cleared (forces a real rework dispatch
       // that rebases the branch) and NO attempt spent.
       MergeConflict: (_: MergeConflict) =>
-        Effect.flatMap(TicketStore, (s) =>
-          Effect.zipRight(
-            Effect.logWarning('merge conflict; bouncing ticket back to working'),
-            Effect.zipRight(
-              s.patch(ticket.id, {
-                phase: 'working',
-                workedAttempt: null,
-                workHandle: null,
-                dispatchedAt: null,
-              }),
-              s.appendEvents([
+        Effect.flatMap(AppConfig, (c) =>
+          Effect.flatMap(TicketStore, (s) =>
+            Effect.gen(function* () {
+              yield* Effect.logWarning('merge conflict; bouncing ticket back to working');
+              const recorded = yield* recordContention(
+                s,
+                ticket,
+                c.contentionRetries,
+                'merge conflict',
+                {
+                  phase: 'working',
+                  workedAttempt: null,
+                  workHandle: null,
+                  dispatchedAt: null,
+                },
+              );
+              yield* s.appendEvents([
                 failureEvent(ticket.id, 'MergeConflict'),
-                transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`),
-              ]),
-            ),
+                ...(recorded.exhausted
+                  ? []
+                  : [transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`)]),
+              ]);
+            }),
           ),
         ),
       ForgeError: () => Effect.void, // transient — retried next tick, ticket unchanged

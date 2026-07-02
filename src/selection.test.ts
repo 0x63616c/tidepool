@@ -32,6 +32,7 @@ const ticketIn = (phase: TicketPhase, conditions: Ticket['conditions'] = []): Ti
     prId: null,
     mergeSha: null,
     attempts: 0,
+    contentionCount: 0,
     workedAttempt: null,
     reason: null,
     workHandle: null,

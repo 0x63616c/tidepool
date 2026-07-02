@@ -27,7 +27,7 @@ const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
 
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
-  'id, title, body, target, state, phase, conditions, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
+  'id, title, body, target, state, phase, conditions, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, contention_count AS "contentionCount", worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
 
 interface EventRow {
   readonly ticketId: string;
@@ -97,6 +97,7 @@ const ticketFromRow = (row: unknown): Ticket => {
     conditions: json(r.conditions),
     prNumber: num(r.prNumber),
     attempts: num(r.attempts),
+    contentionCount: num(r.contentionCount),
     workedAttempt: num(r.workedAttempt),
     dispatchedAt: num(r.dispatchedAt),
   });
@@ -116,6 +117,7 @@ const ticketFromRowEither = (row: unknown) => {
     conditions,
     prNumber: num(r.prNumber),
     attempts: num(r.attempts),
+    contentionCount: num(r.contentionCount),
     workedAttempt: num(r.workedAttempt),
     dispatchedAt: num(r.dispatchedAt),
   });
@@ -143,12 +145,12 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
     const conditions = encodeConditions(t);
     return opts.conditionsAs === 'jsonb'
       ? sql`
-          INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
-          VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${conditions}::jsonb, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+          INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, contention_count, worked_attempt, reason, work_handle, dispatched_at)
+          VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${conditions}::jsonb, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.contentionCount}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
         `.pipe(Effect.orDie)
       : sql`
-          INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, worked_attempt, reason, work_handle, dispatched_at)
-          VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${conditions}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
+          INSERT INTO tickets (id, title, body, target, state, phase, conditions, branch, pr_number, pr_id, merge_sha, attempts, contention_count, worked_attempt, reason, work_handle, dispatched_at)
+          VALUES (${t.id}, ${t.title}, ${t.body}, ${t.target}, ${t.state}, ${t.phase}, ${conditions}, ${t.branch}, ${t.prNumber}, ${t.prId}, ${t.mergeSha}, ${t.attempts}, ${t.contentionCount}, ${t.workedAttempt}, ${t.reason}, ${t.workHandle}, ${t.dispatchedAt})
         `.pipe(Effect.orDie);
   };
 
@@ -179,6 +181,7 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
           prId: null,
           mergeSha: null,
           attempts: 0,
+          contentionCount: 0,
           workedAttempt: null,
           reason: null,
           workHandle: null,
@@ -230,6 +233,7 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
                 pr_id = ${updated.prId},
                 merge_sha = ${updated.mergeSha},
                 attempts = ${updated.attempts},
+                contention_count = ${updated.contentionCount},
                 worked_attempt = ${updated.workedAttempt},
                 reason = ${updated.reason},
                 work_handle = ${updated.workHandle},
@@ -246,6 +250,7 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
                 pr_id = ${updated.prId},
                 merge_sha = ${updated.mergeSha},
                 attempts = ${updated.attempts},
+                contention_count = ${updated.contentionCount},
                 worked_attempt = ${updated.workedAttempt},
                 reason = ${updated.reason},
                 work_handle = ${updated.workHandle},
