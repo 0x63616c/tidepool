@@ -648,7 +648,15 @@ const stepTicket = (
         Effect.flatMap(TicketStore, (s) =>
           Effect.zipRight(
             Effect.logWarning('merge conflict; bouncing ticket back to in_progress'),
-            s.patch(ticket.id, { state: 'in_progress', workHandle: null, dispatchedAt: null }),
+            Effect.zipRight(
+              s.patch(ticket.id, {
+                state: 'in_progress',
+                workedAttempt: null,
+                workHandle: null,
+                dispatchedAt: null,
+              }),
+              s.appendEvents([failureEvent(ticket.id, 'MergeConflict')]),
+            ),
           ),
         ),
       ForgeError: () => Effect.void, // transient — retried next tick, ticket unchanged

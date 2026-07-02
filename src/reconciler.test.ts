@@ -192,6 +192,42 @@ describe('reconciler', () => {
       }),
   );
 
+  it.effect('merge conflict bounce re-dispatches work without spending an attempt', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        state: 'review',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: 0,
+        attempts: 0,
+      });
+
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green', failMerge: true }),
+        fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
+      );
+
+      // review → dispatch review; poll approve → merge conflict bounce; next tick must re-work.
+      yield* runSteps(3, env);
+
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'running');
+      assert.strictEqual(final.attempts, 0, 'merge contention must not spend a work attempt');
+      assert.strictEqual(final.prNumber, 7, 'the existing PR is reused by the worker force-push');
+      assert.deepStrictEqual(
+        dispatches.map((d) => d.kind),
+        ['review', 'work'],
+      );
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.strictEqual(events.filter((e) => /MergeConflict/.test(e.line)).length, 1);
+    }),
+  );
+
   it.effect('(e) deadline reaper: a worker past maxTtlSec is cancelled and retried', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
