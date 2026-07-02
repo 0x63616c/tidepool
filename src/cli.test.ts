@@ -37,6 +37,21 @@ describe('tp ticket add / list', () => {
       }),
     ),
   );
+
+  it.effect('renders list columns as id, state, target, title', () =>
+    run(
+      Effect.gen(function* () {
+        const qcApi = yield* QueueControl;
+        const ticket = yield* qcApi.add({ title: 'scan me last', goal: 'g', target: 't/repo' });
+        const listed = yield* listAction({ target: null, limit: 50 });
+
+        expect(listed.split('\n').slice(0, 2)).toEqual([
+          'tickets[1]{id,state,target,title}:',
+          `  ${ticket.id},${ticket.state},${ticket.target},${ticket.title}`,
+        ]);
+      }),
+    ),
+  );
 });
 
 describe('tp ticket get', () => {
