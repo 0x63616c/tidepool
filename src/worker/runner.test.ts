@@ -57,6 +57,7 @@ const fakeOpencode: OpencodePort = {
     yield { type: 'session.idle', properties: { sessionID: 'ses_fake' } };
   },
   prompt: async () => ({ info: assistantInfo, text: 'done' }),
+  listMessages: async () => [],
 };
 
 describe('runner bundle', () => {

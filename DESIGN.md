@@ -63,6 +63,22 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > **throwaway, idempotent sqlite→Postgres data-move Job** (`pg-data-move.ts`) that read through the
 > domain types and hard-failed on any source/dest row-count mismatch (tenet 8), then was deleted. The
 > pg DSN (`pg-rw.core.svc:5432`) + creds are runtime config (`Redacted`), never hardcoded.
+>
+> **Session budget + worker observability (fixed post-cutover 2026-07-01).** Every production ticket
+> was failing: real gpt-5.5 sessions doing actual repo work run ~6-9 min, but `runSession`'s hard
+> timeout (`opencode-session.ts#DEFAULT_SESSION_TIMEOUT_MS`) was 8 min, killing them mid-work. It's now
+> **60 min**, and the Job's `activeDeadlineSeconds` (`runtime.ts#workerDeadlineSeconds`, env
+> `TIDEPOOL_WORKER_DEADLINE_SEC`) is **65 min** — must stay above the session timeout or k8s kills the
+> pod mid-push after the session itself completes; `ttlSecondsAfterFinished`
+> (`workerTtlSeconds`/`TIDEPOOL_WORKER_TTL_SEC`) is **24h** so finished/failed pods stay in `kubectl get
+> pods` for post-mortem. Compounding the timeout: in-cluster, `client.event.subscribe`'s SSE stream
+> delivers only `server.connected`/`server.heartbeat` — zero session/tool events (proven by in-cluster
+> repro) — so the old event-collector-only logging went silent right after "opencode server started",
+> making a healthy 40-minute run look hung. The runner now also **polls** the opencode server's
+> `GET /session/:id/message` snapshot every few seconds (`opencode-session.ts#pollProgress`), diffs it
+> against the last poll via the pure `diffMessages` reducer, and logs one line per tool/part that's new
+> or changed — so `kubectl logs` shows real progress instead of going dark. The SSE collector is kept
+> (harmless, and correct for local dev where SSE does deliver events).
 
 ---
 

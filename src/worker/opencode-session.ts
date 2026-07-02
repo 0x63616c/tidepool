@@ -16,11 +16,17 @@ import { parseUsage } from './usage.ts';
  * Hard ceiling for one opencode session. A hung session (server stuck, files
  * created but `session.idle` never arrives, or `prompt` never resolving) would
  * otherwise pin the runner — and, upstream, the reconciler's settle — forever.
- * The default is generous (real sessions finish in minutes); a worker exceeding
- * it is treated as stuck: the scope releases (killing the server) and the run
- * fails with a typed `OpencodeFailed`, so the box is torn down and retried.
+ * 60 minutes (was 8 — real gpt-5.5 sessions doing actual repo work run ~6-9
+ * min, so the old timeout was killing production tickets mid-work); a worker
+ * exceeding it is treated as stuck: the scope releases (killing the server)
+ * and the run fails with a typed `OpencodeFailed`, so the box is torn down and
+ * retried. Must stay under the Job's `activeDeadlineSeconds` (see
+ * `runtime.ts#workerDeadlineSeconds`, 65 min) or k8s kills the pod first.
  */
-export const DEFAULT_SESSION_TIMEOUT_MS = 8 * 60 * 1000;
+export const DEFAULT_SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+
+/** How often the progress poller re-fetches `listMessages` (see `pollProgress`). */
+const DEFAULT_POLL_INTERVAL_MS = 3000;
 
 /** What one driven session yields: token accounting plus the assistant's reply. */
 export interface SessionOutcome {
@@ -63,6 +69,16 @@ export interface OpencodePort {
   readonly subscribeEvents: (server: OpencodeServerHandle, dir: string) => AsyncIterable<unknown>;
   /** Send a prompt; resolves with the final assistant message info + reply text. */
   readonly prompt: (server: OpencodeServerHandle, params: PromptParams) => Promise<PromptReply>;
+  /**
+   * Snapshot every message + part for a session (`GET /session/:id/message`).
+   * In-cluster, `subscribeEvents`' SSE delivers only `server.connected`/
+   * `server.heartbeat` — zero session/tool events — so `pollProgress` polls
+   * this instead to keep the worker log from going silent mid-session.
+   */
+  readonly listMessages: (
+    server: OpencodeServerHandle,
+    sessionId: string,
+  ) => Promise<readonly unknown[]>;
 }
 
 /** A step of the opencode session failed (server, session, or prompt). */
@@ -85,6 +101,22 @@ const fail = (op: string) => (e: unknown) => new OpencodeFailed({ op, reason: St
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 
 /**
+ * Reduce a tool part — shared shape between `message.part.updated`'s `part`
+ * (from the SSE stream) and a part inside a `listMessages` snapshot (from the
+ * poller) — to a compact summary, or `null` if it isn't a tool part. Pure and
+ * total so both `describeEvent` and `diffMessages` can lean on it.
+ */
+const describeToolPart = (part: Record<string, unknown>): string | null => {
+  if (part.type !== 'tool') return null;
+  const tool = str(part.tool) ?? 'tool';
+  const state = isRecord(part.state) ? part.state : {};
+  const status = str(state.status) ?? 'pending';
+  if (status === 'error') return `tool ${tool} error: ${str(state.error) ?? 'unknown error'}`;
+  const title = str(state.title);
+  return `tool ${tool} ${status}${title ? ` — ${title}` : ''}`;
+};
+
+/**
  * Reduce one opencode SSE event to a compact one-line summary, or `null` to
  * skip it. This is the whole observability decision: which of opencode's 30+
  * event types are worth a log line while the agent works, and what each says.
@@ -101,13 +133,7 @@ export const describeEvent = (ev: unknown): string | null => {
   switch (ev.type) {
     case 'message.part.updated': {
       const part = isRecord(p.part) ? p.part : null;
-      if (!part || part.type !== 'tool') return null; // skip text/reasoning deltas
-      const tool = str(part.tool) ?? 'tool';
-      const state = isRecord(part.state) ? part.state : {};
-      const status = str(state.status) ?? 'pending';
-      if (status === 'error') return `tool ${tool} error: ${str(state.error) ?? 'unknown error'}`;
-      const title = str(state.title);
-      return `tool ${tool} ${status}${title ? ` — ${title}` : ''}`;
+      return part ? describeToolPart(part) : null; // skips text/reasoning deltas too
     }
     case 'todo.updated': {
       const todos = Array.isArray(p.todos) ? p.todos : [];
@@ -144,6 +170,82 @@ export const describeEvent = (ev: unknown): string | null => {
       return null;
   }
 };
+
+/** Signature that changes exactly when a part is "worth re-logging" — new id, or (for tool parts) a status transition. */
+const partSignature = (part: Record<string, unknown>): string => {
+  const status = part.type === 'tool' && isRecord(part.state) ? str(part.state.status) : null;
+  return `${String(part.type)}:${status ?? ''}`;
+};
+
+/**
+ * Pure diff step behind the poll-based progress logger (Ticket E). Given the
+ * part-id -> last-logged-signature map from the previous poll and the latest
+ * full `listMessages` snapshot (`Array<{info, parts}>`), returns the log lines
+ * for parts that are new or whose signature changed, plus the updated map —
+ * so a part already logged at its current status is never re-logged. Total
+ * over `unknown` — a malformed message or part is skipped, never thrown, so
+ * `pollProgress`'s loop can never die on a shape it didn't expect.
+ */
+export const diffMessages = (
+  seen: ReadonlyMap<string, string>,
+  messages: readonly unknown[],
+): { readonly lines: readonly string[]; readonly seen: ReadonlyMap<string, string> } => {
+  const next = new Map(seen);
+  const lines: string[] = [];
+  for (const msg of messages) {
+    if (!isRecord(msg) || !Array.isArray(msg.parts)) continue;
+    for (const part of msg.parts) {
+      if (!isRecord(part) || typeof part.id !== 'string') continue;
+      const sig = partSignature(part);
+      if (next.get(part.id) === sig) continue;
+      next.set(part.id, sig);
+      const line = describeToolPart(part);
+      if (line !== null) lines.push(line);
+    }
+  }
+  return { lines, seen: next };
+};
+
+/**
+ * Forked poller: since in-cluster the SSE subscription delivers only
+ * `server.connected`/`server.heartbeat` (proven by in-cluster repro — zero
+ * session/tool events), it cannot be relied on for progress logging. This
+ * polls the server's `listMessages` snapshot on `pollIntervalMs`, diffs it via
+ * the pure `diffMessages`, and logs one line per part that's new or changed,
+ * plus a running message/part/elapsed-time summary whenever something changed.
+ * Runs until the enclosing scope closes (session end or hard timeout) via
+ * `forkScoped`; a failed poll is swallowed so a flaky GET never kills the
+ * fiber or the session it's merely observing.
+ */
+const pollProgress = (
+  port: OpencodePort,
+  server: OpencodeServerHandle,
+  sessionId: string,
+  pollIntervalMs: number,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const startedAt = Date.now();
+    let seen: ReadonlyMap<string, string> = new Map();
+    while (true) {
+      yield* Effect.sleep(Duration.millis(pollIntervalMs));
+      const messages = yield* Effect.tryPromise(() => port.listMessages(server, sessionId)).pipe(
+        Effect.orElseSucceed((): readonly unknown[] => []),
+      );
+      const diffed = diffMessages(seen, messages);
+      seen = diffed.seen;
+      for (const line of diffed.lines) yield* Effect.logInfo(line);
+      if (diffed.lines.length > 0) {
+        const partCount = messages.reduce(
+          (n: number, m) => n + (isRecord(m) && Array.isArray(m.parts) ? m.parts.length : 0),
+          0,
+        );
+        const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+        yield* Effect.logInfo(
+          `progress: ${messages.length} messages, ${partCount} parts, ${elapsedSec}s elapsed`,
+        );
+      }
+    }
+  }).pipe(Effect.ignore);
 
 /**
  * Forked collector: drain the event stream into `sink` until our session goes
@@ -197,6 +299,7 @@ export const runSession = (
   port: OpencodePort,
   params: { readonly dir: string; readonly model: string; readonly prompt: string },
   timeoutMs: number = DEFAULT_SESSION_TIMEOUT_MS,
+  pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS,
 ): Effect.Effect<SessionOutcome, OpencodeFailed, never> =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -214,6 +317,7 @@ export const runSession = (
       const events: Array<unknown> = [];
       const done = yield* Deferred.make<void>();
       yield* Effect.forkScoped(collectEvents(port, server, params.dir, sessionId, events, done));
+      yield* Effect.forkScoped(pollProgress(port, server, sessionId, pollIntervalMs));
 
       const { info, text } = yield* Effect.tryPromise({
         try: () =>

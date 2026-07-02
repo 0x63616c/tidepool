@@ -98,6 +98,7 @@ const makeOpencode = (): { opencode: OpencodePort; stopped: () => number } => {
       yield { type: 'session.idle', properties: { sessionID: 'ses_fake' } };
     },
     prompt: async () => ({ info: assistantInfo, text: 'VERDICT: APPROVE' }),
+    listMessages: async () => [],
   };
   return { opencode, stopped: () => stopped };
 };

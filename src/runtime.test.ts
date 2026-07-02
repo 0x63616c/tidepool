@@ -1,5 +1,11 @@
 import { afterEach, assert, describe, it } from '@effect/vitest';
-import { dbDriver, dbPath, workerBackend } from './runtime.ts';
+import {
+  dbDriver,
+  dbPath,
+  workerBackend,
+  workerDeadlineSeconds,
+  workerTtlSeconds,
+} from './runtime.ts';
 
 /**
  * The DB_PATH seam (ticket: volume-state). The control-plane sqlite lives at a
@@ -81,5 +87,49 @@ describe('workerBackend', () => {
   it('fails safe to local on an unrecognized value', () => {
     process.env.TIDEPOOL_AGENT_WORKER = 'kubernetes';
     assert.strictEqual(workerBackend(), 'local');
+  });
+});
+
+/**
+ * Ticket D (the prod blocker): real opencode sessions run ~6-9 minutes but the
+ * old 8-min session timeout killed them mid-work. The session timeout is now
+ * 60 minutes, so the Job's `activeDeadlineSeconds` must exceed it (65 min —
+ * 60-min session + ~5 min slack for the post-session git commit/push) or k8s
+ * kills the pod mid-push. `ttlSecondsAfterFinished` is widened to 24h so
+ * finished/failed agent pods stay listed in `kubectl get pods` for post-mortem.
+ */
+describe('workerDeadlineSeconds', () => {
+  const original = process.env.TIDEPOOL_WORKER_DEADLINE_SEC;
+  afterEach(() => {
+    if (original === undefined) delete process.env.TIDEPOOL_WORKER_DEADLINE_SEC;
+    else process.env.TIDEPOOL_WORKER_DEADLINE_SEC = original;
+  });
+
+  it('defaults to 3900s (65 min — exceeds the 60-min session timeout)', () => {
+    delete process.env.TIDEPOOL_WORKER_DEADLINE_SEC;
+    assert.strictEqual(workerDeadlineSeconds(), 3900);
+  });
+
+  it('honors the TIDEPOOL_WORKER_DEADLINE_SEC override', () => {
+    process.env.TIDEPOOL_WORKER_DEADLINE_SEC = '7200';
+    assert.strictEqual(workerDeadlineSeconds(), 7200);
+  });
+});
+
+describe('workerTtlSeconds', () => {
+  const original = process.env.TIDEPOOL_WORKER_TTL_SEC;
+  afterEach(() => {
+    if (original === undefined) delete process.env.TIDEPOOL_WORKER_TTL_SEC;
+    else process.env.TIDEPOOL_WORKER_TTL_SEC = original;
+  });
+
+  it('defaults to 86400s (24h — keeps finished pods around for post-mortem)', () => {
+    delete process.env.TIDEPOOL_WORKER_TTL_SEC;
+    assert.strictEqual(workerTtlSeconds(), 86400);
+  });
+
+  it('honors the TIDEPOOL_WORKER_TTL_SEC override', () => {
+    process.env.TIDEPOOL_WORKER_TTL_SEC = '1200';
+    assert.strictEqual(workerTtlSeconds(), 1200);
   });
 });

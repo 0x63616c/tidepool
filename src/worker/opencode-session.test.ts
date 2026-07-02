@@ -1,7 +1,9 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Exit, Logger } from 'effect';
 import {
+  DEFAULT_SESSION_TIMEOUT_MS,
   describeEvent,
+  diffMessages,
   OpencodeFailed,
   type OpencodePort,
   runSession,
@@ -56,6 +58,7 @@ const makeFake = (over: Partial<OpencodePort> = {}): { port: OpencodePort; calls
       yield idleFor('ses_fake');
     },
     prompt: async () => ({ info: assistantMsg.properties.info, text: 'VERDICT: APPROVE' }),
+    listMessages: async () => [],
     ...over,
   };
   return { port, calls };
@@ -265,5 +268,131 @@ describe('describeEvent', () => {
     assert.strictEqual(describeEvent(null), null);
     assert.strictEqual(describeEvent('nope'), null);
     assert.strictEqual(describeEvent({}), null);
+  });
+});
+
+/**
+ * Ticket D — the prod blocker. Real opencode sessions run 6-9 minutes; the
+ * old 8-min hard timeout killed them mid-work. 60 minutes gives real headroom.
+ */
+describe('DEFAULT_SESSION_TIMEOUT_MS', () => {
+  it('is 60 minutes (was 8 — too short for real ~6-9 min sessions)', () => {
+    assert.strictEqual(DEFAULT_SESSION_TIMEOUT_MS, 60 * 60 * 1000);
+  });
+});
+
+/**
+ * Ticket E — worker observability lie. In-cluster, `client.event.subscribe`
+ * delivers only `server.connected`/`server.heartbeat` (proven by in-cluster
+ * repro) — zero session/tool events — so `collectEvents`'s SSE-based logging
+ * goes silent for the whole session. `diffMessages` is the pure reducer behind
+ * a poll-based replacement: given the part-id -> last-logged-signature map and
+ * the latest full `GET /session/:id/message` snapshot, it returns log lines
+ * only for parts that are new or whose status changed, so a poller built on it
+ * never re-logs an unchanged part.
+ */
+describe('diffMessages', () => {
+  const toolPart = (
+    id: string,
+    tool: string,
+    status: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    type: 'tool',
+    tool,
+    state: { status, ...extra },
+  });
+
+  it('emits no lines for an empty snapshot', () => {
+    const { lines, seen } = diffMessages(new Map(), []);
+    assert.deepStrictEqual(lines, []);
+    assert.strictEqual(seen.size, 0);
+  });
+
+  it('emits one line for a brand-new part', () => {
+    const snapshot = [{ info: {}, parts: [toolPart('p1', 'bash', 'running')] }];
+    const { lines, seen } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(lines, ['tool bash running']);
+    assert.strictEqual(seen.get('p1'), 'tool:running');
+  });
+
+  it('re-logs a part whose status changed, plus a genuinely new part, in one pass', () => {
+    const seen1 = new Map([['p1', 'tool:running']]);
+    const snapshot = [
+      { info: {}, parts: [toolPart('p1', 'bash', 'completed', { title: 'ls' })] },
+      { info: {}, parts: [toolPart('p2', 'write', 'running')] },
+    ];
+    const { lines, seen: seen2 } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(lines, ['tool bash completed — ls', 'tool write running']);
+    assert.strictEqual(seen2.get('p1'), 'tool:completed');
+    assert.strictEqual(seen2.get('p2'), 'tool:running');
+  });
+
+  it('does not re-log a part whose status is unchanged from the last poll', () => {
+    const snapshot = [{ info: {}, parts: [toolPart('p1', 'bash', 'completed', { title: 'ls' })] }];
+    const seen1 = new Map([['p1', 'tool:completed']]);
+    const { lines } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(lines, []);
+  });
+
+  it('is total over malformed/unknown input — never throws', () => {
+    assert.doesNotThrow(() => diffMessages(new Map(), [null, 'nope', {}, { parts: 'nope' }]));
+    assert.deepStrictEqual(
+      diffMessages(new Map(), [null, 'nope', {}, { parts: 'nope' }]).lines,
+      [],
+    );
+  });
+});
+
+describe('runSession progress polling (Ticket E)', () => {
+  it('polls listMessages on an interval and logs new/changed parts, skipping unchanged ones', async () => {
+    const lines: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message }) =>
+        lines.push(Array.isArray(message) ? message.join(' ') : String(message)),
+      ),
+    );
+    const snapshots: readonly unknown[][] = [
+      [],
+      [
+        {
+          info: {},
+          parts: [{ id: 'p1', type: 'tool', tool: 'bash', state: { status: 'running' } }],
+        },
+      ],
+      [
+        {
+          info: {},
+          parts: [
+            { id: 'p1', type: 'tool', tool: 'bash', state: { status: 'completed', title: 'ls' } },
+          ],
+        },
+        {
+          info: {},
+          parts: [{ id: 'p2', type: 'tool', tool: 'write', state: { status: 'running' } }],
+        },
+      ],
+    ];
+    let call = 0;
+    const { port } = makeFake({
+      listMessages: async () => snapshots[Math.min(call++, snapshots.length - 1)] ?? [],
+      prompt: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return { info: assistantMsg.properties.info, text: 'VERDICT: APPROVE' };
+      },
+    });
+    await Effect.runPromise(
+      Effect.scoped(
+        runSession(port, { dir: '/tmp/w', model: 'm', prompt: 'go' }, undefined, 4),
+      ).pipe(Effect.provide(capture)),
+    );
+    const toolLines = lines.filter((l) => l.startsWith('tool '));
+    assert.deepStrictEqual(toolLines, [
+      'tool bash running',
+      'tool bash completed — ls',
+      'tool write running',
+    ]);
   });
 });

@@ -34,6 +34,7 @@ const fakeOpencode: OpencodePort = {
     yield { type: 'session.idle', properties: { sessionID: 'ses_fake' } };
   },
   prompt: async () => ({ info: assistantInfo, text: 'looks good\nVERDICT: APPROVE' }),
+  listMessages: async () => [],
 };
 
 describe('review runner bundle', () => {
