@@ -54,6 +54,7 @@ const ticket = (over: Partial<Ticket> & Pick<Ticket, 'id'>): Ticket => ({
   prId: null,
   mergeSha: null,
   attempts: 0,
+  contentionCount: 0,
   workedAttempt: null,
   reason: null,
   workHandle: null,
@@ -94,6 +95,7 @@ describe('renderTicketHeader', () => {
     assert.include(out, 'deadbeef');
     assert.include(out, 'attempts: 2');
     assert.include(out, 'worked-attempt: 1');
+    assert.include(out, 'contention-count: 0');
     assert.include(out, 'AgentFailed: boom');
   });
 

@@ -38,7 +38,10 @@ export const TicketPhase = Schema.Literal(
 );
 export type TicketPhase = typeof TicketPhase.Type;
 
-export const TicketCondition = Schema.Union(Schema.Struct({ type: Schema.Literal('rate_capped') }));
+export const TicketCondition = Schema.Union(
+  Schema.Struct({ type: Schema.Literal('rate_capped') }),
+  Schema.Struct({ type: Schema.Literal('needs_human'), reason: Schema.String }),
+);
 export type TicketCondition = typeof TicketCondition.Type;
 
 export const TicketConditions = Schema.Array(TicketCondition);
@@ -118,6 +121,7 @@ export const Ticket = Schema.Struct({
   prId: Schema.NullOr(PrId),
   mergeSha: Schema.NullOr(Schema.String),
   attempts: Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)),
+  contentionCount: Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)),
   workedAttempt: Schema.NullOr(Schema.Int),
   /** Human-readable why-it-moved, set on failure/retry/rate-cap. Null while clean. */
   reason: Schema.NullOr(Schema.String),

@@ -34,8 +34,8 @@ const testConfig: Config = defineConfig({
 
 const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
 
-const baseLayers = (store: TicketStoreApi) =>
-  Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, testConfig));
+const baseLayers = (store: TicketStoreApi, config: Config = testConfig) =>
+  Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, config));
 
 const runSteps = (n: number, env: Layer.Layer<TicketStore | Forge | AgentWorker | AppConfig>) =>
   Effect.forEach(Array.from({ length: n }), () => step, { discard: true }).pipe(
@@ -267,6 +267,7 @@ describe('transition table: merging (resumable, idempotent)', () => {
       const t = yield* store.byId(ticket.id);
       assert.strictEqual(t.phase, 'reviewing');
       assert.strictEqual(t.attempts, 0, 'freshness update must not spend an attempt');
+      assert.strictEqual(t.contentionCount, 1, 'freshness update spends contention budget');
       assert.deepStrictEqual(updates, [7]);
       assert.deepStrictEqual(merges, []);
       assert.strictEqual(dispatches.length, 0);
@@ -340,6 +341,7 @@ describe('transition table: merging (resumable, idempotent)', () => {
       const t = yield* store.byId(ticket.id);
       assert.strictEqual(t.phase, 'working');
       assert.strictEqual(t.attempts, 0);
+      assert.strictEqual(t.contentionCount, 1);
       assert.strictEqual(t.branch, 'tp/x');
       assert.strictEqual(t.prNumber, 7);
       assert.isNull(t.workedAttempt);
@@ -417,6 +419,87 @@ describe('transition table: merging (resumable, idempotent)', () => {
       assert.strictEqual(t.phase, 'working');
       assert.isNull(t.workedAttempt);
       assert.strictEqual(t.attempts, 0);
+      assert.strictEqual(t.contentionCount, 1, 'merge 405/409 bounce spends contention budget');
+    }),
+  );
+
+  it.effect('row 27: successful work resets the contention counter', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'working',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: null,
+        contentionCount: 2,
+      });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(2, env);
+
+      const t = yield* store.byId(ticket.id);
+      assert.strictEqual(t.phase, 'reviewing');
+      assert.strictEqual(t.contentionCount, 0);
+      const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
+      assert.include(
+        events.map((e) => e.line),
+        'contention count: 2 -> 0 (successful work)',
+      );
+    }),
+  );
+
+  it.effect('row 28: contention cap exhaustion sets needs_human and blocks progress', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'merging',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: 0,
+        contentionCount: 1,
+      });
+      const dispatches: DispatchInput[] = [];
+      const config = defineConfig({ ...testConfig, contentionRetries: 1 });
+      const env = Layer.mergeAll(
+        baseLayers(store, config),
+        fakeForge({ branchUpToDate: false }),
+        fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+      );
+
+      yield* runSteps(1, env);
+
+      const capped = yield* store.byId(ticket.id);
+      assert.strictEqual(capped.phase, 'merging');
+      assert.strictEqual(capped.attempts, 0, 'contention never spends a work attempt');
+      assert.strictEqual(capped.contentionCount, 2);
+      assert.deepStrictEqual(capped.conditions, [
+        {
+          type: 'needs_human',
+          reason: 'merge contention exceeded budget (2/1): merge gate: branch updated',
+        },
+      ]);
+
+      yield* runSteps(3, env);
+      const blocked = yield* store.byId(ticket.id);
+      assert.strictEqual(blocked.phase, 'merging', 'needs_human gate stops progression');
+      assert.strictEqual(blocked.attempts, 0, 'needs_human is never auto-failed');
+      assert.strictEqual(dispatches.length, 0, 'needs_human never dispatches');
+      const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
+      assert.includeMembers(
+        events.map((e) => e.line),
+        [
+          'contention count: 1 -> 2 (merge gate: branch updated)',
+          'condition set: needs_human (merge contention exceeded budget (2/1): merge gate: branch updated)',
+        ],
+      );
     }),
   );
 });
@@ -461,6 +544,34 @@ describe('transition table: global invariants', () => {
 
       const events = yield* store.eventsFor({ ticketId: ticket.id });
       assert.isTrue(events.length > 0, 'every transition appends a ticket event');
+    }),
+  );
+
+  it.effect('row 39: needs_human is never auto-failed and never dispatches', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'working',
+        attempts: 99,
+        conditions: [{ type: 'needs_human', reason: 'merge contention exhausted' }],
+      });
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+      );
+
+      yield* runSteps(3, env);
+
+      const t = yield* store.byId(ticket.id);
+      assert.strictEqual(t.phase, 'working');
+      assert.strictEqual(t.attempts, 99);
+      assert.deepStrictEqual(t.conditions, [
+        { type: 'needs_human', reason: 'merge contention exhausted' },
+      ]);
+      assert.strictEqual(dispatches.length, 0);
     }),
   );
 });

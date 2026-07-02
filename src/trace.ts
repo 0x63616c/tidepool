@@ -109,6 +109,7 @@ export const renderTicketHeader = (ticket: Ticket, opts: { full?: boolean } = {}
     `  pr: ${orDash(ticket.prNumber)} (prId ${orDash(ticket.prId)})`,
     `  merge: ${orDash(ticket.mergeSha)}`,
     `  attempts: ${ticket.attempts}, worked-attempt: ${orDash(ticket.workedAttempt)}`,
+    `  contention-count: ${ticket.contentionCount}`,
     `  dispatched: ${ticket.dispatchedAt === null ? '-' : new Date(ticket.dispatchedAt).toISOString()}`,
     `  reason: ${orDash(ticket.reason)}`,
     '  body: |',

@@ -39,6 +39,7 @@ export const openSqlite = (
         pr_id TEXT,
         merge_sha TEXT,
         attempts INTEGER NOT NULL,
+        contention_count INTEGER NOT NULL DEFAULT 0,
         worked_attempt INTEGER
       )
     `.pipe(Effect.orDie);
@@ -112,6 +113,13 @@ export const openSqlite = (
 
     // Migration: add reason column to existing ticket tables (no-op if already present).
     yield* sql`ALTER TABLE tickets ADD COLUMN reason TEXT`.pipe(Effect.ignore);
+
+    // Migration: merge-contention budget. Added nullable for old sqlite files,
+    // then backfilled; fresh DBs get the NOT NULL DEFAULT from CREATE TABLE.
+    yield* sql`ALTER TABLE tickets ADD COLUMN contention_count INTEGER`.pipe(Effect.ignore);
+    yield* sql`UPDATE tickets SET contention_count = 0 WHERE contention_count IS NULL`.pipe(
+      Effect.orDie,
+    );
 
     // Migration: the single intent field `goal` became the structured markdown
     // `body`. On a fresh DB the CREATE TABLE above already spells it `body`, so

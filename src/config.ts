@@ -34,6 +34,10 @@ export const Config = Schema.Struct({
   workers: Workers,
   /** Max work attempts before a ticket goes `failed`. */
   retries: Schema.Int.pipe(Schema.greaterThanOrEqualTo(1)),
+  /** Max merge-contention bounces before the ticket moves to a human lane. */
+  contentionRetries: Schema.optionalWith(Schema.Int.pipe(Schema.greaterThanOrEqualTo(0)), {
+    default: () => 5,
+  }),
 });
 export type Config = typeof Config.Type;
 

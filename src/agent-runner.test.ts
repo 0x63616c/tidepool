@@ -23,6 +23,7 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
   prId: null,
   mergeSha: null,
   attempts: 0,
+  contentionCount: 0,
   workedAttempt: null,
   reason: null,
   workHandle: null,
