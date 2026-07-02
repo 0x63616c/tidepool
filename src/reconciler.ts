@@ -220,7 +220,13 @@ const retryOrFail = (
     yield* Effect.logInfo(to === 'failed' ? 'attempts exhausted; failing' : 'retrying').pipe(
       Effect.annotateLogs({ from: ticket.state, to, attempts, retries, reason }),
     );
-    return yield* store.patch(ticket.id, { attempts, state: to, reason, ...cleared });
+    return yield* store.patch(ticket.id, {
+      attempts,
+      state: to,
+      reason,
+      ...(opts?.rework ? { workedAttempt: null } : {}),
+      ...cleared,
+    });
   });
 
 /**

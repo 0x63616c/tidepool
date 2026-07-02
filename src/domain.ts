@@ -68,9 +68,10 @@ export type Run = typeof Run.Type;
 
 /**
  * Ticket — a first-class store row (the backlog IS the db, never files).
- * `branch`/`prNumber` are the reattach handles; `workedAttempt` records which
- * attempt's work run already produced the open PR, so a reconstructed reconciler
- * resumes (advances to review) rather than restarting the agent.
+ * `branch`/`prNumber` are the reattach handles; `workedAttempt` records the
+ * zero-based `attempts` value whose work run already produced the open PR, so a
+ * reconstructed reconciler resumes (advances to review) rather than restarting
+ * the agent.
  */
 export const Ticket = Schema.Struct({
   id: TicketId,

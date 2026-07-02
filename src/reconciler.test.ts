@@ -146,50 +146,45 @@ describe('reconciler', () => {
       }),
   );
 
-  it.effect(
-    '(d) FIX 3: a review failure under the cap re-reviews the existing PR — work never re-runs',
-    () =>
-      Effect.gen(function* () {
-        const store = yield* makeInMemoryStore;
-        const ticket = yield* store.add(newTicket);
+  it.effect('(d) request_changes after first PR open re-dispatches work, not review', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
 
-        // A PR is already open and under review (work succeeded on attempt 0).
-        yield* store.patch(ticket.id, {
-          state: 'review',
-          branch: 'tp/x',
-          prNumber: 7,
-          prId: newPrId(),
-          workedAttempt: 0,
-          attempts: 0,
-        });
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({
+          verdict: 'request_changes',
+          reviewReason: 'Missing verification proof.\nVERDICT: REQUEST_CHANGES',
+          onDispatch: (input) => dispatches.push(input),
+        }),
+      );
 
-        const env = Layer.mergeAll(
-          baseLayers(store),
-          fakeForge({ ci: 'green' }),
-          fakeAgentWorker({
-            verdict: 'request_changes',
-            reviewReason: 'Missing verification proof.\nVERDICT: REQUEST_CHANGES',
-          }),
-        );
+      // Drive the real PR-open path first: backlog → in_progress → running → review.
+      yield* runSteps(3, env);
+      const opened = yield* store.byId(ticket.id);
+      assert.strictEqual(opened.state, 'review');
+      assert.strictEqual(opened.attempts, 0);
+      assert.strictEqual(opened.workedAttempt, 0);
+      assert.isNotNull(opened.prNumber);
 
-        // step 1: review → dispatch review agent → running. step 2: poll the rejection.
-        yield* runSteps(2, env);
+      // Dispatch review, poll the rejection, then the next tick must re-work.
+      yield* runSteps(3, env);
 
-        const final = yield* store.byId(ticket.id);
-        // Re-WORKS from in_progress to address the feedback (not re-review the same
-        // unchanged diff), keeping the existing PR/branch; consumes an attempt.
-        assert.strictEqual(final.state, 'in_progress');
-        assert.strictEqual(final.prNumber, 7);
-        assert.strictEqual(final.attempts, 1);
-        assert.strictEqual(final.reason, 'Missing verification proof.\nVERDICT: REQUEST_CHANGES');
-        assert.isNull(final.workHandle);
-        // The next step re-dispatches WORK against the existing branch (the worker
-        // force-pushes so the PR updates), rather than re-grading the same diff.
-        yield* runSteps(1, env);
-        const reworking = yield* store.byId(ticket.id);
-        assert.strictEqual(reworking.state, 'running');
-        assert.isNotNull(reworking.workHandle);
-      }),
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'running');
+      assert.strictEqual(final.prNumber, opened.prNumber);
+      assert.strictEqual(final.attempts, 1);
+      assert.strictEqual(final.reason, 'Missing verification proof.\nVERDICT: REQUEST_CHANGES');
+      assert.isNull(final.workedAttempt);
+      assert.isNotNull(final.workHandle);
+      assert.deepStrictEqual(
+        dispatches.map((d) => d.kind),
+        ['work', 'review', 'work'],
+      );
+    }),
   );
 
   it.effect('merge conflict bounce re-dispatches work without spending an attempt', () =>
