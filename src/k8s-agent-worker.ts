@@ -190,6 +190,7 @@ export interface JobManifest {
           readonly image: string;
           readonly command?: ReadonlyArray<string>;
           readonly workingDir: string;
+          readonly env: ReadonlyArray<{ readonly name: string; readonly value: string }>;
           readonly resources: {
             readonly requests: { readonly cpu: string; readonly memory: string };
             // No cpu limit by design (agents burst); `cpu?: never` documents it.
@@ -261,6 +262,7 @@ export const buildJobManifest = (args: {
               // Only override when config provides one; else the image ENTRYPOINT runs.
               ...(config.command ? { command: config.command } : {}),
               workingDir: WORKDIR,
+              env: [{ name: 'TIDEPOOL_GIT_SHA', value: config.gitSha }],
               resources: {
                 // CPU request but NO cpu limit (agents burst); mem request==limit.
                 requests: { cpu: config.cpuRequest, memory: config.memRequest },
