@@ -4,6 +4,23 @@ Pre-load these so coding agents (opencode + Claude) write idiomatic Effect / TS 
 Installed via Vercel Labs' `skills` CLI (`npx skills add <owner/repo>`, registry at skills.sh) into
 `.agents/skills/`. All verified to exist 2026-06-27.
 
+## First-party skills (this repo)
+
+Skills authored *in* this repo — product source, not third-party installs — live in the tracked
+`skills/` dir. They are symlinked into the agent-discovery dir (`.agents/skills/`, which `.claude/skills`
+points at) by:
+
+```bash
+bun run skills:link   # idempotent; re-run after adding a skill under skills/
+```
+
+`.agents/` is gitignored, so the links are a local, regenerable artifact (same model as the vendored
+skills below). Current first-party skills:
+
+- **`new-ticket`** (`skills/new-ticket/SKILL.md`) — author a well-structured tidepool ticket `body`
+  (Context / Acceptance Criteria / Relevant Files / Approach / Out of Scope) and file it via
+  `tp ticket add --body-file … --context prod`. Triggers on "create a ticket" / "new ticket".
+
 ## Install now
 
 ```bash
