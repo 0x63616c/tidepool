@@ -710,23 +710,83 @@ describe('reconciler logging (stdout observability)', () => {
       }),
     );
 
-  it.effect('emits a dispatch log carrying the ticket id + target (the silent-failure path)', () =>
+  it.effect(
+    'emits a dispatch log carrying ticket/run/job correlation fields (the silent-failure path)',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
+        const logs: string[] = [];
+        // backlog → in_progress → dispatch work.
+        yield* runSteps(2, env).pipe(Effect.provide(captureInto(logs)));
+
+        const final = yield* store.byId(ticket.id);
+        const dispatch = logs.find((l) => /dispatched work agent/i.test(l));
+        assert.isDefined(dispatch, `expected a dispatch log; got: ${JSON.stringify(logs)}`);
+        assert.include(dispatch ?? '', `ticket=${ticket.id}`);
+        assert.include(dispatch ?? '', 'target=t/repo');
+        assert.include(dispatch ?? '', 'run=none');
+        assert.include(dispatch ?? '', `job=${final.workHandle}`);
+        assert.include(dispatch ?? '', 'branch=tp/');
+        assert.include(dispatch ?? '', 'attempt=0');
+      }),
+  );
+
+  it.effect('logs active tickets skipped by the workers.max cap with the skip reason', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
-      const ticket = yield* store.add(newTicket);
+      const running = yield* store.add(newTicket);
+      yield* store.patch(running.id, {
+        state: 'running',
+        workHandle: makeWorkHandle('work-tckt-running-sfx1'),
+        dispatchedAt: 0,
+      });
+      const waiting = yield* store.add({ ...newTicket, title: 'Add foo' });
       const env = Layer.mergeAll(
         baseLayers(store),
         fakeForge({ ci: 'green' }),
-        fakeAgentWorker({ verdict: 'approve' }),
+        fakeAgentWorker({ stuckRunning: true }),
       );
       const logs: string[] = [];
-      // backlog → in_progress → dispatch work.
+
+      yield* runSteps(1, env).pipe(Effect.provide(captureInto(logs)));
+
+      const skipped = logs.find((l) => l.includes(waiting.id) && /not dispatched/i.test(l));
+      assert.isDefined(
+        skipped,
+        `expected a skip log for ${waiting.id}; got: ${JSON.stringify(logs)}`,
+      );
+      assert.include(skipped ?? '', 'reason=workers.max');
+      assert.include(skipped ?? '', 'run=none');
+      assert.include(skipped ?? '', 'job=none');
+    }),
+  );
+
+  it.effect('logs worker failure detection with job name, reason, and attempts remaining', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, { state: 'in_progress' });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ pollFails: 'worker exited non-zero' }),
+      );
+      const logs: string[] = [];
+
       yield* runSteps(2, env).pipe(Effect.provide(captureInto(logs)));
 
-      assert.isTrue(
-        logs.some((l) => /dispatch/i.test(l) && l.includes(ticket.id) && l.includes('t/repo')),
-        `expected a dispatch log with the ticket id + target; got: ${JSON.stringify(logs)}`,
-      );
+      const failed = logs.find((l) => /worker failed; retrying or failing/i.test(l));
+      assert.isDefined(failed, `expected a worker failure log; got: ${JSON.stringify(logs)}`);
+      assert.include(failed ?? '', `ticket=${ticket.id}`);
+      assert.include(failed ?? '', 'reason=worker exited non-zero');
+      assert.include(failed ?? '', 'job=wh_fake_work_1');
+      assert.include(failed ?? '', 'attemptsRemaining=1');
     }),
   );
 

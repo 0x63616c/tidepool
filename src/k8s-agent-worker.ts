@@ -619,7 +619,15 @@ export const makeK8sAgentWorker = (
             );
           }
           yield* Effect.logInfo('created worker Job + creds Secret').pipe(
-            Effect.annotateLogs({ handle, kind: input.kind, namespace: cfg.namespace }),
+            Effect.annotateLogs({
+              handle,
+              job: handle,
+              kind: input.kind,
+              namespace: cfg.namespace,
+              branch: input.kind === 'work' ? input.branch : (input.ticket.branch ?? 'none'),
+              target: input.repo,
+              attempt: input.ticket.attempts,
+            }),
           );
           return makeWorkHandle(handle);
         }).pipe(Effect.catchTags({ RequestError: httpFail, ResponseError: httpFail }));

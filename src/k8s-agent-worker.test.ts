@@ -1,6 +1,6 @@
 import { FetchHttpClient } from '@effect/platform';
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit, Layer, Logger } from 'effect';
+import { Effect, Exit, HashMap, Layer, Logger } from 'effect';
 import type { Ticket } from './domain.ts';
 import {
   buildAgentWorkerConfig,
@@ -374,8 +374,11 @@ describe('K8sAgentWorker (wire)', () => {
     const logs: string[] = [];
     const capture = Logger.replace(
       Logger.defaultLogger,
-      Logger.make(({ message }) => {
-        logs.push(String(message));
+      Logger.make(({ message, annotations }) => {
+        const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(
+          ' ',
+        );
+        logs.push(`${String(message)} ${ann}`.trim());
       }),
     );
     return AgentWorker.pipe(
@@ -445,6 +448,26 @@ describe('K8sAgentWorker (wire)', () => {
 
     assert.isTrue(Exit.isSuccess(exit));
     if (Exit.isSuccess(exit)) assert.strictEqual(exit.value, HANDLE);
+  });
+
+  it('logs Job creation with job name, namespace, branch, target, and attempt', async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = stub((url, m) => {
+      if (m === 'POST' && url.includes('/jobs'))
+        return new Response(JSON.stringify({ metadata: { uid: 'u1' } }), { status: 201 });
+      return new Response('{}', { status: 201 });
+    }, []);
+    const { exit, logs } = await runWorkerCapturing((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isSuccess(exit));
+    const created = logs.find((l) => /created worker Job \+ creds Secret/i.test(l));
+    assert.isDefined(created, `expected Job creation log; got: ${JSON.stringify(logs)}`);
+    assert.include(created ?? '', `job=${HANDLE}`);
+    assert.include(created ?? '', 'namespace=agents');
+    assert.include(created ?? '', 'branch=tp/tckt_ab12cd-add-slugify');
+    assert.include(created ?? '', 'target=octo/repo');
+    assert.include(created ?? '', 'attempt=0');
   });
 
   it('poll maps a 404 Job to terminal Failed (ttl-reap race), not AgentFailed', async () => {
