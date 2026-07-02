@@ -1,6 +1,6 @@
 import { assert, describe, it } from '@effect/vitest';
 import { defineConfig } from './config.ts';
-import type { Ticket, TicketState } from './domain.ts';
+import { deriveStateFromPhase, type Ticket, type TicketPhase } from './domain.ts';
 import { deferredBacklog, fifoSelector, PIPELINE_OCCUPIED } from './selection.ts';
 
 /**
@@ -18,13 +18,15 @@ const configWithMax = (max: number) =>
   });
 
 let seq = 0;
-const ticketIn = (state: TicketState): Ticket =>
+const ticketIn = (phase: TicketPhase, conditions: Ticket['conditions'] = []): Ticket =>
   ({
     id: `tckt_${++seq}` as Ticket['id'],
     title: 't',
     body: 'g',
     target: 't/repo',
-    state,
+    state: deriveStateFromPhase({ phase, conditions, prNumber: null, workHandle: null }),
+    phase,
+    conditions,
     branch: null,
     prNumber: null,
     prId: null,
@@ -37,47 +39,44 @@ const ticketIn = (state: TicketState): Ticket =>
   }) as Ticket;
 
 describe('PIPELINE_OCCUPIED', () => {
-  it('holds every non-terminal state past backlog, including rate_capped', () => {
-    assert.sameMembers([...PIPELINE_OCCUPIED], ['in_progress', 'running', 'review', 'rate_capped']);
+  it('holds every non-terminal phase past queued', () => {
+    assert.sameMembers([...PIPELINE_OCCUPIED], ['working', 'reviewing', 'merging', 'verifying']);
   });
 });
 
 describe('fifoSelector.admit', () => {
   it('admits when no ticket occupies a pipeline slot', () => {
-    assert.isTrue(fifoSelector.admit([ticketIn('backlog')], configWithMax(1)));
+    assert.isTrue(fifoSelector.admit([ticketIn('queued')], configWithMax(1)));
   });
 
-  it('blocks at max=1 when one ticket is in_progress', () => {
-    assert.isFalse(fifoSelector.admit([ticketIn('in_progress')], configWithMax(1)));
+  it('blocks at max=1 when one ticket is working', () => {
+    assert.isFalse(fifoSelector.admit([ticketIn('working')], configWithMax(1)));
   });
 
-  it('blocks at max=1 when one ticket is running', () => {
-    assert.isFalse(fifoSelector.admit([ticketIn('running')], configWithMax(1)));
+  it('blocks at max=1 when one ticket is merging', () => {
+    assert.isFalse(fifoSelector.admit([ticketIn('merging')], configWithMax(1)));
   });
 
-  it('blocks at max=1 when one ticket is in review', () => {
-    assert.isFalse(fifoSelector.admit([ticketIn('review')], configWithMax(1)));
+  it('blocks at max=1 when one ticket is reviewing', () => {
+    assert.isFalse(fifoSelector.admit([ticketIn('reviewing')], configWithMax(1)));
   });
 
-  it('blocks at max=1 when one ticket is rate_capped (mid-pipeline, holds its slot)', () => {
-    assert.isFalse(fifoSelector.admit([ticketIn('rate_capped')], configWithMax(1)));
+  it('blocks at max=1 when one ticket is rate_capped (a gate, not a state — still holds its slot)', () => {
+    assert.isFalse(
+      fifoSelector.admit([ticketIn('working', [{ type: 'rate_capped' }])], configWithMax(1)),
+    );
   });
 
-  it('does not count backlog/done/failed toward the occupied total', () => {
-    const tickets = [
-      ticketIn('backlog'),
-      ticketIn('backlog'),
-      ticketIn('done'),
-      ticketIn('failed'),
-    ];
+  it('does not count queued/done/failed toward the occupied total', () => {
+    const tickets = [ticketIn('queued'), ticketIn('queued'), ticketIn('done'), ticketIn('failed')];
     assert.isTrue(fifoSelector.admit(tickets, configWithMax(1)));
   });
 
   it('generalizes to N: admits up to max concurrently-occupied slots, blocks past it', () => {
     const config = configWithMax(2);
-    assert.isTrue(fifoSelector.admit([ticketIn('running')], config)); // 1 occupied < 2
+    assert.isTrue(fifoSelector.admit([ticketIn('working')], config)); // 1 occupied < 2
     assert.isFalse(
-      fifoSelector.admit([ticketIn('running'), ticketIn('review')], config), // 2 occupied >= 2
+      fifoSelector.admit([ticketIn('working'), ticketIn('verifying')], config), // 2 occupied >= 2
     );
   });
 });
@@ -88,12 +87,12 @@ describe('deferredBacklog', () => {
   // instead of an identical INFO per deferred ticket, every 5s, forever.
 
   it('reports nothing deferred when there is a free slot', () => {
-    assert.deepStrictEqual(deferredBacklog([ticketIn('backlog')], configWithMax(1)), []);
+    assert.deepStrictEqual(deferredBacklog([ticketIn('queued')], configWithMax(1)), []);
   });
 
   it('defers every backlog ticket when the cap is already full', () => {
-    const occupied = ticketIn('running');
-    const waiting = [ticketIn('backlog'), ticketIn('backlog')];
+    const occupied = ticketIn('working');
+    const waiting = [ticketIn('queued'), ticketIn('queued')];
     assert.deepStrictEqual(
       deferredBacklog([occupied, ...waiting], configWithMax(1)),
       waiting.map((t) => t.id),
@@ -101,9 +100,9 @@ describe('deferredBacklog', () => {
   });
 
   it('defers only the overflow past the free slots, in list (FIFO) order', () => {
-    const first = ticketIn('backlog');
-    const second = ticketIn('backlog');
-    const third = ticketIn('backlog');
+    const first = ticketIn('queued');
+    const second = ticketIn('queued');
+    const third = ticketIn('queued');
     // max=2, nothing occupied yet → 2 free slots → the first 2 admit, the 3rd waits.
     assert.deepStrictEqual(deferredBacklog([first, second, third], configWithMax(2)), [third.id]);
   });
@@ -111,7 +110,7 @@ describe('deferredBacklog', () => {
   it('never defers non-backlog tickets', () => {
     assert.deepStrictEqual(
       deferredBacklog(
-        [ticketIn('running'), ticketIn('done'), ticketIn('failed')],
+        [ticketIn('working'), ticketIn('done'), ticketIn('failed')],
         configWithMax(1),
       ),
       [],

@@ -25,6 +25,8 @@ export type TicketState = typeof TicketState.Type;
 
 export const isTerminal = (s: TicketState): boolean => s === 'done' || s === 'failed';
 
+export const isTerminalPhase = (p: TicketPhase): boolean => p === 'done' || p === 'failed';
+
 export const TicketPhase = Schema.Literal(
   'queued',
   'working',
@@ -155,6 +157,48 @@ export const derivePhaseConditions = (
       };
   }
 };
+
+/**
+ * Reverse projection — `phase`+`conditions` are authoritative, `state` is the
+ * derived legacy view. Kept total over the phase union so the projection can
+ * never drift silently when a phase is added (the compiler flags it here).
+ */
+export const deriveStateFromPhase = (
+  ticket: Pick<Ticket, 'phase' | 'conditions' | 'prNumber' | 'workHandle'>,
+): TicketState => {
+  if (ticket.conditions.some((c) => c.type === 'rate_capped')) return 'rate_capped';
+  switch (ticket.phase) {
+    case 'queued':
+      return 'backlog';
+    case 'working':
+      return ticket.workHandle !== null ? 'running' : 'in_progress';
+    case 'reviewing':
+      return ticket.workHandle !== null ? 'running' : 'review';
+    case 'merging':
+      return 'review';
+    case 'verifying':
+      return 'review';
+    case 'done':
+      return 'done';
+    case 'failed':
+      return 'failed';
+  }
+};
+
+/**
+ * The store-write choke point for the state<->phase projection, applied by
+ * every `TicketStore.patch` impl to the MERGED row. `phase`/`conditions` in a
+ * patch are authoritative → `state` is re-derived (reverse projection); a
+ * legacy state-ONLY patch keeps the forward derive. Never both directions in
+ * one patch: if `state` and `phase` are both present, phase wins.
+ */
+export const projectTicket = (
+  merged: Ticket,
+  patch: Partial<Pick<Ticket, 'state' | 'phase' | 'conditions'>>,
+): Ticket =>
+  patch.state !== undefined && patch.phase === undefined && patch.conditions === undefined
+    ? { ...merged, ...derivePhaseConditions(merged) }
+    : { ...merged, state: deriveStateFromPhase(merged) };
 
 /** Input to create a ticket. The store assigns id + initial state. */
 export const NewTicket = Schema.Struct({

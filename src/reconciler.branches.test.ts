@@ -151,9 +151,10 @@ describe('reconciler failure branches', () => {
         fakeAgentWorker({ verdict: 'approve' }),
       );
 
-      // step 1: review → dispatch review → running. step 2: poll approve → merge → conflict.
+      // step 1: reviewing → dispatch review. step 2: poll approve → phase merging.
+      // step 3: merging → forge.merge → conflict → bounce back to working.
       // One built env so the fake worker's dispatched outcome survives across ticks.
-      yield* Effect.forEach([0, 1], () => step, { discard: true }).pipe(Effect.provide(env));
+      yield* Effect.forEach([0, 1, 2], () => step, { discard: true }).pipe(Effect.provide(env));
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'in_progress');

@@ -3,10 +3,10 @@ import {
   AgentFailed,
   type CIStatus,
   CredentialError,
-  derivePhaseConditions,
   MergeConflict,
   makeWorkHandle,
   type PrLifecycle,
+  projectTicket,
   RateCapped,
   type ReviewVerdict,
   type Run,
@@ -81,7 +81,7 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
         const current = arr[idx];
         if (current === undefined) return yield* Effect.fail(new TicketNotFound({ id }));
         const patched = { ...current, ...patch };
-        const updated: Ticket = { ...patched, ...derivePhaseConditions(patched) };
+        const updated: Ticket = projectTicket(patched, patch);
         yield* Ref.set(
           tickets,
           arr.map((t, i) => (i === idx ? updated : t)),
@@ -123,6 +123,8 @@ export interface FakeForgeOptions {
   readonly failMerge?: boolean;
   /** Scripted ground truth for `prState` — default `'open'` (today's behavior unaffected). */
   readonly prLifecycle?: PrLifecycle;
+  /** Per-PR-number ground truth override; unlisted PRs fall back to `prLifecycle`. */
+  readonly prState?: Readonly<Record<number, PrLifecycle>>;
   /** `mergeSha` reported alongside `prLifecycle: 'merged'`. */
   readonly mergeSha?: string;
   /** Spy hook: called with every `merge` attempt (assert idempotency — no duplicate merge). */
@@ -146,11 +148,13 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
               url: `https://github.com/${input.repo}/pull/${number}`,
             }),
           ),
-        prState: (input) =>
-          Effect.succeed({
-            state: prLifecycle,
-            mergeSha: prLifecycle === 'merged' ? (opts.mergeSha ?? `sha_${input.prNumber}`) : null,
-          }),
+        prState: (input) => {
+          const state = opts.prState?.[input.prNumber] ?? prLifecycle;
+          return Effect.succeed({
+            state,
+            mergeSha: state === 'merged' ? (opts.mergeSha ?? `sha_${input.prNumber}`) : null,
+          });
+        },
         checks: () => Effect.succeed(ci),
         merge: (input) => {
           opts.onMerge?.(input);

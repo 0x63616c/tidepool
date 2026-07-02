@@ -38,7 +38,8 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > **spun ephemeral Hetzner worker boxes** synchronously (one box per ticket, blocking on the agent).
 > That is done and gone. The reconciler no longer leases a box and blocks: it **dispatches** an
 > *agent-worker* (work or review) through the **`AgentWorker`** seam, stores an opaque **`workHandle`**
-> + `dispatchedAt` on the ticket, moves it to the **`running`** state, and **polls** the handle each
+> + `dispatchedAt` on the ticket (the legacy `state` projection shows it as `running`), and **polls**
+> the handle each
 > tick — `Succeeded` harvests the result, `Failed` retries/rate-caps, and a worker past its deadline is
 > reaped (`cancel`). `BoxMaker` is gone. The live `AgentWorker` is **`K8sAgentWorker`** (dispatches
 > ephemeral k8s Jobs); a **`LocalAgentWorker`** remains for local dev (runs opencode in-process).
@@ -191,15 +192,15 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
   - **merge safety:** N=1 serializes tickets → each branches off the *latest* main and merges before
     the next starts → merge conflicts essentially can't occur.
 - **`workers.max` caps the WHOLE PIPELINE, not just live agent Jobs** (tckt_hardencap). A ticket
-  occupies a slot from the moment it leaves `backlog` until it reaches a terminal state (`done` |
-  `failed`) — i.e. `in_progress` | `running` | `review` | `rate_capped` all count. At `max=1` this
-  means exactly ONE ticket flows dispatch → work → PR → review → merge before the next is even
-  allowed to leave `backlog`; a `rate_capped` ticket still holds its slot (it's mid-pipeline,
-  waiting out a provider limit, and is re-picked into `in_progress`/`review` on the next reconcile
+  occupies a slot from the moment it leaves `queued` until it reaches a terminal phase (`done` |
+  `failed`) — i.e. the `working` | `reviewing` | `merging` | `verifying` phases all count. At `max=1`
+  this means exactly ONE ticket flows dispatch → work → PR → review → merge before the next is even
+  allowed to leave `queued`; a `rate_capped` condition does NOT release the slot (the ticket is
+  mid-pipeline, waiting out a provider limit; the gate clears on the next reconcile
   tick — never "idle" while occupying a slot). This is the concrete mechanism behind the merge-safety
-  bullet above. Implementation: a single admission check at the `backlog` exit
+  bullet above. Implementation: a single admission check at the `queued` exit
   (`src/selection.ts`'s `fifoSelector.admit`) — every other transition moves a ticket between two
-  states it already occupies, so nothing downstream re-checks the cap. Ticket selection (which
+  phases that already hold a slot, so nothing downstream re-checks the cap. Ticket selection (which
   ticket gets the next free slot) is FIFO (`store-sql.ts`'s `ORDER BY seq`) behind a small seam
   (`TicketSelector`) so a future policy (priority, `--blocked-by`) can swap in without touching the
   reconciler.
@@ -275,10 +276,11 @@ everything upstream). Two levels:
 
 ### Tickets & work
 - **Ticket = `{ id, title, body, state, phase, conditions, branch, pr, attempts, … }`.** `body` is the
-  authored markdown task. `state` remains the reconciler's authoritative lifecycle for now;
-  `phase` + `conditions` are mechanically derived and dual-written as the additive migration path
-  toward the settled phase/gates state machine. **"Green, merged PR" is a system invariant**, NOT
-  part of ticket text — the pipeline + system prompt own definition-of-done.
+  authored markdown task. **`phase` + `conditions` are the authoritative lifecycle** (k8s pod idiom:
+  linear phase, orthogonal gate conditions); `state` is a derived legacy projection maintained at the
+  store's write choke point (`domain.ts`'s `projectTicket`: a phase/conditions patch re-derives
+  `state`; a legacy state-only patch still forward-derives phase). **"Green, merged PR" is a system
+  invariant**, NOT part of ticket text — the pipeline + system prompt own definition-of-done.
 - **Tickets are first-class sqlite rows — that IS the store and the single source of truth.**
   (Reversed the earlier "backlog = markdown in git" idea: it split state across file+DB, made
   done-ness ambiguous, and gave files a churny move/delete lifecycle. Markdown can't hold deps/
@@ -295,13 +297,17 @@ everything upstream). Two levels:
   creation record — git = inbox, sqlite = store. State never lives in git. `tickets/*.md` in this
   repo are demoted to **seed fixtures** (example inputs the loop ingests), not the runtime store.
 - **Transcripts/usage** also sqlite + files on the main-box volume, never git.
-- **Lifecycle (async dispatch+poll):** `backlog → in_progress (dispatch work agent-worker) →
-  running (poll; Succeeded → open PR) → review (CI green → dispatch review agent-worker) →
-  running (poll the verdict) → [approve AND CI green → auto-merge → done] | [changes OR red CI →
-  in_progress/review]`. `running` carries the `workHandle` + `dispatchedAt`; a poll `Failed` maps to
-  retry (or `rate_capped`) and `now - dispatchedAt > deadline` reaps the worker (`cancel`). The
-  reconciler is still the only mover and resumable — the handle on the ticket is the reattach point.
-  Bounded retries → then `failed` / `rate_capped` (surfaced, requeued, never crash).
+- **Lifecycle (phase machine, async dispatch+poll):** `queued → working (dispatch work agent-worker;
+  poll; Succeeded → open PR) → reviewing (CI green → dispatch review agent-worker; poll the verdict)
+  → merging (approve; idempotent merge next tick) → done`, with rework loops `reviewing → working`
+  (request_changes / red CI / merge conflict) and `verifying` reserved for post-merge main-green
+  verification (wave 3). An in-flight dispatch is the `workHandle` + `dispatchedAt` on the ticket
+  (phase unchanged); a poll `Failed` maps to retry (or sets the `rate_capped` condition — a gate that
+  blocks dispatch, clears next tick, and never spends an attempt) and
+  `now - dispatchedAt > deadline` reaps the worker (`cancel`). Every phase transition and condition
+  set/clear appends a control-plane ticket event. The reconciler is still the only mover and
+  resumable — the handle on the ticket is the reattach point. Bounded retries → then `failed`
+  (surfaced, never crash).
 - **Closed-loop PR-state reconciliation.** `done` used to happen only as a side-effect of the
   reconciler's OWN successful `forge.merge()` call — the loop never asked GitHub "is this PR
   actually merged?" That leaves three windows where `PR merged ∧ ticket ≠ done`: (1) an external/

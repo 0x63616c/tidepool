@@ -1,5 +1,5 @@
 import type { Config } from './config.ts';
-import type { Ticket, TicketState } from './domain.ts';
+import type { Ticket, TicketPhase } from './domain.ts';
 import type { TicketId } from './ids.ts';
 
 /**
@@ -12,21 +12,21 @@ import type { TicketId } from './ids.ts';
  */
 
 /**
- * States that hold a `workers.max` slot: everything past `backlog` and before
- * a terminal state (`done` | `failed`). `rate_capped` counts too — it is a
- * ticket mid-pipeline (open branch, sometimes an open PR) that has merely been
- * asked to wait out a provider rate limit; it re-enters `in_progress`/`review`
- * on the very next `step` (see reconciler.ts's `rate_capped` case), so it is
+ * Phases that hold a `workers.max` slot: everything past `queued` and before
+ * a terminal phase (`done` | `failed`). Conditions do NOT release the slot —
+ * a `rate_capped` ticket is mid-pipeline (open branch, sometimes an open PR)
+ * that has merely been asked to wait out a provider rate limit; its gate
+ * clears on the very next `step` (see reconciler.ts's gate rule), so it is
  * never actually idle while holding its slot. Letting it release the slot
  * would let a SECOND ticket start mid-pipeline at `max=1`, breaking the
  * merge-safety guarantee `workers.max` exists for (DESIGN.md §Compute:
  * "N=1 serializes tickets ... merge conflicts essentially can't occur").
  */
-export const PIPELINE_OCCUPIED: ReadonlyArray<TicketState> = [
-  'in_progress',
-  'running',
-  'review',
-  'rate_capped',
+export const PIPELINE_OCCUPIED: ReadonlyArray<TicketPhase> = [
+  'working',
+  'reviewing',
+  'merging',
+  'verifying',
 ];
 
 /**
@@ -56,7 +56,7 @@ export interface TicketSelector {
 /** The only policy today: FIFO order (via iteration order), N free slots. */
 export const fifoSelector: TicketSelector = {
   admit: (tickets, config) =>
-    tickets.filter((t) => PIPELINE_OCCUPIED.includes(t.state)).length < config.workers.max,
+    tickets.filter((t) => PIPELINE_OCCUPIED.includes(t.phase)).length < config.workers.max,
 };
 
 /**
@@ -73,10 +73,10 @@ export const deferredBacklog = (
   tickets: ReadonlyArray<Ticket>,
   config: Config,
 ): ReadonlyArray<TicketId> => {
-  const occupied = tickets.filter((t) => PIPELINE_OCCUPIED.includes(t.state)).length;
+  const occupied = tickets.filter((t) => PIPELINE_OCCUPIED.includes(t.phase)).length;
   const free = Math.max(0, config.workers.max - occupied);
   return tickets
-    .filter((t) => t.state === 'backlog')
+    .filter((t) => t.phase === 'queued')
     .slice(free)
     .map((t) => t.id);
 };

@@ -1,6 +1,6 @@
 import type { SqlClient } from '@effect/sql/SqlClient';
 import { Effect, Either, Schema } from 'effect';
-import { derivePhaseConditions, Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
+import { projectTicket, Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
 import { newTicketId, type TicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -216,7 +216,7 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
       Effect.gen(function* () {
         const current = yield* findById(id);
         const patched = { ...current, ...patch };
-        const updated: Ticket = { ...patched, ...derivePhaseConditions(patched) };
+        const updated: Ticket = projectTicket(patched, patch);
         const conditions = encodeConditions(updated);
         yield* (
           opts.conditionsAs === 'jsonb'
