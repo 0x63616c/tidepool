@@ -211,6 +211,40 @@ describe('makeRunner', () => {
       true,
     );
   });
+
+  it('surfaces real git stderr in GitFailed.reason instead of the generic Bun ShellError message', async () => {
+    // Bun's ShellError stringifies to a useless "An error has occurred" via
+    // `String(e)`; the real diagnostic lives on `.stderr` (Buffer-like) + `.exitCode`.
+    class FakeShellError extends Error {
+      readonly stderr: Buffer;
+      readonly exitCode: number;
+      constructor(stderr: string, exitCode: number) {
+        super('An error has occurred');
+        this.stderr = Buffer.from(stderr);
+        this.exitCode = exitCode;
+      }
+      override toString(): string {
+        return 'An error has occurred';
+      }
+    }
+    const { git } = makeGit({
+      push: () =>
+        Promise.reject(
+          new FakeShellError("fatal: could not read Username for 'https://github.com'", 128),
+        ),
+    });
+    const { format } = makeFormat();
+    const { opencode } = makeOpencode();
+    const exit = await Effect.runPromiseExit(makeRunner({ git, opencode, format })(config));
+    const error =
+      Exit.isFailure(exit) && exit.cause._tag === 'Fail' && exit.cause.error instanceof GitFailed
+        ? exit.cause.error
+        : undefined;
+    assert.strictEqual(error !== undefined, true);
+    assert.strictEqual(error?.reason.includes('An error has occurred'), false);
+    assert.strictEqual(error?.reason.includes('could not read Username'), true);
+    assert.strictEqual(error?.reason.includes('128'), true);
+  });
 });
 
 /**
