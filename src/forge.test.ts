@@ -5,6 +5,7 @@ import {
   combineCI,
   commitStatusState,
   parseRepo,
+  prLifecycleOf,
 } from './forge.ts';
 
 /**
@@ -80,5 +81,27 @@ describe('parseRepo', () => {
       owner: '0x63616c',
       name: 'tidepool-testbed',
     });
+  });
+});
+
+/**
+ * The tri-state ground truth the reconciler checks before trusting its own
+ * state (closes the external-merge/crash/lost-reply windows). `merged` takes
+ * priority over `state` — GitHub always sets `state: 'closed'` alongside
+ * `merged: true`, so checking `merged` first is what tells a merge apart from
+ * a plain close.
+ */
+describe('prLifecycleOf', () => {
+  it('merged: true → merged, regardless of state', () => {
+    assert.strictEqual(prLifecycleOf({ merged: true, state: 'closed' }), 'merged');
+    assert.strictEqual(prLifecycleOf({ merged: true, state: 'open' }), 'merged');
+  });
+
+  it('merged: false, state closed → closed', () => {
+    assert.strictEqual(prLifecycleOf({ merged: false, state: 'closed' }), 'closed');
+  });
+
+  it('merged: false, state open → open', () => {
+    assert.strictEqual(prLifecycleOf({ merged: false, state: 'open' }), 'open');
   });
 });

@@ -271,6 +271,23 @@ everything upstream). Two levels:
   retry (or `rate_capped`) and `now - dispatchedAt > deadline` reaps the worker (`cancel`). The
   reconciler is still the only mover and resumable — the handle on the ticket is the reattach point.
   Bounded retries → then `failed` / `rate_capped` (surfaced, requeued, never crash).
+- **Closed-loop PR-state reconciliation.** `done` used to happen only as a side-effect of the
+  reconciler's OWN successful `forge.merge()` call — the loop never asked GitHub "is this PR
+  actually merged?" That leaves three windows where `PR merged ∧ ticket ≠ done`: (1) an external/
+  manual merge (a human merges in GitHub — the reconciler's merge call never ran), (2) a
+  control-plane crash between `forge.merge` succeeding and the `done` patch landing, (3)
+  `forge.merge` succeeding on GitHub but returning a client-side error (network timeout, ambiguous
+  405/409) — the reconciler takes the failure path on a merge that actually happened. In all three
+  the zombie ticket gets re-dispatched next tick, opening a DUPLICATE PR and permanently holding its
+  whole-pipeline cap slot (freezing the pipeline). Fix: `Forge.prState({ repo, prNumber })` reads the
+  PR's real lifecycle (`open | merged | closed`) straight from GitHub. Any ticket that carries a PR
+  reads this FIRST — before any CI check, review dispatch, or merge attempt, so drift never has a
+  chance to start — and branches tri-state: `merged` → settle `done` (merge sha from the forge, not
+  from the reconciler's own call), `closed` (not merged) → settle `failed` with no retry (a
+  deliberately-closed PR must not loop into duplicate PRs), `open` → proceed exactly as before. The
+  same check runs again immediately before the approve-path `forge.merge` call, making the merge
+  idempotent: if the forge already shows the PR merged, the merge is skipped and the ticket settles
+  straight to `done` instead of attempting (and erroring on) a duplicate merge.
 - **Auto-merge in v1.** No human gate. Escalates to a human only on repeated failure.
 
 ### Standards (the spec the review agent grades against — mechanical, not vibes)

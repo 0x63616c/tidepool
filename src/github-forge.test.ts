@@ -11,6 +11,7 @@ import { type GithubRest, makeGithubForge } from './forge.ts';
 const fakeRest = (over: Partial<GithubRest> = {}): GithubRest => ({
   createPull: () => Promise.resolve({ number: 42, url: 'https://github.com/o/r/pull/42' }),
   headSha: () => Promise.resolve('abc123'),
+  pullState: () => Promise.resolve({ merged: false, state: 'open', mergeCommitSha: null }),
   checkRuns: () => Promise.resolve([]),
   commitStatuses: () => Promise.resolve([]),
   squashMerge: () => Promise.resolve({ sha: 'merged-sha' }),
@@ -83,6 +84,61 @@ describe('makeGithubForge', () => {
         fakeRest({ squashMerge: () => Promise.reject({ status: 500 }) }),
       );
       const exit = yield* Effect.exit(forge.merge({ repo: 'o/r', prNumber: 42 }));
+      assert.isTrue(
+        exit._tag === 'Failure' &&
+          exit.cause._tag === 'Fail' &&
+          exit.cause.error._tag === 'ForgeError',
+      );
+    }),
+  );
+
+  /**
+   * `prState` is the ground truth the reconciler reads before trusting its own
+   * state (closes the external-merge/crash/lost-reply windows). The tri-state
+   * mapping itself is unit-tested against `prLifecycleOf` in forge.test.ts; here
+   * only the orchestration (calling `pullState`, wrapping the result, mapping a
+   * rejected promise to `ForgeError`) is under test.
+   */
+  it.effect('prState reports merged with the merge sha', () =>
+    Effect.gen(function* () {
+      const forge = makeGithubForge(
+        fakeRest({
+          pullState: () =>
+            Promise.resolve({ merged: true, state: 'closed', mergeCommitSha: 'deadbeef' }),
+        }),
+      );
+      const state = yield* forge.prState({ repo: 'o/r', prNumber: 42 });
+      assert.deepStrictEqual(state, { state: 'merged', mergeSha: 'deadbeef' });
+    }),
+  );
+
+  it.effect('prState reports closed (no merge) with a null sha', () =>
+    Effect.gen(function* () {
+      const forge = makeGithubForge(
+        fakeRest({
+          pullState: () =>
+            Promise.resolve({ merged: false, state: 'closed', mergeCommitSha: null }),
+        }),
+      );
+      const state = yield* forge.prState({ repo: 'o/r', prNumber: 42 });
+      assert.deepStrictEqual(state, { state: 'closed', mergeSha: null });
+    }),
+  );
+
+  it.effect('prState reports open by default', () =>
+    Effect.gen(function* () {
+      const forge = makeGithubForge(fakeRest());
+      const state = yield* forge.prState({ repo: 'o/r', prNumber: 42 });
+      assert.deepStrictEqual(state, { state: 'open', mergeSha: null });
+    }),
+  );
+
+  it.effect('prState maps a rejected lookup to ForgeError', () =>
+    Effect.gen(function* () {
+      const forge = makeGithubForge(
+        fakeRest({ pullState: () => Promise.reject(new Error('github 503')) }),
+      );
+      const exit = yield* Effect.exit(forge.prState({ repo: 'o/r', prNumber: 42 }));
       assert.isTrue(
         exit._tag === 'Failure' &&
           exit.cause._tag === 'Fail' &&

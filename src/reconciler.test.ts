@@ -8,7 +8,7 @@ import { reconcileForever, settle, step } from './reconciler.ts';
 import {
   type AgentWorker,
   type DispatchInput,
-  type Forge,
+  Forge,
   TicketStore,
   type TicketStoreApi,
 } from './services.ts';
@@ -437,6 +437,175 @@ describe('reconciler', () => {
       assert.isNotNull(final.workHandle);
       assert.strictEqual((yield* store.runsFor(ticket.id)).length, 0);
     }),
+  );
+});
+
+/**
+ * Closed-loop PR-state reconciliation (tri-state). Before this fix, a ticket
+ * only reached `done` as a side-effect of the reconciler's OWN successful
+ * `forge.merge()` call — the reconciler never asked GitHub "is this PR merged?"
+ * So an external merge, a crash between `forge.merge` succeeding and the
+ * `done` patch landing, or a merge call that succeeded remotely but errored
+ * client-side all left the ticket non-terminal, and the next tick re-dispatched
+ * it — opening a DUPLICATE PR and permanently holding a whole-pipeline cap slot.
+ *
+ * The fix: for any ticket with a PR, `forge.prState` (ground truth) is read
+ * FIRST — before any CI check, review dispatch, or merge attempt — and branches
+ * tri-state: merged → `done`, closed-unmerged → `failed` (no retry), open →
+ * proceed exactly as before.
+ */
+describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
+  /** Patch a freshly-added ticket into a `review` state (PR already open). */
+  const reviewReady = (store: TicketStoreApi, id: Parameters<TicketStoreApi['patch']>[0]) =>
+    store.patch(id, {
+      state: 'review',
+      branch: 'tp/x',
+      prNumber: 7,
+      prId: newPrId(),
+      workedAttempt: 0,
+      attempts: 0,
+    });
+
+  it.effect(
+    'PR merged externally while ticket sits in review → done (with merge_sha), no CI check, no dispatch',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* reviewReady(store, ticket.id);
+
+        const dispatches: DispatchInput[] = [];
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ prLifecycle: 'merged', mergeSha: 'deadbeef' }),
+          fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
+        );
+
+        yield* runSteps(1, env);
+
+        const final = yield* store.byId(ticket.id);
+        assert.strictEqual(final.state, 'done');
+        assert.strictEqual(final.mergeSha, 'deadbeef');
+        assert.isNull(final.workHandle);
+        assert.strictEqual(
+          dispatches.length,
+          0,
+          'no review agent dispatched once ground truth already says merged',
+        );
+      }),
+  );
+
+  it.effect(
+    'PR closed without merge while ticket sits in review → failed, no retry, no dispatch',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* reviewReady(store, ticket.id);
+
+        const dispatches: DispatchInput[] = [];
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ prLifecycle: 'closed' }),
+          fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
+        );
+
+        yield* runSteps(1, env);
+
+        const final = yield* store.byId(ticket.id);
+        assert.strictEqual(final.state, 'failed');
+        assert.isNotNull(final.reason);
+        assert.strictEqual(
+          dispatches.length,
+          0,
+          'a deliberately-closed PR must not loop into a retry',
+        );
+      }),
+  );
+
+  it.effect(
+    'PR still open + CI green → dispatches review exactly as before (unchanged behavior)',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* reviewReady(store, ticket.id);
+
+        const dispatches: DispatchInput[] = [];
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ prLifecycle: 'open', ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
+        );
+
+        yield* runSteps(1, env);
+
+        assert.strictEqual(dispatches.length, 1);
+        assert.strictEqual(dispatches[0]?.kind, 'review');
+        const final = yield* store.byId(ticket.id);
+        assert.strictEqual(final.state, 'running');
+      }),
+  );
+
+  it.effect(
+    'idempotent merge: a crash between forge.merge succeeding and the done-patch landing settles ' +
+      'from ground truth next tick, WITHOUT a duplicate merge call',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* reviewReady(store, ticket.id);
+
+        const mergeCalls: number[] = [];
+        const prStateCalls = yield* Ref.make(0);
+        // A one-off Forge double: `prState` reports 'open' on its first call (the
+        // review step's own tri-state check) then 'merged' from the second call
+        // onward — simulating a merge that succeeded on GitHub moments before a
+        // control-plane crash wiped out the in-flight `done` patch.
+        const forgeApi = {
+          openPR: () => Effect.die('should not open a duplicate PR'),
+          prState: () =>
+            Effect.map(
+              Ref.updateAndGet(prStateCalls, (n) => n + 1),
+              (n) =>
+                n === 1
+                  ? { state: 'open' as const, mergeSha: null }
+                  : { state: 'merged' as const, mergeSha: 'deadbeef' },
+            ),
+          checks: () => Effect.succeed('green' as const),
+          merge: (input: { readonly repo: string; readonly prNumber: number }) => {
+            mergeCalls.push(input.prNumber);
+            return Effect.succeed({ sha: 'should-not-be-used' });
+          },
+        };
+        const crashProneForge = Layer.succeed(Forge, forgeApi);
+
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          crashProneForge,
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
+
+        // step 1: review → prState 'open' (call #1) → CI green → dispatch review → running.
+        // step 2: poll Succeeded/Review(approve) → prState 'merged' (call #2, the
+        // post-crash re-observation) → settle done WITHOUT calling forge.merge.
+        yield* runSteps(2, env);
+
+        const final = yield* store.byId(ticket.id);
+        assert.strictEqual(final.state, 'done');
+        assert.strictEqual(final.mergeSha, 'deadbeef');
+        assert.strictEqual(
+          mergeCalls.length,
+          0,
+          'idempotent: no duplicate merge once ground truth already shows merged',
+        );
+
+        // A further tick is a no-op: the ticket is terminal.
+        yield* runSteps(1, env);
+        const again = yield* store.byId(ticket.id);
+        assert.strictEqual(again.state, 'done');
+        assert.strictEqual(mergeCalls.length, 0);
+      }),
   );
 });
 

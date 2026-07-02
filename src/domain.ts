@@ -139,6 +139,17 @@ export type RunEvent = typeof RunEvent.Type;
 export const CIStatus = Schema.Literal('pending', 'green', 'red');
 export type CIStatus = typeof CIStatus.Type;
 
+/**
+ * Real state of a PR at the forge (GitHub), independent of what the reconciler
+ * last wrote. The reconciler treats this as ground truth every time a ticket
+ * carries a PR — that's what closes the loop: an external merge, a crash
+ * between `forge.merge` succeeding and the `done` patch landing, or a merge
+ * call that succeeded remotely but errored client-side are all *observed* and
+ * settled instead of silently drifting into a duplicate re-dispatch.
+ */
+export const PrLifecycle = Schema.Literal('open', 'merged', 'closed');
+export type PrLifecycle = typeof PrLifecycle.Type;
+
 export const ReviewVerdict = Schema.Literal('approve', 'request_changes');
 export type ReviewVerdict = typeof ReviewVerdict.Type;
 
