@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, type Scope } from 'effect';
+import { Effect, HashMap, Logger, type Scope } from 'effect';
 import type { Run, RunEvent } from './domain.ts';
 import { newBoxId, newRunId, newTicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
@@ -15,6 +15,8 @@ import type { TicketStoreApi } from './services.ts';
 export interface StoreMedium {
   /** Open a store over this medium. Repeated opens share the same durable state. */
   readonly open: Effect.Effect<TicketStoreApi, never, Scope.Scope>;
+  /** Test hook: insert a persisted ticket row that bypasses domain validation. */
+  readonly insertUndecodableTicketRow?: Effect.Effect<string, never, Scope.Scope>;
 }
 
 const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
@@ -78,6 +80,50 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
           const ids = all.map((t) => t.id);
           assert.strictEqual(all.length, 2);
           assert.isTrue(ids.includes(a.id) && ids.includes(b.id));
+        }),
+      ),
+    );
+
+    it.effect('list quarantines undecodable rows and returns the valid tickets', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          if (medium.insertUndecodableTicketRow === undefined) return;
+          const store = yield* medium.open;
+          const a = yield* store.add(newTicket);
+          const b = yield* store.add({ ...newTicket, title: 'Add chunk' });
+          const badId = yield* medium.insertUndecodableTicketRow;
+          const logs: Array<{ readonly level: string; readonly line: string }> = [];
+
+          const all = yield* store.list().pipe(
+            Effect.provide(
+              Logger.replace(
+                Logger.defaultLogger,
+                Logger.make(({ logLevel, message, annotations }) => {
+                  const ann = Array.from(
+                    HashMap.entries(annotations),
+                    ([k, v]) => `${k}=${String(v)}`,
+                  ).join(' ');
+                  logs.push({ level: logLevel.label, line: `${String(message)} ${ann}`.trim() });
+                }),
+              ),
+            ),
+          );
+
+          assert.deepStrictEqual(
+            all.map((t) => t.id),
+            [a.id, b.id],
+          );
+          assert.isTrue(
+            logs.some(
+              (l) =>
+                l.level === 'ERROR' &&
+                l.line.includes('quarantined undecodable ticket row') &&
+                l.line.includes(badId) &&
+                /decode|ParseError|Expected/i.test(l.line),
+            ),
+            `expected an ERROR quarantine log with raw id and decode failure; got ${JSON.stringify(logs)}`,
+          );
         }),
       ),
     );

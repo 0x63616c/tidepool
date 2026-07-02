@@ -1,7 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Redacted } from 'effect';
 import { makeWorkHandle } from './domain.ts';
-import { makePgStore, type PgStoreConfig } from './pg-store.ts';
+import { makePgStore, openPg, type PgStoreConfig } from './pg-store.ts';
 import { type StoreMedium, storeContract } from './store-contract.ts';
 
 /**
@@ -27,7 +27,18 @@ const freshSchema = (): string => {
 const pgMediumFor = (url: string) =>
   Effect.sync(() => {
     const config: PgStoreConfig = { url: Redacted.make(url), schema: freshSchema() };
-    return { open: makePgStore(config) } satisfies StoreMedium;
+    return {
+      open: makePgStore(config),
+      insertUndecodableTicketRow: Effect.gen(function* () {
+        const sql = yield* openPg(config);
+        const badId = 'tckt_reworkfb0';
+        yield* sql`
+          INSERT INTO tickets (id, title, body, target, state, attempts)
+          VALUES (${badId}, 'Legacy bad id', 'body', 't/repo', 'backlog', 0)
+        `.pipe(Effect.orDie);
+        return badId;
+      }),
+    } satisfies StoreMedium;
   });
 
 if (PG_URL === undefined) {
