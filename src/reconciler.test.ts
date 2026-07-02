@@ -753,4 +753,56 @@ describe('reconciler logging (stdout observability)', () => {
       );
     }),
   );
+
+  it.effect('stamps the short git sha onto the boot banner (and every reconciler log line)', () =>
+    Effect.gen(function* () {
+      const original = process.env.TIDEPOOL_GIT_SHA;
+      process.env.TIDEPOOL_GIT_SHA = 'abc1234def5678';
+      const store = yield* makeInMemoryStore;
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      const fiber = yield* reconcileForever(30).pipe(
+        Effect.provide(env),
+        Effect.provide(captureInto(logs)),
+        Effect.fork,
+      );
+      yield* TestClock.adjust(Duration.millis(1)); // let the banner emit before the first spaced tick
+      yield* Fiber.interrupt(fiber);
+      if (original === undefined) delete process.env.TIDEPOOL_GIT_SHA;
+      else process.env.TIDEPOOL_GIT_SHA = original;
+
+      assert.isTrue(
+        logs.some((l) => /reconciler loop started/i.test(l) && l.includes('sha=abc1234')),
+        `expected the boot banner to carry the short git sha; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect('renders a rocket on the "reconciler loop started" boot banner', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      const fiber = yield* reconcileForever(30).pipe(
+        Effect.provide(env),
+        Effect.provide(captureInto(logs)),
+        Effect.fork,
+      );
+      yield* TestClock.adjust(Duration.millis(1));
+      yield* Fiber.interrupt(fiber);
+
+      assert.isTrue(
+        logs.some((l) => l.includes('🚀') && /reconciler loop started/i.test(l)),
+        `expected the boot banner to include a rocket; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
 });

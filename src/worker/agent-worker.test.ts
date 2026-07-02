@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Logger, Schema } from 'effect';
+import { Effect, HashMap, Logger, Schema } from 'effect';
 import { describeConfig, makeAgentWorkerProgram } from './agent-worker.ts';
 import type { OpencodePort } from './opencode-session.ts';
 import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
@@ -129,6 +129,42 @@ describe('agent-worker dispatch', () => {
     assert.strictEqual(
       lines.some((l) => l.startsWith('work run: branch=tp/tckt_x-do-thing')),
       true,
+    );
+  });
+
+  it('stamps the short git sha annotation on every log line (fail-open to dev when unset)', async () => {
+    const original = process.env.TIDEPOOL_GIT_SHA;
+    delete process.env.TIDEPOOL_GIT_SHA;
+    const lines: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message, annotations }) => {
+        const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(
+          ' ',
+        );
+        lines.push(`${String(message)} ${ann}`.trim());
+      }),
+    );
+    try {
+      await Effect.runPromise(
+        makeAgentWorkerProgram({
+          git: fakeGit,
+          opencode: fakeOpencode('done'),
+          format: fakeFormat,
+          ensureDir: () => Promise.resolve(),
+          readConfig: () => Promise.resolve(JSON.stringify(workConfig)),
+          emit: () => {},
+        }).pipe(Effect.provide(capture)),
+      );
+    } finally {
+      if (original === undefined) delete process.env.TIDEPOOL_GIT_SHA;
+      else process.env.TIDEPOOL_GIT_SHA = original;
+    }
+    assert.isTrue(
+      lines.some(
+        (l) => l.startsWith('work run: branch=tp/tckt_x-do-thing') && l.includes('sha=dev'),
+      ),
+      `expected the startup log to carry sha=dev; got: ${JSON.stringify(lines)}`,
     );
   });
 });

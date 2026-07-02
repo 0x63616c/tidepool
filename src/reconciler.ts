@@ -9,6 +9,7 @@ import type {
   Ticket,
   TicketNotFound,
 } from './domain.ts';
+import { shortGitSha } from './git-sha.ts';
 import { newRunId, type RunId, type TicketId } from './ids.ts';
 import { fifoSelector } from './selection.ts';
 import {
@@ -542,7 +543,8 @@ export const reconcileForever = (
     const config = yield* AppConfig;
     // One boot line proving the loop started + which config it read — a healthy
     // idle reconciler is otherwise indistinguishable from a hung one in the logs.
-    yield* Effect.logInfo('reconciler loop started').pipe(
+    // The 🚀 makes this one line greppable/eyeballable in a sea of round noise.
+    yield* Effect.logInfo('🚀 reconciler loop started').pipe(
       Effect.annotateLogs({
         intervalSec,
         retries: config.retries,
@@ -554,4 +556,8 @@ export const reconcileForever = (
       Effect.repeat(Schedule.spaced(Duration.seconds(intervalSec))),
       Effect.asVoid,
     );
-  });
+    // Every log line this loop emits (boot banner + every settle-round dispatch/
+    // error) carries the short git sha, so a misbehaving prod pod is traceable
+    // back to the exact commit (see git-sha.ts). Wraps the WHOLE loop body, not
+    // just the boot line, so it survives across every subsequent settle() round.
+  }).pipe(Effect.annotateLogs({ sha: shortGitSha() }));
