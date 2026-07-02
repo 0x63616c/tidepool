@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
 
       # Lowercase the owner — ghcr repository paths must be lowercase, GitHub
       # org/user names may not be.
@@ -36,14 +37,33 @@ jobs:
         id: prefix
         run: echo "value=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/tidepool" >>"$GITHUB_OUTPUT"
 
-      # Base first (local tag), then the two derived images reference it via the
-      # BASE_IMAGE build-arg — same as the local `docker build` smoke.
+      # Base first (local tag, GHA-cached so an unchanged Dockerfile is a cache
+      # hit instead of the ~6-8min cold rebuild), then the two derived images
+      # build concurrently off it — each references BASE_IMAGE via build-arg,
+      # same as the local `docker build` smoke, just via buildx for caching.
       - name: build base
-        run: docker build -f infra/docker/base.Dockerfile -t tidepool-base:latest .
-      - name: build control-plane
-        run: docker build -f infra/docker/control-plane.Dockerfile --build-arg BASE_IMAGE=tidepool-base:latest -t tidepool-control-plane:latest .
-      - name: build agent-worker
-        run: docker build -f infra/docker/agent-worker.Dockerfile --build-arg BASE_IMAGE=tidepool-base:latest -t tidepool-agent-worker:latest .
+        run: >
+          docker buildx build -f infra/docker/base.Dockerfile
+          --cache-from type=gha,scope=base --cache-to type=gha,scope=base,mode=max
+          --load -t tidepool-base:latest .
+      - name: build control-plane + agent-worker (parallel)
+        run: |
+          set -eu
+          docker buildx build -f infra/docker/control-plane.Dockerfile \
+            --build-arg BASE_IMAGE=tidepool-base:latest \
+            --cache-from type=gha,scope=control-plane --cache-to type=gha,scope=control-plane,mode=max \
+            --load -t tidepool-control-plane:latest . &
+          pids=("$!")
+          docker buildx build -f infra/docker/agent-worker.Dockerfile \
+            --build-arg BASE_IMAGE=tidepool-base:latest \
+            --cache-from type=gha,scope=agent-worker --cache-to type=gha,scope=agent-worker,mode=max \
+            --load -t tidepool-agent-worker:latest . &
+          pids+=("$!")
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
+          done
+          exit "$status"
 
       - name: log in to ghcr
         if: github.event_name == 'push'
