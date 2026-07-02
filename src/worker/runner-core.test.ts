@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit } from 'effect';
+import { Cause, Effect, Exit } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import type { RunnerConfig } from './protocol.ts';
 import {
@@ -244,6 +244,15 @@ describe('makeRunner', () => {
     assert.strictEqual(error?.reason.includes('An error has occurred'), false);
     assert.strictEqual(error?.reason.includes('could not read Username'), true);
     assert.strictEqual(error?.reason.includes('128'), true);
+  });
+
+  it('renders the real reason (not the generic "An error has occurred") through Cause.pretty, since that is the only place worker errors are logged', () => {
+    const cause = Cause.fail(
+      new GitFailed({ op: 'push', reason: 'exit 128: fatal: could not read Username' }),
+    );
+    const rendered = Cause.pretty(cause);
+    assert.strictEqual(rendered.includes('could not read Username'), true);
+    assert.strictEqual(rendered.includes('An error has occurred'), false);
   });
 });
 

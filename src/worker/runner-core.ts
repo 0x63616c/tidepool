@@ -62,7 +62,11 @@ export interface FormatPort {
 export class GitFailed extends Data.TaggedError('GitFailed')<{
   readonly op: string;
   readonly reason: string;
-}> {}
+}> {
+  override get message(): string {
+    return `${this.op}: ${this.reason}`;
+  }
+}
 
 /**
  * A pre-commit format step failed. This is best-effort and NON-FATAL: formatting
