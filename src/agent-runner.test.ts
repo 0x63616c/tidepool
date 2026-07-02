@@ -102,6 +102,34 @@ describe('commitMessage', () => {
     // Must satisfy the repo's commit header pattern.
     assert.match(msg, /^#(tckt_[0-9a-z]+) (\w+)(?:\(([^)]+)\))?: (.+)$/);
   });
+
+  // commitlint.config.mjs extends @commitlint/config-conventional, which sets
+  // header-max-length: [2, 'always', 100]. A ticket title copied verbatim from a
+  // long human-written title blew past that (tckt_59qqc9ah8h, PR #91), rejecting
+  // the auto-generated commit and blocking every ticket with a long title.
+  it('truncates an overlong title so the header respects commitlint’s 100-char max', () => {
+    const longTitle =
+      'Fix wrong CLI help: suggests bare tp logs/transcript, real cmds are tp ticket logs/transcript';
+    const msg = commitMessage({ id: 'tckt_52d1ao2ab0', title: longTitle });
+    assert.isAtMost(msg.length, 100);
+    assert.match(msg, /^#(tckt_[0-9a-z]+) (\w+)(?:\(([^)]+)\))?: (.+)$/);
+  });
+
+  // config-conventional's subject-case rule is [2, 'never', ['sentence-case',
+  // 'start-case', 'pascal-case', 'upper-case']]. Ticket titles are written by
+  // humans (sentence case), so a verbatim subject was always rejected.
+  it('lower-cases a sentence-case ticket title so subject-case passes', () => {
+    const msg = commitMessage({ id: 'tckt_52d1ao2ab0', title: 'Fix wrong CLI help' });
+    const subject = msg.replace(/^#tckt_[0-9a-z]+ \w+: /, '');
+    assert.strictEqual(subject, subject.toLowerCase());
+  });
+
+  // Every generated header must always start with the ticket-prefix commitlint
+  // checks for ("#tckt_<id> "), regardless of title casing/length.
+  it('always leads with "#<ticket-id> " (the ticket-prefix rule)', () => {
+    const msg = commitMessage({ id: 'tckt_52d1ao2ab0', title: 'Some Title' });
+    assert.match(msg, /^#tckt_[0-9a-z]+ /);
+  });
 });
 
 /**
