@@ -193,6 +193,11 @@ describe('buildJobManifest', () => {
     assert.strictEqual(first(manifest.spec.template.spec.containers).image, CFG.image);
   });
 
+  it('threads the handle as TIDEPOOL_RUN_ID so the worker pod logs the same correlation id (tckt_4utv62nij6)', () => {
+    const c = first(manifest.spec.template.spec.containers);
+    assert.deepInclude(c.env, { name: 'TIDEPOOL_RUN_ID', value: handle });
+  });
+
   it('mounts creds: auth.json at /secrets, config.json in the working dir', () => {
     const c = first(manifest.spec.template.spec.containers);
     const mounts = c.volumeMounts;

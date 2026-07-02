@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { BunRuntime } from '@effect/platform-bun';
 import { Cause, Effect, Logger, Schema } from 'effect';
 import { shortGitSha } from '../git-sha.ts';
+import { workerRunId } from '../run-id.ts';
 import type { OpencodePort } from './opencode-session.ts';
 import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
 import { bunFormatPort, bunGitPort, makeSdkOpencodePort } from './runner.ts';
@@ -82,8 +83,11 @@ export const makeAgentWorkerProgram = (deps: AgentWorkerDeps): Effect.Effect<voi
     // Every diagnostic this pod emits carries the short git sha of the dispatching
     // reconciler (see git-sha.ts) — the same value stamped on the `tidepool/git-sha`
     // Job label — so a misbehaving run is traceable back to its commit from logs
-    // alone, not just from `kubectl get pods -L tidepool/git-sha`.
-    Effect.annotateLogs({ sha: shortGitSha() }),
+    // alone, not just from `kubectl get pods -L tidepool/git-sha`. It also carries
+    // the run's correlation id (see run-id.ts, tckt_4utv62nij6) — the SAME value
+    // as the reconciler's own dispatch log and the Job's name — so one grep finds
+    // a ticket's whole flow across `kubectl logs` AND the reconciler's log.
+    Effect.annotateLogs({ sha: shortGitSha(), runId: workerRunId() }),
     Effect.orDie,
   );
 

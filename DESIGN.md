@@ -95,6 +95,30 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > logger writes via `console.log`/stdout) with a stderr sink, so every diagnostic line is a
 > timestamped JSON object while stdout stays reserved for the worker's one result line. The
 > SSE collector is kept (harmless, and correct for local dev where SSE does deliver events).
+>
+> **High-signal reconciler logging + de-noise (2026-07-01, tckt_obs0logs).** The reconciler's
+> logs were missing key transitions and spamming others. Fixed on both axes: **(1) added** — a
+> CI-`pending` poll now logs once when a streak STARTS (not every 5s tick), via the pure
+> `observeCiPending`/`clearCiPending` helpers (`reconciler.ts`, ephemeral in-process
+> `Map<TicketId, number>` — never persisted, since it drives no ticket transition, only log
+> cadence); the review agent's verdict AND its free-text reason are logged together
+> (`"review verdict" {pr, verdict, reason}`, reason bounded by `strings.ts#truncate` — the full
+> text still lands in the persisted transcript `RunEvent`, only the log line is capped);
+> `retryOrFail` (used by all 4 retry/fail call sites) now logs its own outcome
+> (`{from, to, attempts, retries, reason}`) so "retry vs exhausted" is never silent; the
+> `backlog`→`in_progress` admit and `rate_capped` re-pick transitions each log a
+> `{from, to}` line. **(2) correlation ids** (folds tckt_4utv62nij6) — the dispatch handle
+> (`WorkHandle`, already the k8s Job's name — no new id minted) is now logged as `runId` on
+> the reconciler's dispatch lines, threaded onto the Job as a `TIDEPOOL_RUN_ID` env var
+> (`k8s-agent-worker.ts#buildJobManifest`), and read back by the worker pod
+> (`run-id.ts#workerRunId`, fail-open to `dev` like `shortGitSha`) into every one of its own
+> log annotations — one value greps a ticket's whole flow across the reconciler's log AND
+> `kubectl logs`. **(3) de-noised** — the `workers.max reached; deferring backlog exit` line
+> that fired at INFO per deferred ticket every 5s tick (tens of identical lines/minute under
+> load) is gone; `step` now computes the round's deferred-backlog set
+> (`selection.ts#deferredBacklog`) and logs ONE aggregate line
+> (`reconciler.ts#formatCapFull`/`diffDeferred`) only when that set actually CHANGES (grows,
+> shrinks, or clears), not on every tick it stays the same.
 
 ---
 

@@ -4,7 +4,15 @@ import { AppConfig, type Config, defineConfig } from './config.ts';
 import { makeWorkHandle } from './domain.ts';
 import { fakeAgentWorker, fakeForge, makeInMemoryStore } from './fakes.ts';
 import { newPrId } from './ids.ts';
-import { reconcileForever, settle, step } from './reconciler.ts';
+import {
+  clearCiPending,
+  diffDeferred,
+  formatCapFull,
+  observeCiPending,
+  reconcileForever,
+  settle,
+  step,
+} from './reconciler.ts';
 import {
   type AgentWorker,
   type DispatchInput,
@@ -974,4 +982,303 @@ describe('reconciler logging (stdout observability)', () => {
       );
     }),
   );
+
+  it.effect('logs CI-pending ONCE per streak, not on every tick (quiets the poll)', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        state: 'review',
+        branch: 'tp/x',
+        prNumber: 1,
+        prId: newPrId(),
+      });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'pending' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      // Three ticks, CI pending throughout — the reconciler should only log
+      // the pending-observed line ONCE, not every tick (the noise this PR quiets).
+      yield* runSteps(3, env).pipe(Effect.provide(captureInto(logs)));
+
+      const pendingLogs = logs.filter((l) => /CI pending/i.test(l));
+      assert.strictEqual(
+        pendingLogs.length,
+        1,
+        `expected exactly one CI-pending log across 3 ticks; got: ${JSON.stringify(logs)}`,
+      );
+      assert.isTrue(pendingLogs[0]?.includes('pr=1'));
+    }),
+  );
+
+  it.effect('logs review verdict + reason once the review agent finishes', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        state: 'review',
+        branch: 'tp/x',
+        prNumber: 1,
+        prId: newPrId(),
+      });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({
+          verdict: 'request_changes',
+          reviewReason: 'missing tests for edge case',
+        }),
+      );
+      const logs: string[] = [];
+      // review → dispatch review agent → running; next tick harvests the verdict.
+      yield* runSteps(2, env).pipe(Effect.provide(captureInto(logs)));
+
+      assert.isTrue(
+        logs.some(
+          (l) =>
+            /review verdict/i.test(l) &&
+            l.includes('verdict=request_changes') &&
+            l.includes('missing tests for edge case'),
+        ),
+        `expected a verdict+reason log; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect('logs a clear transition when a backlog ticket is admitted to in_progress', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      yield* runSteps(1, env).pipe(Effect.provide(captureInto(logs)));
+
+      assert.isTrue(
+        logs.some(
+          (l) =>
+            l.includes(ticket.id) && l.includes('from=backlog') && l.includes('to=in_progress'),
+        ),
+        `expected an admit transition log; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect('logs a clear transition when a rate_capped ticket is re-picked', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, { state: 'rate_capped' });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      yield* runSteps(1, env).pipe(Effect.provide(captureInto(logs)));
+
+      assert.isTrue(
+        logs.some(
+          (l) =>
+            l.includes(ticket.id) && l.includes('from=rate_capped') && l.includes('to=in_progress'),
+        ),
+        `expected a rate_capped re-pick transition log; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect(
+    'aggregates workers.max backlog pressure into ONE log line per change, not per tick/ticket',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const running = yield* store.add(newTicket); // occupies the single slot
+        yield* store.patch(running.id, { state: 'running', workHandle: makeWorkHandle('wh_r') });
+        yield* store.add({ ...newTicket, title: 'Add foo' });
+        yield* store.add({ ...newTicket, title: 'Add bar' });
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ stuckRunning: true }),
+        );
+        const logs: string[] = [];
+        // 3 ticks with the SAME two tickets waiting the whole time (max=1, one
+        // running the whole time) — the old per-ticket-per-tick log would emit
+        // 2 lines EVERY tick (6 total); the aggregate line should emit ONCE.
+        yield* runSteps(3, env).pipe(Effect.provide(captureInto(logs)));
+
+        const capLogs = logs.filter((l) => /workers\.max.*full/i.test(l));
+        assert.strictEqual(
+          capLogs.length,
+          1,
+          `expected exactly one aggregate cap-full log across 3 ticks; got: ${JSON.stringify(logs)}`,
+        );
+        assert.isTrue(capLogs[0]?.includes('2 ticket(s) waiting'));
+      }),
+  );
+
+  it.effect('logs the retry/fail outcome exactly once from the shared retryOrFail path', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      const oneRetry: Config = { ...testConfig, retries: 1 };
+      const env = Layer.mergeAll(
+        Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, oneRetry)),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve', pollFails: 'worker crashed' }),
+      );
+      const logs: string[] = [];
+      // backlog → in_progress → dispatch → poll fails → retries=1 exhausted → failed.
+      yield* runSteps(3, env).pipe(Effect.provide(captureInto(logs)));
+
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'failed');
+      assert.isTrue(
+        logs.some((l) => l.includes(ticket.id) && l.includes('to=failed') && /fail/i.test(l)),
+        `expected a retryOrFail outcome log; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect('threads the dispatch handle as a runId annotation on the work dispatch log', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      yield* runSteps(2, env).pipe(Effect.provide(captureInto(logs)));
+
+      const after = yield* store.byId(ticket.id);
+      assert.isTrue(
+        logs.some(
+          (l) => /dispatched work agent/i.test(l) && l.includes(`runId=${after.workHandle}`),
+        ),
+        `expected a dispatched-work log carrying runId=<handle>; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+
+  it.effect('threads the dispatch handle as a runId annotation on the review dispatch log', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        state: 'review',
+        branch: 'tp/x',
+        prNumber: 1,
+        prId: newPrId(),
+      });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+      const logs: string[] = [];
+      yield* runSteps(1, env).pipe(Effect.provide(captureInto(logs)));
+
+      const after = yield* store.byId(ticket.id);
+      assert.isTrue(
+        logs.some(
+          (l) => /dispatched review agent/i.test(l) && l.includes(`runId=${after.workHandle}`),
+        ),
+        `expected a dispatched-review log carrying runId=<handle>; got: ${JSON.stringify(logs)}`,
+      );
+    }),
+  );
+});
+
+describe('observeCiPending / clearCiPending (pure)', () => {
+  // The CI-`pending` poll fires every 5s tick forever while a PR sits in CI —
+  // logging on EVERY poll would be the exact per-tick spam the assignment asks
+  // to quiet. These pure, DI-free helpers (mirroring `fifoSelector`) decide
+  // whether a tick is the START of a pending streak (log once) or a
+  // continuation (stay silent), given explicit state in/out — no module
+  // mutation, so they're trivially unit-testable.
+  const t1 = 'tckt_a1' as never;
+  const t2 = 'tckt_b2' as never;
+
+  it('logs (shouldLog=true, elapsedMs=0) the first time a ticket is observed pending', () => {
+    const obs = observeCiPending(new Map(), t1, 1_000);
+    assert.isTrue(obs.shouldLog);
+    assert.strictEqual(obs.elapsedMs, 0);
+    assert.strictEqual(obs.state.get(t1), 1_000);
+  });
+
+  it('stays silent on a later tick of the SAME pending streak, reporting elapsed time', () => {
+    const first = observeCiPending(new Map(), t1, 1_000);
+    const second = observeCiPending(first.state, t1, 6_000);
+    assert.isFalse(second.shouldLog);
+    assert.strictEqual(second.elapsedMs, 5_000);
+  });
+
+  it('tracks multiple tickets independently', () => {
+    const afterT1 = observeCiPending(new Map(), t1, 1_000);
+    const afterT2 = observeCiPending(afterT1.state, t2, 2_000);
+    assert.isTrue(afterT2.shouldLog);
+    assert.strictEqual(afterT2.elapsedMs, 0);
+    assert.strictEqual(afterT2.state.get(t1), 1_000);
+    assert.strictEqual(afterT2.state.get(t2), 2_000);
+  });
+
+  it('clearCiPending forgets the streak, so a LATER pending re-observation logs again', () => {
+    const pending = observeCiPending(new Map(), t1, 1_000).state;
+    const cleared = clearCiPending(pending, t1);
+    assert.isFalse(cleared.has(t1));
+    const reobserved = observeCiPending(cleared, t1, 9_000);
+    assert.isTrue(reobserved.shouldLog);
+    assert.strictEqual(reobserved.elapsedMs, 0);
+  });
+
+  it('clearCiPending is a no-op (same reference) when the ticket has no streak', () => {
+    const empty = new Map();
+    assert.strictEqual(clearCiPending(empty, t1), empty);
+  });
+});
+
+describe('diffDeferred / formatCapFull (pure)', () => {
+  // Powers the reconciler's aggregate "cap full" log line: ONE line when the
+  // deferred SET changes, not an identical per-ticket INFO every 5s forever.
+  const t1 = 'tckt_a1' as never;
+  const t2 = 'tckt_b2' as never;
+
+  it('reports changed=true the first time anything is deferred', () => {
+    const diff = diffDeferred(new Set(), [t1]);
+    assert.isTrue(diff.changed);
+    assert.isTrue(diff.next.has(t1));
+  });
+
+  it('reports changed=false when the deferred set is identical to the last tick', () => {
+    const first = diffDeferred(new Set(), [t1, t2]);
+    const second = diffDeferred(first.next, [t1, t2]);
+    assert.isFalse(second.changed);
+  });
+
+  it('reports changed=true when the deferred set grows', () => {
+    const first = diffDeferred(new Set(), [t1]);
+    const second = diffDeferred(first.next, [t1, t2]);
+    assert.isTrue(second.changed);
+  });
+
+  it('reports changed=true when the deferred set shrinks back to empty (pressure cleared)', () => {
+    const first = diffDeferred(new Set(), [t1]);
+    const second = diffDeferred(first.next, []);
+    assert.isTrue(second.changed);
+    assert.strictEqual(second.next.size, 0);
+  });
+
+  it('formatCapFull summarizes the cap + waiting count in one line', () => {
+    assert.strictEqual(
+      formatCapFull([t1, t2], 1),
+      'workers.max (1) full; 2 ticket(s) waiting in backlog',
+    );
+  });
 });

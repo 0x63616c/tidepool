@@ -190,6 +190,10 @@ export interface JobManifest {
           readonly image: string;
           readonly command?: ReadonlyArray<string>;
           readonly workingDir: string;
+          // TIDEPOOL_GIT_SHA (tckt_shaenv0dev) traces a pod back to its commit;
+          // TIDEPOOL_RUN_ID (tckt_4utv62nij6) is the correlation id — same value
+          // as the Job's own name (`handle`) — so the worker's own logs carry
+          // the same runId the reconciler's dispatch log does (run-id.ts).
           readonly env: ReadonlyArray<{ readonly name: string; readonly value: string }>;
           readonly resources: {
             readonly requests: { readonly cpu: string; readonly memory: string };
@@ -262,7 +266,10 @@ export const buildJobManifest = (args: {
               // Only override when config provides one; else the image ENTRYPOINT runs.
               ...(config.command ? { command: config.command } : {}),
               workingDir: WORKDIR,
-              env: [{ name: 'TIDEPOOL_GIT_SHA', value: config.gitSha }],
+              env: [
+                { name: 'TIDEPOOL_GIT_SHA', value: config.gitSha },
+                { name: 'TIDEPOOL_RUN_ID', value: handle },
+              ],
               resources: {
                 // CPU request but NO cpu limit (agents burst); mem request==limit.
                 requests: { cpu: config.cpuRequest, memory: config.memRequest },
@@ -435,7 +442,7 @@ export const harvestOutcome = (args: {
       });
     }
     const { text, usage } = yield* decodeLastResult(args.logs, ReviewRunnerResult);
-    return DispatchOutcome.Review({ result: { verdict: parseVerdict(text), usage } });
+    return DispatchOutcome.Review({ result: { verdict: parseVerdict(text), reason: text, usage } });
   });
 
 // ── HTTP layer ───────────────────────────────────────────────────────────────

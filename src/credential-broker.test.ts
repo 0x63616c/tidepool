@@ -54,6 +54,7 @@ const spyRunner =
       review: () =>
         Effect.succeed({
           verdict: 'approve',
+          reason: 'VERDICT: APPROVE',
           usage: { model: 'm', tokensIn: 1, tokensOut: 1, wallTimeSec: 1 },
         }),
     };
