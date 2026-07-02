@@ -54,10 +54,12 @@ const upsertTicket = (sql: SqlClient, t: Ticket) =>
 
 const upsertRun = (sql: SqlClient, r: Run) =>
   sql`
-    INSERT INTO runs (id, ticket_id, kind, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
-    VALUES (${r.id}, ${r.ticketId}, ${r.kind}, ${r.boxId}, ${r.boxProvider}, ${r.usage.model}, ${r.usage.tokensIn}, ${r.usage.tokensOut}, ${r.usage.wallTimeSec})
+    INSERT INTO runs (id, ticket_id, kind, status, reason, dispatched_at, finished_at, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
+    VALUES (${r.id}, ${r.ticketId}, ${r.kind}, ${r.status}, ${r.reason}, ${r.dispatchedAt}, ${r.finishedAt}, ${r.boxId}, ${r.boxProvider}, ${r.usage?.model ?? null}, ${r.usage?.tokensIn ?? null}, ${r.usage?.tokensOut ?? null}, ${r.usage?.wallTimeSec ?? null})
     ON CONFLICT (id) DO UPDATE SET
-      ticket_id = EXCLUDED.ticket_id, kind = EXCLUDED.kind, box_id = EXCLUDED.box_id,
+      ticket_id = EXCLUDED.ticket_id, kind = EXCLUDED.kind, status = EXCLUDED.status,
+      reason = EXCLUDED.reason, dispatched_at = EXCLUDED.dispatched_at,
+      finished_at = EXCLUDED.finished_at, box_id = EXCLUDED.box_id,
       box_provider = EXCLUDED.box_provider, usage_model = EXCLUDED.usage_model,
       usage_tokens_in = EXCLUDED.usage_tokens_in, usage_tokens_out = EXCLUDED.usage_tokens_out,
       usage_wall_time_sec = EXCLUDED.usage_wall_time_sec

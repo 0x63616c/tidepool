@@ -46,17 +46,67 @@ export const openSqlite = (
         id TEXT PRIMARY KEY,
         ticket_id TEXT NOT NULL,
         kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        dispatched_at INTEGER NOT NULL,
+        finished_at INTEGER,
         box_id TEXT,
         box_provider TEXT,
-        usage_model TEXT NOT NULL,
-        usage_tokens_in INTEGER NOT NULL,
-        usage_tokens_out INTEGER NOT NULL,
-        usage_wall_time_sec REAL NOT NULL
+        usage_model TEXT,
+        usage_tokens_in INTEGER,
+        usage_tokens_out INTEGER,
+        usage_wall_time_sec REAL
       )
     `.pipe(Effect.orDie);
 
     // Migration: add box_provider column to existing databases (no-op if already present).
     yield* sql`ALTER TABLE runs ADD COLUMN box_provider TEXT`.pipe(Effect.ignore);
+
+    const runCols = yield* sql<{
+      readonly name: string;
+      readonly notnull: number;
+    }>`PRAGMA table_info(runs)`.pipe(Effect.orDie);
+    const col = (name: string) => runCols.find((c) => c.name === name);
+    const needsRunsRebuild =
+      col('status') === undefined ||
+      col('reason') === undefined ||
+      col('dispatched_at') === undefined ||
+      col('finished_at') === undefined ||
+      (col('usage_model')?.notnull ?? 0) !== 0 ||
+      (col('usage_tokens_in')?.notnull ?? 0) !== 0 ||
+      (col('usage_tokens_out')?.notnull ?? 0) !== 0 ||
+      (col('usage_wall_time_sec')?.notnull ?? 0) !== 0;
+    if (needsRunsRebuild) {
+      yield* sql`
+        CREATE TABLE runs_next (
+          id TEXT PRIMARY KEY,
+          ticket_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          reason TEXT,
+          dispatched_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          box_id TEXT,
+          box_provider TEXT,
+          usage_model TEXT,
+          usage_tokens_in INTEGER,
+          usage_tokens_out INTEGER,
+          usage_wall_time_sec REAL
+        )
+      `.pipe(Effect.orDie);
+      yield* sql`
+        INSERT INTO runs_next (id, ticket_id, kind, status, reason, dispatched_at, finished_at, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
+        SELECT id, ticket_id, kind,
+               ${sql.literal(col('status') === undefined ? "'succeeded'" : 'status')},
+               ${sql.literal(col('reason') === undefined ? 'NULL' : 'reason')},
+               ${sql.literal(col('dispatched_at') === undefined ? '0' : 'dispatched_at')},
+               ${sql.literal(col('finished_at') === undefined ? 'NULL' : 'finished_at')},
+               box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec
+        FROM runs
+      `.pipe(Effect.orDie);
+      yield* sql`DROP TABLE runs`.pipe(Effect.orDie);
+      yield* sql`ALTER TABLE runs_next RENAME TO runs`.pipe(Effect.orDie);
+    }
 
     // Migration: add reason column to existing ticket tables (no-op if already present).
     yield* sql`ALTER TABLE tickets ADD COLUMN reason TEXT`.pipe(Effect.ignore);

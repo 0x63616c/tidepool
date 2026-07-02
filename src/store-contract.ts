@@ -17,6 +17,8 @@ export interface StoreMedium {
   readonly open: Effect.Effect<TicketStoreApi, never, Scope.Scope>;
   /** Test hook: insert a persisted ticket row that bypasses domain validation. */
   readonly insertUndecodableTicketRow?: Effect.Effect<string, never, Scope.Scope>;
+  /** Test hook: create an old sqlite-style runs table before the store migrates it. */
+  readonly createLegacyRunsTable?: Effect.Effect<void, never, Scope.Scope>;
 }
 
 const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
@@ -139,6 +141,10 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
             id: newRunId(),
             ticketId: a.id,
             kind: 'work',
+            status: 'succeeded',
+            reason: null,
+            dispatchedAt: 100,
+            finishedAt: 200,
             boxId: newBoxId(),
             boxProvider: 'hetzner',
             usage: { model: 'm', tokensIn: 100, tokensOut: 50, wallTimeSec: 1 },
@@ -150,6 +156,101 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
           assert.deepStrictEqual(bRuns, []);
         }),
       ),
+    );
+
+    it.effect('runsFor returns running, failed, reaped, and succeeded runs in ledger order', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          const t = yield* store.add(newTicket);
+          const base = {
+            ticketId: t.id,
+            boxId: null,
+            boxProvider: null,
+            usage: null,
+          } as const;
+          const dispatched = {
+            ...base,
+            id: newRunId(),
+            kind: 'work',
+            status: 'running',
+            reason: null,
+            dispatchedAt: 10,
+            finishedAt: null,
+          } satisfies Run;
+          const failed = {
+            ...base,
+            id: newRunId(),
+            kind: 'review',
+            status: 'failed',
+            reason: 'agent crashed',
+            dispatchedAt: 20,
+            finishedAt: 30,
+          } satisfies Run;
+          const reaped = {
+            ...base,
+            id: newRunId(),
+            kind: 'work',
+            status: 'reaped',
+            reason: 'deadline-exceeded',
+            dispatchedAt: 40,
+            finishedAt: 50,
+          } satisfies Run;
+          yield* store.addRun(dispatched);
+          yield* store.addRun(failed);
+          yield* store.addRun(reaped);
+          const finalized = yield* store.finalizeOpenRun(t.id, {
+            status: 'succeeded',
+            reason: null,
+            finishedAt: 60,
+            usage: { model: 'm', tokensIn: 1, tokensOut: 2, wallTimeSec: 3 },
+          });
+          assert.isNotNull(finalized);
+          const got = yield* store.runsFor(t.id);
+          assert.deepStrictEqual(
+            got.map((r) => r.status),
+            ['succeeded', 'failed', 'reaped'],
+          );
+          assert.deepStrictEqual(got[0]?.usage, {
+            model: 'm',
+            tokensIn: 1,
+            tokensOut: 2,
+            wallTimeSec: 3,
+          });
+        }),
+      ),
+    );
+
+    it.effect('upgraded legacy sqlite runs table accepts dispatch rows with null usage', () =>
+      Effect.gen(function* () {
+        const medium = yield* makeMedium;
+        if (medium.createLegacyRunsTable === undefined) return;
+        yield* Effect.scoped(medium.createLegacyRunsTable);
+        const runs = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            const t = yield* store.add(newTicket);
+            const dispatchRun = {
+              id: newRunId(),
+              ticketId: t.id,
+              kind: 'work',
+              status: 'running',
+              reason: null,
+              dispatchedAt: 100,
+              finishedAt: null,
+              boxId: null,
+              boxProvider: null,
+              usage: null,
+            } satisfies Run;
+            yield* store.addRun(dispatchRun);
+            return yield* store.runsFor(t.id);
+          }),
+        );
+        assert.strictEqual(runs.length, 1);
+        assert.strictEqual(runs[0]?.status, 'running');
+        assert.isNull(runs[0]?.usage ?? null);
+      }),
     );
 
     it.effect('appendEvents → eventsFor returns events oldest-first', () =>

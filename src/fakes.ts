@@ -85,6 +85,13 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
         return updated;
       }),
     addRun: (run) => Ref.update(runs, (cur) => [...cur, run]),
+    finalizeOpenRun: (ticketId, patch) =>
+      Ref.modify(runs, (cur) => {
+        const idx = cur.findLastIndex((r) => r.ticketId === ticketId && r.status === 'running');
+        if (idx === -1) return [null, cur];
+        const updated = { ...cur[idx], ...patch } as Run;
+        return [updated, cur.map((r, i) => (i === idx ? updated : r))];
+      }),
     runsFor: (id: TicketId) =>
       Effect.map(Ref.get(runs), (cur) => cur.filter((r) => r.ticketId === id)),
     appendEvents: (evs) => Ref.update(events, (cur) => [...cur, ...evs]),

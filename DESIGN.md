@@ -160,6 +160,10 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 - **No Temporal.** The ticket DB **is** the durable state; a plain reconcile loop drives it.
   Crash → reread DB → resume. Temporal is a future swap-in behind the reconciler seam *only if it
   hurts*. (Rejected: "systems not needed at the right time".)
+- **Run ledger is dispatch-first.** Every agent dispatch (work or review) inserts a `runs` row before
+  launch with `status: running`, `dispatched_at`, and null usage; poll success/failure or deadline
+  reap finalizes that row (`succeeded`/`failed`/`reaped`, reason when present). Usage is attached to
+  the dispatch-created row on success, so failed/reaped/in-flight attempts are durable evidence too.
 - **Reconciler is the only mover.** Everything is "reconcile DB state toward done." That is the
   durability and the audit log in one.
 

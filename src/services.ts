@@ -58,6 +58,10 @@ export interface TicketStoreApi {
     patch: TicketPatch,
   ) => Effect.Effect<Ticket, import('./domain.ts').TicketNotFound>;
   readonly addRun: (run: Run) => Effect.Effect<void>;
+  readonly finalizeOpenRun: (
+    ticketId: TicketId,
+    patch: Pick<Run, 'status' | 'reason' | 'finishedAt' | 'usage'>,
+  ) => Effect.Effect<Run | null>;
   readonly runsFor: (id: TicketId) => Effect.Effect<ReadonlyArray<Run>>;
   /** Append observability events (batch). Insertion order is preserved on read. */
   readonly appendEvents: (events: ReadonlyArray<RunEvent>) => Effect.Effect<void>;
