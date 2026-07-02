@@ -1,6 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Exit, Logger } from 'effect';
 import {
+  DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_SESSION_TIMEOUT_MS,
   describeEvent,
   diffMessages,
@@ -281,6 +282,13 @@ describe('DEFAULT_SESSION_TIMEOUT_MS', () => {
   });
 });
 
+/** More review visibility (tckt_fxtlog): tighten the progress poll from 3s to 1s. */
+describe('DEFAULT_POLL_INTERVAL_MS', () => {
+  it('is 1 second (was 3 — user wants tighter live-review visibility)', () => {
+    assert.strictEqual(DEFAULT_POLL_INTERVAL_MS, 1000);
+  });
+});
+
 /**
  * Ticket E — worker observability lie. In-cluster, `client.event.subscribe`
  * delivers only `server.connected`/`server.heartbeat` (proven by in-cluster
@@ -342,6 +350,105 @@ describe('diffMessages', () => {
       diffMessages(new Map(), [null, 'nope', {}, { parts: 'nope' }]).lines,
       [],
     );
+  });
+});
+
+/** tckt_fxtlog: stream the assistant's actual reply/reasoning text, delta-only per poll. */
+describe('diffMessages — text/reasoning deltas', () => {
+  const textPart = (id: string, type: 'text' | 'reasoning', text: string) => ({ id, type, text });
+
+  it('emits the full text as the delta the first time a text part appears', () => {
+    const snapshot = [{ info: {}, parts: [textPart('t1', 'text', 'Hello')] }];
+    const { lines, seen } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(lines, ['[text] Hello']);
+    assert.strictEqual(seen.get('t1'), 'text:5');
+  });
+
+  it('emits only the newly-appended substring on the next poll, not the whole text', () => {
+    const seen1 = new Map([['t1', 'text:5']]);
+    const snapshot = [{ info: {}, parts: [textPart('t1', 'text', 'Hello world')] }];
+    const { lines, seen: seen2 } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(lines, ['[text]  world']);
+    assert.strictEqual(seen2.get('t1'), 'text:11');
+  });
+
+  it('does not re-log a text part whose length is unchanged', () => {
+    const seen1 = new Map([['t1', 'text:11']]);
+    const snapshot = [{ info: {}, parts: [textPart('t1', 'text', 'Hello world')] }];
+    const { lines } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(lines, []);
+  });
+
+  it('labels reasoning parts distinctly from text parts', () => {
+    const snapshot = [{ info: {}, parts: [textPart('r1', 'reasoning', 'thinking...')] }];
+    const { lines, seen } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(lines, ['[reasoning] thinking...']);
+    assert.strictEqual(seen.get('r1'), 'reasoning:11');
+  });
+
+  it('emits only the reasoning delta across polls, same as text', () => {
+    const seen1 = new Map([['r1', 'reasoning:11']]);
+    const snapshot = [{ info: {}, parts: [textPart('r1', 'reasoning', 'thinking... more')] }];
+    const { lines } = diffMessages(seen1, snapshot);
+    assert.deepStrictEqual(lines, ['[reasoning]  more']);
+  });
+});
+
+/** tckt_fxtlog: log the real diff for file-editing tool calls, not just "edited <file>". */
+describe('diffMessages — file edit diff logging', () => {
+  const toolPart = (
+    id: string,
+    tool: string,
+    status: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    type: 'tool',
+    tool,
+    state: { status, ...extra },
+  });
+
+  it('logs the patch content once an apply_patch tool call completes', () => {
+    const patch = '--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new';
+    const snapshot = [
+      { info: {}, parts: [toolPart('e1', 'apply_patch', 'completed', { input: { patch } })] },
+    ];
+    const { lines } = diffMessages(new Map(), snapshot);
+    assert.strictEqual(lines.length, 2);
+    assert.strictEqual(lines[0], 'tool apply_patch completed');
+    assert.ok(lines[1]?.startsWith('[diff] apply_patch:'));
+    assert.ok(lines[1]?.includes(patch));
+  });
+
+  it('falls back to before/after content when there is no unified patch', () => {
+    const snapshot = [
+      {
+        info: {},
+        parts: [
+          toolPart('e2', 'edit', 'completed', {
+            input: { oldString: 'const a = 1;', newString: 'const a = 2;' },
+          }),
+        ],
+      },
+    ];
+    const { lines } = diffMessages(new Map(), snapshot);
+    assert.strictEqual(lines.length, 2);
+    assert.ok(lines[1]?.includes('const a = 1;'));
+    assert.ok(lines[1]?.includes('const a = 2;'));
+  });
+
+  it('does not log a diff while the edit tool is still running', () => {
+    const snapshot = [{ info: {}, parts: [toolPart('e1', 'apply_patch', 'running')] }];
+    const { lines } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(lines, ['tool apply_patch running']);
+  });
+
+  it('does not log a diff for a non-editing tool', () => {
+    const snapshot = [
+      { info: {}, parts: [toolPart('b1', 'bash', 'completed', { input: { patch: 'nope' } })] },
+    ];
+    const { lines } = diffMessages(new Map(), snapshot);
+    assert.deepStrictEqual(lines, ['tool bash completed']);
   });
 });
 
