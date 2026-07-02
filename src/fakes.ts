@@ -18,6 +18,7 @@ import {
   AgentWorker,
   CredentialBroker,
   type CredentialRequest,
+  type DispatchInput,
   DispatchOutcome,
   Forge,
   TicketStore,
@@ -183,6 +184,8 @@ export interface FakeAgentWorkerOptions {
   readonly stuckRunning?: boolean;
   /** Force `poll` to report a worker-side failure (drives the async `Failed` branch). */
   readonly pollFails?: string;
+  /** Spy hook: called with every `dispatch` attempt (proves the admission gate's dispatch count). */
+  readonly onDispatch?: (input: DispatchInput) => void;
 }
 
 /**
@@ -200,6 +203,7 @@ export const fakeAgentWorker = (opts: FakeAgentWorkerOptions = {}): Layer.Layer<
       const counter = yield* Ref.make(0);
       return {
         dispatch: (input) => {
+          opts.onDispatch?.(input);
           if (opts.failWork === 'rate') return Effect.fail(new RateCapped({}));
           if (opts.failWork === 'agent') return Effect.fail(new AgentFailed({ reason: 'fake' }));
           const outcome: DispatchOutcome =

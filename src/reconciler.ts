@@ -1,5 +1,5 @@
 import { Clock, Duration, Effect, Schedule } from 'effect';
-import { AppConfig, baseFor, modelsFor } from './config.ts';
+import { AppConfig, baseFor, type Config, modelsFor } from './config.ts';
 import type {
   AgentFailed,
   MergeConflict,
@@ -144,6 +144,21 @@ const retryOrFail = (
     : store.patch(ticket.id, { attempts, state: retryState, reason, ...cleared });
 };
 
+/**
+ * The admission gate for `workers.max`: `running` is the only ticket state with
+ * a live agent Job (work or review dispatch both land there), so the durable
+ * count of `running` tickets IS the concurrent-Job count. Read fresh from the
+ * store (not a snapshot from the top of `step`) so a dispatch earlier in the
+ * SAME settle round is visible to the next ticket's admission check — `step`
+ * runs tickets sequentially (no `concurrency` option) specifically so this
+ * read-then-decide is race-free within one pass.
+ */
+const atWorkersCap = (store: TicketStoreApi, config: Config): Effect.Effect<boolean> =>
+  Effect.map(
+    store.list(),
+    (tickets) => tickets.filter((t) => t.state === 'running').length >= config.workers.max,
+  );
+
 const stepTicket = (
   ticket: Ticket,
 ): Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =>
@@ -166,6 +181,15 @@ const stepTicket = (
         // advance to review rather than re-dispatching the agent (resumability).
         if (ticket.workedAttempt === ticket.attempts && ticket.prNumber !== null) {
           yield* store.patch(ticket.id, { state: 'review' });
+          return;
+        }
+
+        // Admission gate: workers.max bounds concurrently RUNNING agent Jobs, not
+        // how many tickets get stepped per round. Read the durable count of `running`
+        // tickets (the only state with a live Job) and defer this dispatch if the cap
+        // is already met — the ticket stays `in_progress` and is retried next round.
+        if (yield* atWorkersCap(store, config)) {
+          yield* Effect.logInfo('workers.max reached; deferring dispatch');
           return;
         }
 
@@ -371,6 +395,15 @@ const stepTicket = (
           return;
         }
 
+        // Admission gate — same cap as the work-dispatch site above: defer if
+        // workers.max concurrent Jobs are already running (ticket stays `review`).
+        if (yield* atWorkersCap(store, config)) {
+          yield* Effect.logInfo('workers.max reached; deferring review dispatch').pipe(
+            Effect.annotateLogs({ pr: prNumber }),
+          );
+          return;
+        }
+
         // CI green → dispatch the review agent-worker (grades the diff vs goal) and
         // move to `running`; the verdict is harvested when its poll succeeds. The
         // control-plane never runs opencode — the worker does (FIX 1).
@@ -457,14 +490,20 @@ const NON_TERMINAL: ReadonlyArray<Ticket['state']> = [
   'review',
 ];
 
-/** Advance every non-terminal ticket by one transition. Concurrency = workers.max. */
+/**
+ * Advance every non-terminal ticket by one transition. Stepped SEQUENTIALLY
+ * (no `concurrency`) — that's load-bearing, not incidental: it's what makes
+ * `atWorkersCap`'s read-then-decide race-free within one round, so a dispatch
+ * by ticket N is visible to ticket N+1's admission check in the same pass.
+ * `workers.max` itself is enforced by `atWorkersCap` at the dispatch sites,
+ * not by bounding how many tickets get stepped here.
+ */
 export const step: Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =
   Effect.gen(function* () {
-    const config = yield* AppConfig;
     const store = yield* TicketStore;
     const tickets = yield* store.list();
     const active = tickets.filter((t) => NON_TERMINAL.includes(t.state));
-    yield* Effect.forEach(active, stepTicket, { concurrency: config.workers.max, discard: true });
+    yield* Effect.forEach(active, stepTicket, { discard: true });
   });
 
 /**
