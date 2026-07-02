@@ -482,6 +482,46 @@ describe('reconcileForever', () => {
       assert.isAtLeast(yield* Ref.get(calls), 2);
     }),
   );
+
+  /** Counts `settle` rounds via `list()` (one read per round) to assert cadence. */
+  const countingStore = Effect.gen(function* () {
+    const real = yield* makeInMemoryStore;
+    const calls = yield* Ref.make(0);
+    const store: TicketStoreApi = {
+      ...real,
+      list: () =>
+        Effect.zipRight(
+          Ref.update(calls, (n) => n + 1),
+          real.list(),
+        ),
+    };
+    return { store, calls };
+  });
+
+  it.effect('defaults to a 5s cadence when no interval is passed', () =>
+    Effect.gen(function* () {
+      const { calls, store } = yield* countingStore;
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+
+      // Round 1 runs at t=0, then the loop sleeps for the default interval.
+      // Advancing only 5s wakes a second round iff the default cadence is 5s
+      // (at the old 30s default the loop is still asleep → only one read).
+      const fiber = yield* reconcileForever().pipe(Effect.provide(env), Effect.fork);
+      yield* TestClock.adjust(Duration.seconds(20));
+      yield* Fiber.interrupt(fiber);
+
+      // Over a 20s window: at the old 30s default only round 1 (t=0) has run; at
+      // 5s the rounds at t=0,5,10,15,20 have all run — many more store reads. The
+      // threshold sits well above one round's reads and well below five rounds'.
+      const n = yield* Ref.get(calls);
+      yield* Effect.logInfo(`cadence rounds proxy: ${n} list() calls in 20s`);
+      assert.isAtLeast(n, 5);
+    }),
+  );
 });
 
 /**

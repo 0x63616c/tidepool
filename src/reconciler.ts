@@ -536,7 +536,7 @@ export const settle = (
  * wrapping the repeat instead would log once and stop.
  */
 export const reconcileForever = (
-  intervalSec = 30,
+  intervalSec = 5,
 ): Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =>
   Effect.gen(function* () {
     const config = yield* AppConfig;
