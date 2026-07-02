@@ -19,6 +19,7 @@ RUN apt-get update \
     curl \
     unzip \
     ca-certificates \
+    jq \
     shellcheck \
   && rm -rf /var/lib/apt/lists/*
 
