@@ -195,9 +195,11 @@ describe('reconciler failure branches', () => {
         openPR: () => Effect.die('unused'),
         prState: () => Effect.succeed({ state: 'open', mergeSha: null }),
         checks: () => Effect.fail(new ForgeError({ op: 'checks', reason: 'github 503' })),
+        checksForCommitOnMain: () => Effect.die('unused'),
         isBranchUpToDate: () => Effect.die('unused'),
         updateBranch: () => Effect.die('unused'),
         merge: () => Effect.die('unused'),
+        closePR: () => Effect.die('unused'),
       });
 
       const env = Layer.mergeAll(

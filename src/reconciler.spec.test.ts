@@ -183,7 +183,7 @@ describe('transition table: reviewing', () => {
     }),
   );
 
-  it.effect('rows 19-20: external merge settles → done; external close → failed', () =>
+  it.effect('rows 19-20: external merge settles → verifying → done; external close → failed', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
       const merged = yield* store.add(newTicket);
@@ -198,43 +198,56 @@ describe('transition table: reviewing', () => {
       );
       yield* runSteps(1, env);
 
-      assert.strictEqual((yield* store.byId(merged.id)).phase, 'done');
+      const verifying = yield* store.byId(merged.id);
+      assert.strictEqual(verifying.phase, 'verifying');
+      assert.strictEqual(verifying.mergeSha, 'sha_1');
       const failedT = yield* store.byId(closed.id);
       assert.strictEqual(failedT.phase, 'failed');
       assert.strictEqual(failedT.reason, 'pr-closed-unmerged');
+
+      yield* runSteps(1, env);
+      assert.strictEqual((yield* store.byId(merged.id)).phase, 'done');
     }),
   );
 });
 
 describe('transition table: merging (resumable, idempotent)', () => {
-  it.effect('row 16→25: approve harvest lands in phase merging, then merges → done', () =>
-    Effect.gen(function* () {
-      const store = yield* makeInMemoryStore;
-      const ticket = yield* store.add(newTicket);
-      yield* store.patch(ticket.id, {
-        phase: 'reviewing',
-        branch: 'tp/x',
-        prNumber: 7,
-        prId: newPrId(),
-        workedAttempt: 0,
-      });
-      const env = Layer.mergeAll(
-        baseLayers(store),
-        fakeForge({ ci: 'green' }),
-        fakeAgentWorker({ verdict: 'approve' }),
-      );
+  it.effect(
+    'row 16→25: approve harvest lands in phase merging, then merges → verifying → done',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* store.patch(ticket.id, {
+          phase: 'reviewing',
+          branch: 'tp/x',
+          prNumber: 7,
+          prId: newPrId(),
+          workedAttempt: 0,
+        });
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
 
-      // tick 1: dispatch review; tick 2: harvest approve → phase merging (merge NOT yet attempted)
-      yield* runSteps(2, env);
-      const mid = yield* store.byId(ticket.id);
-      assert.strictEqual(mid.phase, 'merging');
+        // tick 1: dispatch review; tick 2: harvest approve → phase merging (merge NOT yet attempted)
+        yield* runSteps(2, env);
+        const mid = yield* store.byId(ticket.id);
+        assert.strictEqual(mid.phase, 'merging');
 
-      // tick 3: merging phase merges idempotently → done
-      yield* runSteps(1, env);
-      const t = yield* store.byId(ticket.id);
-      assert.strictEqual(t.phase, 'done');
-      assert.isNotNull(t.mergeSha);
-    }),
+        // tick 3: merging phase merges idempotently → verifying
+        yield* runSteps(1, env);
+        const verifying = yield* store.byId(ticket.id);
+        assert.strictEqual(verifying.phase, 'verifying');
+        assert.isNotNull(verifying.mergeSha);
+
+        // tick 4: main checks on mergeSha are green → done
+        yield* runSteps(1, env);
+        const t = yield* store.byId(ticket.id);
+        assert.strictEqual(t.phase, 'done');
+        assert.isNotNull(t.mergeSha);
+      }),
   );
 
   it.effect('row 25a: branch behind main → update branch, return to reviewing, no merge', () =>
@@ -283,7 +296,7 @@ describe('transition table: merging (resumable, idempotent)', () => {
     }),
   );
 
-  it.effect('row 25b: branch up to date + green + approved → merge proceeds', () =>
+  it.effect('row 25b: branch up to date + green + approved → merge proceeds to verifying', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
       const ticket = yield* store.add(newTicket);
@@ -307,13 +320,13 @@ describe('transition table: merging (resumable, idempotent)', () => {
       yield* runSteps(1, env);
 
       const t = yield* store.byId(ticket.id);
-      assert.strictEqual(t.phase, 'done');
+      assert.strictEqual(t.phase, 'verifying');
       assert.isNotNull(t.mergeSha);
       assert.deepStrictEqual(updates, []);
       const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
-      assert.include(
+      assert.includeMembers(
         events.map((e) => e.line),
-        'merge gate: branch up to date',
+        ['merge gate: branch up to date', 'phase: merging -> verifying (sha_7)'],
       );
     }),
   );
@@ -389,7 +402,7 @@ describe('transition table: merging (resumable, idempotent)', () => {
       yield* runSteps(1, env);
 
       const t = yield* store.byId(ticket.id);
-      assert.strictEqual(t.phase, 'done');
+      assert.strictEqual(t.phase, 'verifying');
       assert.isNotNull(t.mergeSha);
       assert.strictEqual(t.attempts, 0, 'crash-resume must not burn an attempt');
       assert.strictEqual(dispatches.length, 0, 'idempotent merge needs no agent');
@@ -500,6 +513,94 @@ describe('transition table: merging (resumable, idempotent)', () => {
           'condition set: needs_human (merge contention exceeded budget (2/1): merge gate: branch updated)',
         ],
       );
+    }),
+  );
+});
+
+describe('transition table: verifying', () => {
+  it.effect('verifying + checks on mergeSha pending → waits without dispatch', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, { phase: 'verifying', mergeSha: 'abc123' });
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ mainCi: 'pending' }),
+        fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+      );
+
+      yield* runSteps(1, env);
+
+      assert.strictEqual((yield* store.byId(ticket.id)).phase, 'verifying');
+      assert.strictEqual(dispatches.length, 0);
+    }),
+  );
+
+  it.effect('verifying + checks on mergeSha green → done', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, { phase: 'verifying', mergeSha: 'abc123' });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ mainCi: 'green' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(1, env);
+
+      assert.strictEqual((yield* store.byId(ticket.id)).phase, 'done');
+    }),
+  );
+
+  it.effect(
+    'verifying + checks on mergeSha red → holds with main_red condition, no attempt spent',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* store.patch(ticket.id, { phase: 'verifying', mergeSha: 'abc123' });
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ mainCi: 'red' }),
+          fakeAgentWorker({}),
+        );
+
+        yield* runSteps(2, env);
+
+        const t = yield* store.byId(ticket.id);
+        assert.strictEqual(t.phase, 'verifying');
+        assert.deepStrictEqual(t.conditions, [{ type: 'main_red', sha: 'abc123' }]);
+        assert.strictEqual(t.attempts, 0);
+      }),
+  );
+});
+
+describe('transition table: terminal cleanup', () => {
+  it.effect('failed + open PR closes with ticket reason once', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'failed',
+        prNumber: 7,
+        prId: newPrId(),
+        reason: 'ci-red',
+      });
+      const closes: Array<{ readonly prNumber: number; readonly comment: string }> = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({
+          prLifecycle: 'open',
+          onClosePR: (input) => closes.push({ prNumber: input.prNumber, comment: input.comment }),
+        }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(2, env);
+
+      assert.deepStrictEqual(closes, [{ prNumber: 7, comment: `${ticket.id} failed: ci-red` }]);
     }),
   );
 });

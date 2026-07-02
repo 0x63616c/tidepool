@@ -111,6 +111,10 @@ export interface ForgeApi {
     readonly repo: string;
     readonly prNumber: number;
   }) => Effect.Effect<CIStatus, ForgeError>;
+  readonly checksForCommitOnMain: (input: {
+    readonly repo: string;
+    readonly sha: string;
+  }) => Effect.Effect<CIStatus, ForgeError>;
   readonly isBranchUpToDate: (input: {
     readonly repo: string;
     readonly base: string;
@@ -124,6 +128,11 @@ export interface ForgeApi {
     readonly repo: string;
     readonly prNumber: number;
   }) => Effect.Effect<{ readonly sha: string }, ForgeError | MergeConflict>;
+  readonly closePR: (input: {
+    readonly repo: string;
+    readonly prNumber: number;
+    readonly comment: string;
+  }) => Effect.Effect<void, ForgeError>;
 }
 
 export class Forge extends Context.Tag('Forge')<Forge, ForgeApi>() {}

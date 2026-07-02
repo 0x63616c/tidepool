@@ -208,6 +208,8 @@ const transitionEvent = (ticketId: TicketId, line: string): RunEvent => ({
   line,
 });
 
+const TERMINAL_CLEANUP_EVENT = 'terminal cleanup: failed ticket PR closed';
+
 // ── Log-throttle helpers (pure, DI-free — mirrors fifoSelector/deferredBacklog) ──
 //
 // Both throttles below track EPHEMERAL, in-process state, explicitly NOT
@@ -357,12 +359,12 @@ const recordContention = (
 /**
  * Tri-state settle from the forge's ground truth for a ticket's PR — the closed
  * loop that catches an external merge, a crash between `forge.merge` succeeding
- * and the `done` patch landing, and a merge call that succeeded remotely but
+ * and the `verifying` patch landing, and a merge call that succeeded remotely but
  * errored client-side (all three leave `PR merged ∧ ticket ≠ done` without this
  * check). Callers run this BEFORE any CI check, review dispatch, or merge
  * attempt, so drift never has a chance to start. Returns `true` iff the ticket
- * was settled to a terminal state from the forge's state (the caller must
- * `return` immediately); `false` means the PR is still open at the forge and
+ * was settled from the forge's state (the caller must `return` immediately);
+ * `false` means the PR is still open at the forge and
  * the caller should proceed exactly as before.
  */
 const settleFromPrState = (
@@ -373,16 +375,21 @@ const settleFromPrState = (
 ): Effect.Effect<boolean, TicketNotFound> =>
   Effect.gen(function* () {
     if (prState.state === 'merged') {
-      yield* Effect.logInfo('PR already merged at the forge; settling ticket done').pipe(
+      yield* Effect.logInfo('PR already merged at the forge; verifying main').pipe(
         Effect.annotateLogs({ pr: prNumber, sha: prState.mergeSha }),
       );
       yield* store.patch(ticket.id, {
-        phase: 'done',
+        phase: 'verifying',
         mergeSha: prState.mergeSha,
         workHandle: null,
         dispatchedAt: null,
       });
-      yield* store.appendEvents([transitionEvent(ticket.id, `phase: ${ticket.phase} -> done`)]);
+      yield* store.appendEvents([
+        transitionEvent(
+          ticket.id,
+          `phase: ${ticket.phase} -> verifying (${prState.mergeSha ?? 'unknown-sha'})`,
+        ),
+      ]);
       return true;
     }
     if (prState.state === 'closed') {
@@ -411,6 +418,27 @@ const stepTicket = (
     const worker = yield* AgentWorker;
     const models = modelsFor(config, ticket.target);
     const base = baseFor(config, ticket.target);
+
+    const cleanupFailedOpenPr = Effect.gen(function* () {
+      const prNumber = ticket.prNumber;
+      if (prNumber === null) return;
+      const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
+      if (events.some((e) => e.line === TERMINAL_CLEANUP_EVENT)) return;
+
+      const prState = yield* forge.prState({ repo: ticket.target, prNumber });
+      if (prState.state !== 'open') {
+        yield* store.appendEvents([transitionEvent(ticket.id, TERMINAL_CLEANUP_EVENT)]);
+        return;
+      }
+
+      const reason = ticket.reason ?? 'ticket failed';
+      yield* forge.closePR({
+        repo: ticket.target,
+        prNumber,
+        comment: `${ticket.id} failed: ${reason}`,
+      });
+      yield* store.appendEvents([transitionEvent(ticket.id, TERMINAL_CLEANUP_EVENT)]);
+    });
 
     /**
      * Poll the in-flight agent-worker a `working`/`reviewing` ticket dispatched
@@ -595,10 +623,10 @@ const stepTicket = (
       });
 
     // Generic gate rule (TOP, before any phase logic): a gated ticket never
-    // dispatches. `rate_capped` is transient and clears immediately; human-lane
-    // conditions remain until an operator changes the ticket.
+    // dispatches. `rate_capped` is transient and clears immediately; hold
+    // conditions remain until an operator or a later ticket changes them.
     if (ticket.conditions.length > 0) {
-      if (ticket.conditions.some((c) => c.type === 'needs_human')) return;
+      if (ticket.conditions.some((c) => c.type === 'needs_human' || c.type === 'main_red')) return;
       const to = deriveStateFromPhase({ ...ticket, conditions: [] });
       yield* Effect.logInfo('clearing rate_capped condition; re-picking ticket').pipe(
         Effect.annotateLogs({ from: 'rate_capped', to }),
@@ -888,29 +916,54 @@ const stepTicket = (
         );
         yield* store.appendEvents([transitionEvent(ticket.id, 'merge gate: branch up to date')]);
 
-        // approved + green + fresh against current base → auto-merge → done.
+        // approved + green + fresh against current base → auto-merge → verify main.
         const merged = yield* forge.merge({ repo: ticket.target, prNumber });
-        yield* Effect.logInfo('merged PR; ticket done').pipe(
+        yield* Effect.logInfo('merged PR; verifying main').pipe(
           Effect.annotateLogs({ pr: prNumber, sha: merged.sha }),
         );
         yield* store.patch(ticket.id, {
-          phase: 'done',
+          phase: 'verifying',
           mergeSha: merged.sha,
           workHandle: null,
           dispatchedAt: null,
         });
-        yield* store.appendEvents([transitionEvent(ticket.id, 'phase: merging -> done')]);
+        yield* store.appendEvents([
+          transitionEvent(ticket.id, `phase: merging -> verifying (${merged.sha})`),
+        ]);
         return;
       }
 
-      case 'verifying':
-        // Unreachable today — nothing transitions INTO `verifying` until the
-        // wave-3 post-merge verification ticket (T7a) fills it in. Defensive
-        // no-op: a ticket found here (bad hand-edit) just waits, never crashes.
+      case 'verifying': {
+        const sha = ticket.mergeSha;
+        if (sha === null) return;
+        const ci = yield* forge.checksForCommitOnMain({ repo: ticket.target, sha });
+        if (ci === 'pending') return;
+        if (ci === 'red') {
+          yield* Effect.logWarning('main checks red after merge; holding ticket').pipe(
+            Effect.annotateLogs({ sha }),
+          );
+          yield* store.patch(ticket.id, {
+            conditions: [{ type: 'main_red', sha }],
+            reason: 'main-red',
+          });
+          yield* store.appendEvents([
+            failureEvent(ticket.id, `main checks red after merge: ${sha}`),
+            transitionEvent(ticket.id, `condition set: main_red (${sha})`),
+          ]);
+          return;
+        }
+        yield* Effect.logInfo('main checks green; ticket done').pipe(Effect.annotateLogs({ sha }));
+        yield* store.patch(ticket.id, { phase: 'done' });
+        yield* store.appendEvents([
+          transitionEvent(ticket.id, `phase: verifying -> done (${sha})`),
+        ]);
         return;
+      }
 
       case 'done':
+        return; // absorbing — terminal phases never move again
       case 'failed':
+        yield* cleanupFailedOpenPr;
         return; // absorbing — terminal phases never move again
     }
   }).pipe(
@@ -1033,7 +1086,7 @@ export const step: Effect.Effect<void, never, TicketStore | Forge | AgentWorker 
         : Effect.logInfo('workers.max backlog pressure cleared');
     }
 
-    const active = tickets.filter((t) => !isTerminalPhase(t.phase));
+    const active = tickets.filter((t) => !isTerminalPhase(t.phase) || t.phase === 'failed');
     yield* Effect.forEach(active, stepTicket, { discard: true });
   });
 
