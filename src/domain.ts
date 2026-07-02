@@ -37,6 +37,9 @@ export type Usage = typeof Usage.Type;
 export const AgentKind = Schema.Literal('work', 'review');
 export type AgentKind = typeof AgentKind.Type;
 
+export const RunStatus = Schema.Literal('dispatched', 'succeeded', 'failed', 'reaped');
+export type RunStatus = typeof RunStatus.Type;
+
 /**
  * Opaque reattach handle for an in-flight agent-worker, stored on the ticket
  * while it is `running`. Today a fake/local id; under k8s (PR-4) it is the Job
@@ -60,6 +63,10 @@ export const Run = Schema.Struct({
   id: RunId,
   ticketId: TicketId,
   kind: AgentKind,
+  status: RunStatus,
+  reason: Schema.NullOr(Schema.String),
+  dispatchedAt: Schema.Number,
+  finishedAt: Schema.NullOr(Schema.Number),
   boxId: Schema.NullOr(BoxId),
   boxProvider: Schema.NullOr(BoxProvider),
   usage: Usage,

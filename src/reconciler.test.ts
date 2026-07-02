@@ -80,11 +80,22 @@ describe('reconciler', () => {
       const review = runs.filter((r) => r.kind === 'review');
       assert.strictEqual(work.length, 1);
       assert.strictEqual(review.length, 1);
+      assert.strictEqual(work[0]?.status, 'succeeded');
+      assert.strictEqual(review[0]?.status, 'succeeded');
       // Non-zero tokens prove a real run happened (no indexing — avoids non-null assertion).
       const tokensIn = work.reduce((n, r) => n + r.usage.tokensIn, 0);
       const tokensOut = work.reduce((n, r) => n + r.usage.tokensOut, 0);
       assert.isTrue(tokensIn > 0);
       assert.isTrue(tokensOut > 0);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isDefined(
+        events.find((e) => e.runId === work[0]?.id && /run finalized: work succeeded/.test(e.line)),
+      );
+      assert.isDefined(
+        events.find(
+          (e) => e.runId === review[0]?.id && /run finalized: review succeeded/.test(e.line),
+        ),
+      );
     }),
   );
 
@@ -256,8 +267,11 @@ describe('reconciler', () => {
       assert.strictEqual(final.attempts, 1);
       assert.match(final.reason ?? '', /deadline/);
       assert.isNull(final.workHandle);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs[0]?.status, 'reaped');
+      assert.strictEqual(runs[0]?.reason, 'deadline-exceeded');
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.filter((e) => /deadline/.test(e.line)).length, 1);
+      assert.isTrue(events.filter((e) => /deadline/.test(e.line)).length >= 1);
     }),
   );
 
@@ -280,8 +294,16 @@ describe('reconciler', () => {
       assert.isNotNull(final.workHandle); // reattach handle persisted
       assert.isNotNull(final.dispatchedAt); // deadline clock persisted
       assert.isNotNull(final.branch); // branch fixed at dispatch
-      // Nothing harvested yet — the run is recorded only when poll succeeds.
-      assert.strictEqual((yield* store.runsFor(ticket.id)).length, 0);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.kind, 'work');
+      assert.strictEqual(runs[0]?.status, 'dispatched');
+      assert.strictEqual(runs[0]?.ticketId, ticket.id);
+      assert.strictEqual(runs[0]?.dispatchedAt, final.dispatchedAt);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isDefined(
+        events.find((e) => e.runId === runs[0]?.id && /run dispatched: work/.test(e.line)),
+      );
     }),
   );
 
@@ -483,7 +505,39 @@ describe('reconciler', () => {
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'running'); // stayed put — poll said Running
       assert.isNotNull(final.workHandle);
-      assert.strictEqual((yield* store.runsFor(ticket.id)).length, 0);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'dispatched');
+    }),
+  );
+
+  it.effect('review dispatch creates a run row and lifecycle event before poll', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        state: 'review',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: 0,
+      });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve' }),
+      );
+
+      yield* runSteps(1, env);
+
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.kind, 'review');
+      assert.strictEqual(runs[0]?.status, 'dispatched');
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isDefined(
+        events.find((e) => e.runId === runs[0]?.id && /run dispatched: review/.test(e.line)),
+      );
     }),
   );
 });
@@ -743,7 +797,7 @@ describe('reconcileForever', () => {
 
 /**
  * Observability: every typed failure must leave a durable trace — a `reason` on
- * the ticket and exactly one control-plane/error event — and a successful run
+ * the ticket and a control-plane/error event — and a successful run
  * must persist whatever the worker captured, linked to that run's id.
  */
 describe('reconciler observability', () => {
@@ -773,11 +827,9 @@ describe('reconciler observability', () => {
       assert.isNotNull(final.reason);
 
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.length, 1);
-      const [event] = events;
+      const event = events.find((e) => e.level === 'error' && /AgentFailed/.test(e.line));
       assert.isDefined(event);
-      assert.strictEqual(event.source, 'control-plane');
-      assert.strictEqual(event.level, 'error');
+      assert.strictEqual(event?.source, 'control-plane');
     }),
   );
 
@@ -797,7 +849,8 @@ describe('reconciler observability', () => {
       assert.strictEqual(final.state, 'failed');
       assert.strictEqual(final.attempts, 2);
       assert.isNotNull(final.reason);
-      assert.strictEqual((yield* store.eventsFor({ ticketId: ticket.id })).length, 1);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isDefined(events.find((e) => e.level === 'error' && /AgentFailed/.test(e.line)));
     }),
   );
 
@@ -820,11 +873,12 @@ describe('reconciler observability', () => {
       assert.isNotNull(final.reason);
       assert.isNull(final.workHandle);
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.length, 1);
-      const [event] = events;
+      const event = events.find((e) => e.level === 'error' && /AgentFailed/.test(e.line));
       assert.isDefined(event);
-      assert.strictEqual(event.source, 'control-plane');
-      assert.strictEqual(event.level, 'error');
+      assert.strictEqual(event?.source, 'control-plane');
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs[0]?.status, 'failed');
+      assert.strictEqual(runs[0]?.reason, 'worker exited non-zero');
     }),
   );
 
@@ -869,10 +923,9 @@ describe('reconciler observability', () => {
       assert.strictEqual(final.state, 'rate_capped');
       assert.strictEqual(final.reason, 'rate-capped');
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.length, 1);
-      const [event] = events;
+      const event = events.find((e) => e.level === 'error' && /rate-capped/.test(e.line));
       assert.isDefined(event);
-      assert.strictEqual(event.source, 'control-plane');
+      assert.strictEqual(event?.source, 'control-plane');
     }),
   );
 

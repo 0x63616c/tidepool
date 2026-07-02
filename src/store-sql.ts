@@ -41,6 +41,10 @@ interface RunRow {
   readonly id: string;
   readonly ticketId: string;
   readonly kind: string;
+  readonly status: string;
+  readonly reason: string | null;
+  readonly dispatchedAt: number;
+  readonly finishedAt: number | null;
   readonly boxId: string | null;
   readonly boxProvider: string | null;
   readonly model: string;
@@ -64,6 +68,10 @@ const runFromRow = (r: RunRow): Run =>
     id: r.id,
     ticketId: r.ticketId,
     kind: r.kind,
+    status: r.status,
+    reason: r.reason,
+    dispatchedAt: Number(r.dispatchedAt),
+    finishedAt: num(r.finishedAt),
     boxId: r.boxId,
     boxProvider: r.boxProvider,
     usage: {
@@ -167,12 +175,26 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
       }),
     addRun: (run) =>
       sql`
-        INSERT INTO runs (id, ticket_id, kind, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
-        VALUES (${run.id}, ${run.ticketId}, ${run.kind}, ${run.boxId}, ${run.boxProvider}, ${run.usage.model}, ${run.usage.tokensIn}, ${run.usage.tokensOut}, ${run.usage.wallTimeSec})
+        INSERT INTO runs (id, ticket_id, kind, status, reason, dispatched_at, finished_at, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
+        VALUES (${run.id}, ${run.ticketId}, ${run.kind}, ${run.status}, ${run.reason}, ${run.dispatchedAt}, ${run.finishedAt}, ${run.boxId}, ${run.boxProvider}, ${run.usage.model}, ${run.usage.tokensIn}, ${run.usage.tokensOut}, ${run.usage.wallTimeSec})
+      `.pipe(Effect.orDie, Effect.asVoid),
+    finalizeRun: (id, patch) =>
+      sql`
+        UPDATE runs SET
+          status = ${patch.status},
+          reason = ${patch.reason ?? null},
+          finished_at = ${patch.finishedAt},
+          usage_model = COALESCE(${patch.usage?.model ?? null}, usage_model),
+          usage_tokens_in = COALESCE(${patch.usage?.tokensIn ?? null}, usage_tokens_in),
+          usage_tokens_out = COALESCE(${patch.usage?.tokensOut ?? null}, usage_tokens_out),
+          usage_wall_time_sec = COALESCE(${patch.usage?.wallTimeSec ?? null}, usage_wall_time_sec)
+        WHERE id = ${id}
       `.pipe(Effect.orDie, Effect.asVoid),
     runsFor: (id) =>
       sql<RunRow>`
-        SELECT id, ticket_id AS "ticketId", kind, box_id AS "boxId",
+        SELECT id, ticket_id AS "ticketId", kind, status, reason,
+               dispatched_at AS "dispatchedAt", finished_at AS "finishedAt",
+               box_id AS "boxId",
                box_provider AS "boxProvider",
                usage_model AS "model", usage_tokens_in AS "tokensIn",
                usage_tokens_out AS "tokensOut", usage_wall_time_sec AS "wallTimeSec"

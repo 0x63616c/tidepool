@@ -429,8 +429,8 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   `.agents/skills/axi/` (shared across opencode + claude). TUI is a later skin.
 - **Queue control — `tp` is a client, the daemon is the mover.** `tp` speaks a narrow `QueueControl`
   seam (`src/queue-control.ts`): read + enqueue only (`add`/`list`/`get`/`runsFor`/`events`). The
-  reconciler's mover methods (`patch`/`addRun`/`appendEvents`) are *not* in that interface, so no
-  client can move ticket state over the wire (tenet 3). Two adapters satisfy the tag, chosen by the
+  reconciler's mover methods (`patch`/`addRun`/`finalizeRun`/`appendEvents`) are *not* in that
+  interface, so no client can move ticket state over the wire (tenet 3). Two adapters satisfy the tag, chosen by the
   active client context: **`sqlite`** (in-process store, for dev/tests) and **`http`** (an
   `@effect/platform` `HttpApiClient` → the daemon's queue API, `src/queue-api.ts`). The daemon
   (`src/daemon.ts`) runs the reconcile loop *and* serves that API on one pg-backed store. Every
@@ -442,9 +442,10 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   declarative shared app config — tenet 1/2). Resolution order: `--context` flag > `TIDEPOOL_API_URL`
   / `TIDEPOOL_CONTEXT` env > file `current-context` > built-in `local` (sqlite).
 - **`tp trace <ticket>`** reconstructs a ticket's lifecycle from `run_events` (+ `runs`): a
-  ts-ordered timeline with phase labels (`in_progress`/`review`/`failed`), the work/review runs with
-  `box_id`/provider, and inter-event durations. **A browser/web view over the same data is a
-  follow-up** (out of scope for the trace+cost PR).
+  ts-ordered timeline with phase labels (`in_progress`/`review`/`failed`), the work/review run
+  ledger (`dispatched` → `succeeded`/`failed`/`reaped`) with `box_id`/provider, and inter-event
+  durations. **A browser/web view over the same data is a follow-up** (out of scope for the
+  trace+cost PR).
 - **Cost tracking: capture now, surface later.** Store the full lossless opencode event stream
   (has per-message token usage + timing). sqlite `runs` gets `usage` columns (tokens in/out, model,
   wall_time_sec, lease_sec). **Two cost axes per ticket:** token (opencode) + infra (lease-seconds

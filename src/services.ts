@@ -12,6 +12,7 @@ import type {
   Run,
   RunEvent,
   RunSource,
+  RunStatus,
   Ticket,
   Usage,
   WorkHandle,
@@ -58,6 +59,15 @@ export interface TicketStoreApi {
     patch: TicketPatch,
   ) => Effect.Effect<Ticket, import('./domain.ts').TicketNotFound>;
   readonly addRun: (run: Run) => Effect.Effect<void>;
+  readonly finalizeRun: (
+    id: RunId,
+    patch: {
+      readonly status: Exclude<RunStatus, 'dispatched'>;
+      readonly reason?: string | null;
+      readonly finishedAt: number;
+      readonly usage?: Usage;
+    },
+  ) => Effect.Effect<void>;
   readonly runsFor: (id: TicketId) => Effect.Effect<ReadonlyArray<Run>>;
   /** Append observability events (batch). Insertion order is preserved on read. */
   readonly appendEvents: (events: ReadonlyArray<RunEvent>) => Effect.Effect<void>;

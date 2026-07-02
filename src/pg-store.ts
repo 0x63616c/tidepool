@@ -93,10 +93,19 @@ const migration0002RenameGoalToBody = Effect.gen(function* () {
   yield* sql`ALTER TABLE tickets RENAME COLUMN goal TO body`;
 });
 
+const migration0003RunLedger = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded'`;
+  yield* sql`ALTER TABLE runs ADD COLUMN reason TEXT`;
+  yield* sql`ALTER TABLE runs ADD COLUMN dispatched_at BIGINT NOT NULL DEFAULT 0`;
+  yield* sql`ALTER TABLE runs ADD COLUMN finished_at BIGINT`;
+});
+
 /** The migration set, shared by the on-boot migrator and the store open path. */
 export const pgMigrations: Record<string, Effect.Effect<void, unknown, SqlClient.SqlClient>> = {
   '0001_init': migration0001Init,
   '0002_rename_goal_to_body': migration0002RenameGoalToBody,
+  '0003_run_ledger': migration0003RunLedger,
 };
 
 /**

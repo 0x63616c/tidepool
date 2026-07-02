@@ -46,6 +46,10 @@ export const openSqlite = (
         id TEXT PRIMARY KEY,
         ticket_id TEXT NOT NULL,
         kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reason TEXT,
+        dispatched_at INTEGER NOT NULL,
+        finished_at INTEGER,
         box_id TEXT,
         box_provider TEXT,
         usage_model TEXT NOT NULL,
@@ -57,6 +61,17 @@ export const openSqlite = (
 
     // Migration: add box_provider column to existing databases (no-op if already present).
     yield* sql`ALTER TABLE runs ADD COLUMN box_provider TEXT`.pipe(Effect.ignore);
+
+    // Migration: run ledger columns. These ALTERs are additive and idempotent;
+    // existing success-only rows are backfilled as already-succeeded dispatches.
+    yield* sql`ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded'`.pipe(
+      Effect.ignore,
+    );
+    yield* sql`ALTER TABLE runs ADD COLUMN reason TEXT`.pipe(Effect.ignore);
+    yield* sql`ALTER TABLE runs ADD COLUMN dispatched_at INTEGER NOT NULL DEFAULT 0`.pipe(
+      Effect.ignore,
+    );
+    yield* sql`ALTER TABLE runs ADD COLUMN finished_at INTEGER`.pipe(Effect.ignore);
 
     // Migration: add reason column to existing ticket tables (no-op if already present).
     yield* sql`ALTER TABLE tickets ADD COLUMN reason TEXT`.pipe(Effect.ignore);

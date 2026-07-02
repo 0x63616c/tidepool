@@ -93,6 +93,10 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
             id: newRunId(),
             ticketId: a.id,
             kind: 'work',
+            status: 'succeeded',
+            reason: null,
+            dispatchedAt: 100,
+            finishedAt: 200,
             boxId: newBoxId(),
             boxProvider: 'hetzner',
             usage: { model: 'm', tokensIn: 100, tokensOut: 50, wallTimeSec: 1 },
@@ -102,6 +106,68 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
           const bRuns = yield* store.runsFor(b.id);
           assert.deepStrictEqual(aRuns, [run]);
           assert.deepStrictEqual(bRuns, []);
+        }),
+      ),
+    );
+
+    it.effect('runsFor returns the full run ledger including failed and reaped runs', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          const ticket = yield* store.add(newTicket);
+          const mkRun = (kind: Run['kind'], dispatchedAt: number): Run => ({
+            id: newRunId(),
+            ticketId: ticket.id,
+            kind,
+            status: 'dispatched',
+            reason: null,
+            dispatchedAt,
+            finishedAt: null,
+            boxId: null,
+            boxProvider: null,
+            usage: { model: 'm', tokensIn: 0, tokensOut: 0, wallTimeSec: 0 },
+          });
+          const succeeded = mkRun('work', 100);
+          const failed = mkRun('review', 200);
+          const reaped = mkRun('work', 300);
+          yield* store.addRun(succeeded);
+          yield* store.addRun(failed);
+          yield* store.addRun(reaped);
+          yield* store.finalizeRun(succeeded.id, {
+            status: 'succeeded',
+            reason: null,
+            finishedAt: 150,
+            usage: { model: 'm', tokensIn: 10, tokensOut: 5, wallTimeSec: 1 },
+          });
+          yield* store.finalizeRun(failed.id, {
+            status: 'failed',
+            reason: 'agent boom',
+            finishedAt: 250,
+          });
+          yield* store.finalizeRun(reaped.id, {
+            status: 'reaped',
+            reason: 'deadline-exceeded',
+            finishedAt: 350,
+          });
+
+          const runs = yield* store.runsFor(ticket.id);
+          assert.deepStrictEqual(
+            runs.map((r) => [r.id, r.kind, r.status, r.reason, r.dispatchedAt, r.finishedAt]),
+            [
+              [succeeded.id, 'work', 'succeeded', null, 100, 150],
+              [failed.id, 'review', 'failed', 'agent boom', 200, 250],
+              [reaped.id, 'work', 'reaped', 'deadline-exceeded', 300, 350],
+            ],
+          );
+          assert.deepStrictEqual(runs[0]?.usage, {
+            model: 'm',
+            tokensIn: 10,
+            tokensOut: 5,
+            wallTimeSec: 1,
+          });
+          assert.deepStrictEqual(runs[1]?.usage, failed.usage);
+          assert.deepStrictEqual(runs[2]?.usage, reaped.usage);
         }),
       ),
     );

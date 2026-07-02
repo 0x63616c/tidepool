@@ -85,6 +85,20 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
         return updated;
       }),
     addRun: (run) => Ref.update(runs, (cur) => [...cur, run]),
+    finalizeRun: (id, patch) =>
+      Ref.update(runs, (cur) =>
+        cur.map((r) =>
+          r.id === id
+            ? {
+                ...r,
+                status: patch.status,
+                reason: patch.reason ?? null,
+                finishedAt: patch.finishedAt,
+                usage: patch.usage ?? r.usage,
+              }
+            : r,
+        ),
+      ),
     runsFor: (id: TicketId) =>
       Effect.map(Ref.get(runs), (cur) => cur.filter((r) => r.ticketId === id)),
     appendEvents: (evs) => Ref.update(events, (cur) => [...cur, ...evs]),

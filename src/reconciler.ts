@@ -2,6 +2,7 @@ import { Clock, Duration, Effect, Schedule } from 'effect';
 import { AppConfig, baseFor, modelsFor } from './config.ts';
 import type {
   AgentFailed,
+  AgentKind,
   MergeConflict,
   RateCapped,
   Run,
@@ -57,12 +58,104 @@ const branchFor = (ticket: Ticket): string => `tp/${ticket.id}-${slug(ticket.tit
 /** Rate-cap signatures — a `Failed` poll carrying one of these is a rate-cap, not a retry. */
 const RATE_CAP_RE = /rate.?limit|429|quota|too many requests/i;
 
-/** Record a run, minting its id once so callers can attach `RunEvent`s to it. */
-const recordRun = (store: TicketStoreApi, run: Omit<Run, 'id'>): Effect.Effect<RunId> =>
+const zeroUsage = (model: string): Run['usage'] => ({
+  model,
+  tokensIn: 0,
+  tokensOut: 0,
+  wallTimeSec: 0,
+});
+
+const lifecycleEvent = (
+  ticketId: TicketId,
+  runId: RunId,
+  level: RunEvent['level'],
+  line: string,
+): RunEvent => ({
+  ticketId,
+  runId,
+  boxId: null,
+  source: 'control-plane',
+  ts: Date.now(),
+  level,
+  line,
+});
+
+/** Record dispatch before launch so every attempted worker has durable evidence. */
+const recordDispatch = (
+  store: TicketStoreApi,
+  run: Pick<Run, 'ticketId' | 'kind' | 'usage' | 'dispatchedAt'>,
+): Effect.Effect<RunId> =>
   Effect.gen(function* () {
     const id = newRunId();
-    yield* store.addRun({ id, ...run });
+    yield* store.addRun({
+      id,
+      ticketId: run.ticketId,
+      kind: run.kind,
+      status: 'dispatched',
+      reason: null,
+      dispatchedAt: run.dispatchedAt,
+      finishedAt: null,
+      boxId: null,
+      boxProvider: null,
+      usage: run.usage,
+    });
+    yield* store.appendEvents([
+      lifecycleEvent(run.ticketId, id, 'info', `run dispatched: ${run.kind}`),
+    ]);
     return id;
+  });
+
+const latestOpenRun = (
+  store: TicketStoreApi,
+  ticketId: TicketId,
+  kind?: AgentKind,
+): Effect.Effect<Run | undefined> =>
+  Effect.map(store.runsFor(ticketId), (runs) => {
+    const open = runs.filter(
+      (r) => r.status === 'dispatched' && (kind === undefined || r.kind === kind),
+    );
+    return open[open.length - 1];
+  });
+
+const finalizeLatestRun = (
+  store: TicketStoreApi,
+  ticketId: TicketId,
+  kind: AgentKind,
+  patch: Parameters<TicketStoreApi['finalizeRun']>[1],
+): Effect.Effect<RunId | undefined> =>
+  Effect.gen(function* () {
+    const run = yield* latestOpenRun(store, ticketId, kind);
+    if (run === undefined) return undefined;
+    yield* store.finalizeRun(run.id, patch);
+    yield* store.appendEvents([
+      lifecycleEvent(
+        ticketId,
+        run.id,
+        patch.status === 'succeeded' ? 'info' : 'error',
+        `run finalized: ${kind} ${patch.status}${patch.reason ? `: ${patch.reason}` : ''}`,
+      ),
+    ]);
+    return run.id;
+  });
+
+const finalizeCurrentRun = (
+  store: TicketStoreApi,
+  ticketId: TicketId,
+  patch: Parameters<TicketStoreApi['finalizeRun']>[1],
+): Effect.Effect<RunId | undefined> =>
+  Effect.gen(function* () {
+    const run = yield* latestOpenRun(store, ticketId);
+    if (run === undefined) return undefined;
+    yield* store.finalizeRun(run.id, patch);
+    yield* store.appendEvents([
+      lifecycleEvent(
+        ticketId,
+        run.id,
+        patch.status === 'succeeded' ? 'info' : 'error',
+        `run finalized: ${run.kind} ${patch.status}${patch.reason ? `: ${patch.reason}` : ''}`,
+      ),
+    ]);
+    return run.id;
   });
 
 /**
@@ -316,6 +409,13 @@ const stepTicket = (
         // Logged BEFORE the dispatch so a dispatch that throws (e.g. apiserver
         // TLS) still leaves a visible attempt line ahead of the failure event.
         yield* Effect.logInfo('dispatching work agent').pipe(Effect.annotateLogs({ branch }));
+        const now = yield* Clock.currentTimeMillis;
+        yield* recordDispatch(store, {
+          ticketId: ticket.id,
+          kind: 'work',
+          dispatchedAt: now,
+          usage: zeroUsage(models.work),
+        });
         const handle = yield* worker.dispatch({
           kind: 'work',
           ticket,
@@ -331,7 +431,6 @@ const stepTicket = (
         yield* Effect.logInfo('dispatched work agent').pipe(
           Effect.annotateLogs({ branch, runId: handle }),
         );
-        const now = yield* Clock.currentTimeMillis;
         yield* store.patch(ticket.id, {
           branch,
           state: 'running',
@@ -363,6 +462,11 @@ const stepTicket = (
         ) {
           yield* Effect.logWarning('worker past deadline; cancelling + retrying');
           yield* worker.cancel(handle);
+          yield* finalizeCurrentRun(store, ticket.id, {
+            status: 'reaped',
+            reason: 'deadline-exceeded',
+            finishedAt: now,
+          });
           yield* retryOrFail(store, ticket, config.retries, 'deadline-exceeded');
           yield* store.appendEvents([
             failureEvent(ticket.id, 'deadline-exceeded; worker cancelled'),
@@ -380,6 +484,11 @@ const stepTicket = (
             // a rate-cap requeues (never counts an attempt); anything else retries.
             if (RATE_CAP_RE.test(status.reason)) {
               yield* Effect.logInfo('worker rate-capped; requeued (no attempt spent)');
+              yield* finalizeCurrentRun(store, ticket.id, {
+                status: 'failed',
+                reason: 'rate-capped',
+                finishedAt: yield* Clock.currentTimeMillis,
+              });
               yield* store.patch(ticket.id, {
                 state: 'rate_capped',
                 reason: 'rate-capped',
@@ -391,6 +500,11 @@ const stepTicket = (
               yield* Effect.logWarning('worker failed; retrying or failing').pipe(
                 Effect.annotateLogs({ reason: status.reason }),
               );
+              yield* finalizeCurrentRun(store, ticket.id, {
+                status: 'failed',
+                reason: status.reason,
+                finishedAt: yield* Clock.currentTimeMillis,
+              });
               yield* retryOrFail(store, ticket, config.retries, `agent: ${status.reason}`);
               yield* store.appendEvents([failureEvent(ticket.id, `AgentFailed: ${status.reason}`)]);
             }
@@ -401,14 +515,14 @@ const stepTicket = (
             const outcome = status.outcome;
             if (outcome._tag === 'Work') {
               const work = outcome.result;
-              const runId = yield* recordRun(store, {
-                ticketId: ticket.id,
-                kind: 'work',
-                boxId: null,
-                boxProvider: null,
+              const runId = yield* finalizeLatestRun(store, ticket.id, 'work', {
+                status: 'succeeded',
+                reason: null,
+                finishedAt: yield* Clock.currentTimeMillis,
                 usage: work.usage,
               });
-              yield* store.appendEvents(workCaptures(ticket.id, runId, work));
+              if (runId !== undefined)
+                yield* store.appendEvents(workCaptures(ticket.id, runId, work));
 
               // Open the PR on first work; on a retry the fix is on the same branch.
               const branch = branchFor(ticket);
@@ -446,18 +560,17 @@ const stepTicket = (
 
             // Review outcome: persist its transcript, then merge or retry.
             const review = outcome.result;
-            const reviewRunId = yield* recordRun(store, {
-              ticketId: ticket.id,
-              kind: 'review',
-              boxId: null,
-              boxProvider: null,
+            const reviewRunId = yield* finalizeLatestRun(store, ticket.id, 'review', {
+              status: 'succeeded',
+              reason: null,
+              finishedAt: yield* Clock.currentTimeMillis,
               usage: review.usage,
             });
             if (review.transcript !== undefined)
               yield* store.appendEvents([
                 {
                   ticketId: ticket.id,
-                  runId: reviewRunId,
+                  runId: reviewRunId ?? null,
                   boxId: null,
                   source: 'opencode',
                   ts: Date.now(),
@@ -570,6 +683,13 @@ const stepTicket = (
         yield* Effect.logInfo('CI green; dispatching review agent').pipe(
           Effect.annotateLogs({ pr: prNumber }),
         );
+        const now = yield* Clock.currentTimeMillis;
+        yield* recordDispatch(store, {
+          ticketId: ticket.id,
+          kind: 'review',
+          dispatchedAt: now,
+          usage: zeroUsage(models.review),
+        });
         const handle = yield* worker.dispatch({
           kind: 'review',
           ticket,
@@ -581,7 +701,6 @@ const stepTicket = (
         yield* Effect.logInfo('dispatched review agent').pipe(
           Effect.annotateLogs({ pr: prNumber, runId: handle }),
         );
-        const now = yield* Clock.currentTimeMillis;
         yield* store.patch(ticket.id, {
           state: 'running',
           workHandle: handle,
@@ -617,13 +736,20 @@ const stepTicket = (
           Effect.zipRight(
             Effect.logInfo('dispatch rate-capped; requeued (no attempt spent)'),
             Effect.zipRight(
-              s.patch(ticket.id, {
-                state: 'rate_capped',
+              finalizeCurrentRun(s, ticket.id, {
+                status: 'failed',
                 reason: 'rate-capped',
-                workHandle: null,
-                dispatchedAt: null,
+                finishedAt: Date.now(),
               }),
-              s.appendEvents([failureEvent(ticket.id, 'rate-capped')]),
+              Effect.zipRight(
+                s.patch(ticket.id, {
+                  state: 'rate_capped',
+                  reason: 'rate-capped',
+                  workHandle: null,
+                  dispatchedAt: null,
+                }),
+                s.appendEvents([failureEvent(ticket.id, 'rate-capped')]),
+              ),
             ),
           ),
         ),
@@ -638,8 +764,15 @@ const stepTicket = (
                 Effect.annotateLogs({ reason: e.reason }),
               ),
               Effect.zipRight(
-                retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`),
-                s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]),
+                finalizeCurrentRun(s, ticket.id, {
+                  status: 'failed',
+                  reason: e.reason,
+                  finishedAt: Date.now(),
+                }),
+                Effect.zipRight(
+                  retryOrFail(s, ticket, c.retries, `agent: ${e.reason}`),
+                  s.appendEvents([failureEvent(ticket.id, `AgentFailed: ${e.reason}`)]),
+                ),
               ),
             ),
           ),
