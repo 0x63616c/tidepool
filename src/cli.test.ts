@@ -39,7 +39,7 @@ describe('tp ticket add / list', () => {
     ),
   );
 
-  it.effect('renders list columns as id, state, target, title', () =>
+  it.effect('renders list columns as id, state, target, conditions, title', () =>
     run(
       Effect.gen(function* () {
         const qcApi = yield* QueueControl;
@@ -47,8 +47,8 @@ describe('tp ticket add / list', () => {
         const listed = yield* listAction({ target: null, limit: 50 });
 
         expect(listed.split('\n').slice(0, 2)).toEqual([
-          'tickets[1]{id,state,target,title}:',
-          `  ${ticket.id},${ticket.state},${ticket.target},${ticket.title}`,
+          'tickets[1]{id,state,target,conditions,title}:',
+          `  ${ticket.id},${ticket.state},${ticket.target},[],${ticket.title}`,
         ]);
       }),
     ),

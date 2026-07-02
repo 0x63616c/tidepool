@@ -27,7 +27,12 @@ import { renderDoctor, runDoctor } from './doctor.ts';
 import type { NewTicket, RunEvent, Ticket } from './domain.ts';
 import { HttpQueueControl } from './http-queue-control.ts';
 import { RunId, TicketId } from './ids.ts';
-import { LocalQueueControl, QueueControl, type TargetNotConfigured } from './queue-control.ts';
+import {
+  type InvalidBlockedBy,
+  LocalQueueControl,
+  QueueControl,
+  type TargetNotConfigured,
+} from './queue-control.ts';
 import { AppConfigLive, ticketStoreLive } from './runtime.ts';
 import { renderTicketCost, renderTicketHeader, renderTrace } from './trace.ts';
 
@@ -57,9 +62,11 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
       '  Run `tp ticket add --title "..." --body "..." --target "<owner/repo>"` to add one',
     ].join('\n');
   }
-  const rows = tickets.map((t) => `  ${t.id},${t.state},${t.target},${t.title}`);
+  const rows = tickets.map(
+    (t) => `  ${t.id},${t.state},${t.target},${JSON.stringify(t.conditions)},${t.title}`,
+  );
   return [
-    `tickets[${tickets.length}]{id,state,target,title}:`,
+    `tickets[${tickets.length}]{id,state,target,conditions,title}:`,
     ...rows,
     'help[1]:',
     '  Run `tp ticket add --title "..." --body "..." --target "<owner/repo>"` to add one',
@@ -114,7 +121,7 @@ const contextLine = (
 /** `tp ticket add` — enqueue a ticket. Fails `TargetNotConfigured` for unknown repos. */
 export const addAction = (
   input: NewTicket,
-): Effect.Effect<string, TargetNotConfigured, QueueControl> =>
+): Effect.Effect<string, TargetNotConfigured | InvalidBlockedBy, QueueControl> =>
   Effect.gen(function* () {
     const qc = yield* QueueControl;
     const ticket = yield* qc.add(input);
@@ -261,16 +268,23 @@ const addCommand = Command.make(
     body: Options.text('body').pipe(Options.optional),
     bodyFile: Options.text('body-file').pipe(Options.optional),
     target: Options.text('target'),
+    blockedBy: Options.text('blocked-by').pipe(Options.repeated),
     context: contextOption,
   },
-  ({ body, bodyFile, context, target, title }) => {
+  ({ blockedBy, body, bodyFile, context, target, title }) => {
     const src = chooseBodySource({ body, bodyFile });
     if (Either.isLeft(src)) return usageError(src.left, ADD_HELP);
     return withQueue(
       flagOf(context),
       Effect.gen(function* () {
         const resolved = yield* resolveBody(src.right);
-        return yield* addAction({ title, body: resolved, target }).pipe(
+        const ids = [];
+        for (const id of blockedBy) {
+          const decoded = decodeTicketId(id);
+          if (Either.isLeft(decoded)) return yield* usageError(`not a ticket id: ${id}`, ADD_HELP);
+          ids.push(decoded.right);
+        }
+        return yield* addAction({ title, body: resolved, target, blockedBy: ids }).pipe(
           Effect.flatMap(Console.log),
           Effect.catchTag('TargetNotConfigured', (e) =>
             Console.log(
@@ -278,6 +292,13 @@ const addCommand = Command.make(
                 `error: ${e.repo} is not a configured target`,
                 `help: add it to tidepool.config.ts (configured: ${e.configured.join(', ')})`,
               ].join('\n'),
+            ).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
+          ),
+          Effect.catchTag('InvalidBlockedBy', (e) =>
+            Console.log(
+              [`error: ${e.reason}`, 'help: pass existing acyclic --blocked-by tckt_… ids'].join(
+                '\n',
+              ),
             ).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
           ),
         );

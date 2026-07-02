@@ -1,8 +1,9 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 import { AppConfig, type Config, defineConfig } from './config.ts';
-import { InMemoryTicketStore } from './fakes.ts';
+import { InMemoryTicketStore, makeInMemoryStore } from './fakes.ts';
 import { LocalQueueControl, QueueControl } from './queue-control.ts';
+import { TicketStore } from './services.ts';
 
 const testConfig: Config = defineConfig({
   targets: [
@@ -102,5 +103,33 @@ describe('QueueControl.add validation', () => {
         expect(t.target).toBe('t/repo');
       }),
     ),
+  );
+
+  it.effect('rejects missing, duplicate, self, and cyclic blocked_by ids', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const layer = LocalQueueControl.pipe(
+        Layer.provide(
+          Layer.mergeAll(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, testConfig)),
+        ),
+      );
+      const qc = yield* QueueControl.pipe(Effect.provide(layer));
+      const a = yield* qc.add({ title: 'a', body: 'g', target: 't/repo' });
+      const b = yield* qc.add({ title: 'b', body: 'g', target: 't/repo', blockedBy: [a.id] });
+      const events = yield* store.eventsFor({ ticketId: b.id });
+      expect(events.some((e) => e.line === `condition set: blocked_by (${a.id})`)).toBe(true);
+      yield* store.patch(a.id, { conditions: [{ type: 'blocked_by', ids: [b.id] }] });
+
+      for (const input of [
+        { title: 'missing', body: 'g', target: 't/repo', blockedBy: ['tckt_0000000000' as never] },
+        { title: 'duplicate', body: 'g', target: 't/repo', blockedBy: [a.id, a.id] },
+        { id: a.id, title: 'self', body: 'g', target: 't/repo', blockedBy: [a.id] },
+        { title: 'cycle', body: 'g', target: 't/repo', blockedBy: [a.id] },
+      ]) {
+        const r = yield* Effect.either(qc.add(input));
+        expect(r._tag).toBe('Left');
+        if (r._tag === 'Left') expect(r.left._tag).toBe('InvalidBlockedBy');
+      }
+    }),
   );
 });
