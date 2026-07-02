@@ -33,6 +33,7 @@ const CFG: K8sWorkerConfig = {
   memRequest: '2Gi',
   activeDeadlineSeconds: 1800,
   ttlSecondsAfterFinished: 600,
+  gitSha: 'bcf78e0a1b2c3d4e5f60718293a4b5c6d7e8f901',
 };
 
 const ticket = (over: Partial<Ticket> = {}): Ticket => ({
@@ -152,6 +153,13 @@ describe('buildJobManifest', () => {
     assert.strictEqual(l['tidepool/role'], 'agent');
     assert.strictEqual(l['tidepool/kind'], 'work');
     assert.strictEqual(l['tidepool/ticket'], 'tckt_ab12cd');
+  });
+
+  it('stamps the reconciler git sha on the Job AND its pod template (kubectl -L)', () => {
+    // The reconciler threads its own TIDEPOOL_GIT_SHA into K8sWorkerConfig so every
+    // worker pod is greppable back to the commit that dispatched it.
+    assert.strictEqual(manifest.metadata.labels['tidepool/git-sha'], CFG.gitSha);
+    assert.strictEqual(manifest.spec.template.metadata.labels['tidepool/git-sha'], CFG.gitSha);
   });
 
   it('surfaces title/body as annotations (restart-safe harvest, no new stdout channel)', () => {

@@ -54,6 +54,35 @@ export function pickImage(override: string | undefined, fallback: string): strin
   return override;
 }
 
+/**
+ * The label key stamping the git commit a running pod was built from, on BOTH the
+ * reconciler and every worker pod. Lives in the repo's own `tidepool/*` label
+ * namespace, symmetric with `tidepool/role|kind|ticket` (NAMING.md rule 4) — not
+ * `app.kubernetes.io/version`, which conventionally holds a released semver and
+ * would misread as the image tag. `kubectl get pods -L tidepool/git-sha` then
+ * shows the commit at a glance (the motivating win).
+ */
+export const GIT_SHA_LABEL = 'tidepool/git-sha';
+
+/**
+ * The git-sha label VALUE, fail-open. CI threads `github.sha` via `TIDEPOOL_GIT_SHA`;
+ * a local `pulumi up` has none, so this returns the `dev` placeholder rather than
+ * crash — the label is always present, never a hard apply requirement (unlike the
+ * image pin, which fails closed). A real 40-char sha passes through untouched; any
+ * odd ref is coerced to a valid k8s label value (≤63 chars, `[A-Za-z0-9._-]`,
+ * alphanumeric edges) so a manifest can never be rejected for a bad label.
+ */
+export function gitShaLabelValue(raw: string | undefined): string {
+  const trimmed = raw?.trim();
+  if (!trimmed) return 'dev';
+  const coerced = trimmed
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .slice(0, 63)
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .replace(/[^A-Za-z0-9]+$/, '');
+  return coerced.length > 0 ? coerced : 'dev';
+}
+
 /** One RBAC PolicyRule (pure shape; workloads.ts maps it to the @pulumi type). */
 export interface WorkerDriverRule {
   readonly apiGroups: readonly string[];

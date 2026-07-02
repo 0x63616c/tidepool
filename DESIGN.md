@@ -332,6 +332,14 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   - *Infra changes (`infra/**`):* PR → `pulumi preview`; merge → the same up-job applies.
 - Control-plane state is in Postgres, so a reroll is a brief reconcile pause, not lost work; the
   reconciler resumes polling existing work handles on restart.
+- **Commit provenance — `tidepool/git-sha` pod label.** The up-job passes `github.sha` as
+  `TIDEPOOL_GIT_SHA`; `config.ts` (`GIT_SHA`, fail-open `dev` for a local `pulumi up`) stamps it as a
+  pod-template label on the reconciler Deployment *and* threads it to the reconciler as env, which
+  re-stamps the **same** label on every worker Job it dispatches (`k8s-agent-worker.ts` `jobLabels`).
+  So `kubectl get pods -A -L tidepool/git-sha` maps any running pod → the commit it was built from —
+  no reverse-engineering a docker digest against CI timestamps. The label lives only on the pod
+  template, never the Deployment selector (immutable), and uses the repo's `tidepool/*` label
+  namespace (symmetric with `tidepool/role|kind|ticket`), not `app.kubernetes.io/version`.
 
 ### Surface & cost visibility
 - **CLI-first, AXI-compliant; no TUI in v1.** `tp ticket add | list | get | logs | transcript`

@@ -64,6 +64,12 @@ export interface K8sWorkerConfig {
   readonly activeDeadlineSeconds: number;
   /** Job `ttlSecondsAfterFinished` — auto-reap finished Jobs (+ owned Secrets). */
   readonly ttlSecondsAfterFinished: number;
+  /**
+   * Git commit the dispatching reconciler was built from (its own `TIDEPOOL_GIT_SHA`
+   * env, `dev` locally). Stamped as `tidepool/git-sha` on every worker pod so
+   * `kubectl get pods -L tidepool/git-sha` maps a pod → its dispatching commit.
+   */
+  readonly gitSha: string;
 }
 
 /** DI tag for the k8s connection/shape config. */
@@ -76,6 +82,13 @@ export const k8sWorkerConfigLayer = (config: K8sWorkerConfig): Layer.Layer<K8sCo
 // ── Naming ───────────────────────────────────────────────────────────────────
 
 const PART_OF = 'app.kubernetes.io/part-of';
+/**
+ * Provenance label: the commit the dispatching reconciler was built from. Same key
+ * the control-plane Deployment stamps (guards.ts `GIT_SHA_LABEL`), duplicated here
+ * because src/ must not import across the infra/pulumi seam — the two sides share
+ * only the string, exactly like the `tidepool/role` keys already do.
+ */
+const GIT_SHA_LABEL = 'tidepool/git-sha';
 // The Job's ephemeral workspace: the repo is cloned here and config.json is
 // mounted here, so the container runs with this as its cwd.
 const WORKDIR = '/work';
@@ -95,11 +108,16 @@ export const k8sName = (s: string): string =>
 export const workHandleFor = (kind: 'work' | 'review', ticketId: string, suffix: string): string =>
   `${kind}-${k8sName(ticketId)}-${k8sName(suffix)}`.slice(0, 63).replace(/-+$/g, '');
 
-const jobLabels = (kind: 'work' | 'review', ticketId: string): Record<string, string> => ({
+const jobLabels = (
+  kind: 'work' | 'review',
+  ticketId: string,
+  gitSha: string,
+): Record<string, string> => ({
   [PART_OF]: 'tidepool',
   'tidepool/role': 'agent',
   'tidepool/kind': kind,
   'tidepool/ticket': ticketId,
+  [GIT_SHA_LABEL]: gitSha,
 });
 
 /** Label selector matching every agent Job (for `reap`). */
@@ -217,7 +235,7 @@ export const buildJobManifest = (args: {
   readonly annotations?: Record<string, string>;
 }): JobManifest => {
   const { handle, config, input } = args;
-  const labels = jobLabels(input.kind, input.ticket.id);
+  const labels = jobLabels(input.kind, input.ticket.id, config.gitSha);
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
@@ -543,7 +561,7 @@ export const makeK8sAgentWorker = (
               jobUid,
               configJson,
               opencodeAuth: creds.opencodeAuth,
-              labels: jobLabels(input.kind, input.ticket.id),
+              labels: jobLabels(input.kind, input.ticket.id, cfg.gitSha),
             }),
           );
           if (!isOk(secretRes.status)) {

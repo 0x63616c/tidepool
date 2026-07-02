@@ -60,6 +60,7 @@ const configLayer = k8sWorkerConfigLayer({
   memRequest: '64Mi',
   activeDeadlineSeconds: 120,
   ttlSecondsAfterFinished: 60,
+  gitSha: 'e2e',
 });
 
 // Deterministic-ish suffix so re-runs don't collide (Date is fine in app code).

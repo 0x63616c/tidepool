@@ -31,7 +31,11 @@ if (PG_APP_SECRET !== `${CNPG.clusterName}-app`) {
  *
  * CNPG's own namespaces (cnpg-system, cert-manager) land in PR-5b.
  */
-export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImages): void {
+export function createWorkloads(
+  provider: k8s.Provider,
+  images: ControlPlaneImages,
+  gitSha: string,
+): void {
   const opts = { provider };
 
   const cpNs = new k8s.core.v1.Namespace(
@@ -159,7 +163,7 @@ export function createWorkloads(provider: k8s.Provider, images: ControlPlaneImag
         namespace: cpNs.metadata.name,
         labels: { 'app.kubernetes.io/part-of': 'tidepool', 'tidepool/role': 'reconciler' },
       },
-      spec: buildControlPlaneDeploymentSpec(images) as unknown as k8s.types.input.apps.v1.DeploymentSpec,
+      spec: buildControlPlaneDeploymentSpec(images, gitSha) as unknown as k8s.types.input.apps.v1.DeploymentSpec,
     },
     { ...opts, dependsOn: [cpSecret, reconcilerSa] },
   );

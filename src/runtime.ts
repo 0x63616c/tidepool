@@ -138,6 +138,9 @@ export const inClusterK8sConfig: Effect.Effect<K8sWorkerConfig> = Effect.gen(fun
     memRequest: envOr('TIDEPOOL_WORKER_MEM_REQUEST', '2Gi'),
     activeDeadlineSeconds: workerDeadlineSeconds(),
     ttlSecondsAfterFinished: workerTtlSeconds(),
+    // The reconciler's own build commit (set on its Deployment), re-stamped as the
+    // `tidepool/git-sha` label on each worker pod. Fail-open `dev` off-cluster.
+    gitSha: envOr('TIDEPOOL_GIT_SHA', 'dev'),
   };
 });
 
