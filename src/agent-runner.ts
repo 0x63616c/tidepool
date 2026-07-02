@@ -104,14 +104,22 @@ const STANDARDS =
 const ticketBlock = (ticket: Ticket): string =>
   `<ticket id="${ticket.id}">\n${ticket.body}\n</ticket>`;
 
+const reworkFeedback = (ticket: Ticket): string | null =>
+  ticket.prNumber !== null && ticket.reason !== null
+    ? `A previous review requested changes: ${ticket.reason}. Address them before resubmitting.`
+    : null;
+
 export const workPrompt = (ticket: Ticket): string =>
   [
+    reworkFeedback(ticket),
     `You are the work agent for ticket ${ticket.id}.`,
     'The ticket body below is authored markdown (sections like `# Context`, `# Acceptance Criteria`, `# Relevant Files`, `# Approach`, `# Out of Scope`). It may be stale — verify pointers against the current code; the `# Acceptance Criteria` section is authoritative.',
     ticketBlock(ticket),
     STANDARDS,
     'Implement the ticket directly in this repository. Do not commit or push — the harness handles git.',
-  ].join('\n\n');
+  ]
+    .filter((part): part is string => part !== null)
+    .join('\n\n');
 
 export const reviewPrompt = (ticket: Ticket, diff: string): string =>
   [
