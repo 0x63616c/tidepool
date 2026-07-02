@@ -24,7 +24,7 @@ import {
 const testTicket = (): Ticket => ({
   id: newTicketId(),
   title: 'Add slugify',
-  goal: 'add slugify(s)',
+  body: 'add slugify(s)',
   target: 'o/r',
   state: 'in_progress',
   branch: 'tp/x',

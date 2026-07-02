@@ -29,7 +29,7 @@ describe('QueueControl.list', () => {
       Effect.gen(function* () {
         const qc = yield* QueueControl;
         for (const n of ['a', 'b', 'c']) {
-          yield* qc.add({ title: n, goal: `g-${n}`, target: 't/repo' });
+          yield* qc.add({ title: n, body: `g-${n}`, target: 't/repo' });
         }
         const page = yield* qc.list({ limit: 2, cursor: null, target: null });
         expect(page.items).toHaveLength(2);
@@ -48,8 +48,8 @@ describe('QueueControl.list', () => {
     withQC(
       Effect.gen(function* () {
         const qc = yield* QueueControl;
-        yield* qc.add({ title: 'x', goal: 'g', target: 'owner/one' });
-        yield* qc.add({ title: 'y', goal: 'g', target: 'owner/two' });
+        yield* qc.add({ title: 'x', body: 'g', target: 'owner/one' });
+        yield* qc.add({ title: 'y', body: 'g', target: 'owner/two' });
         const page = yield* qc.list({ limit: 50, cursor: null, target: 'owner/two' });
         expect(page.items).toHaveLength(1);
         expect(page.items[0]?.target).toBe('owner/two');
@@ -63,7 +63,7 @@ describe('QueueControl.get / events', () => {
     withQC(
       Effect.gen(function* () {
         const qc = yield* QueueControl;
-        const t = yield* qc.add({ title: 'x', goal: 'gx', target: 't/repo' });
+        const t = yield* qc.add({ title: 'x', body: 'gx', target: 't/repo' });
         const got = yield* qc.get(t.id);
         expect(got.id).toBe(t.id);
         const evs = yield* qc.events({
@@ -86,7 +86,7 @@ describe('QueueControl.add validation', () => {
       Effect.gen(function* () {
         const qc = yield* QueueControl;
         const r = yield* Effect.either(
-          qc.add({ title: 'oops', goal: 'g', target: '0x63616c/tidepol' }),
+          qc.add({ title: 'oops', body: 'g', target: '0x63616c/tidepol' }),
         );
         expect(r._tag).toBe('Left');
         if (r._tag === 'Left') expect(r.left._tag).toBe('TargetNotConfigured');
@@ -98,7 +98,7 @@ describe('QueueControl.add validation', () => {
     withQC(
       Effect.gen(function* () {
         const qc = yield* QueueControl;
-        const t = yield* qc.add({ title: 'ok', goal: 'g', target: 't/repo' });
+        const t = yield* qc.add({ title: 'ok', body: 'g', target: 't/repo' });
         expect(t.target).toBe('t/repo');
       }),
     ),

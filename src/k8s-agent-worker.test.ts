@@ -39,7 +39,7 @@ const CFG: K8sWorkerConfig = {
 const ticket = (over: Partial<Ticket> = {}): Ticket => ({
   id: 'tckt_ab12cd' as Ticket['id'],
   title: 'Add slugify',
-  goal: 'add slugify(s)',
+  body: 'add slugify(s)',
   target: 'octo/repo',
   state: 'backlog',
   branch: null,

@@ -31,14 +31,16 @@ Two execution contexts share this repo; worktree lifecycle is owned differently 
 ## Golden rules
 
 1. **Every change ships as a green, merged PR.** That is the definition of done — it is a system
-   invariant, never something you state in a ticket goal. No direct pushes to `main`.
+   invariant, never something you state in a ticket's acceptance criteria. No direct pushes to `main`.
 2. **Follow the standards below mechanically.** CI + git hooks enforce them; the review agent grades
    against them. If a hook/CI fails, fix the code — do not bypass.
 3. **No leaky abstractions.** `AgentWorker`, `Forge`, `TicketStore`, `CredentialBroker`
    are deep modules: narrow front, implementation fully hidden. Never let k8s/GitHub/opencode
    types leak across an interface boundary.
-4. **A ticket's `goal` defines acceptance.** Work toward it; the review agent checks the diff against
-   it + CI status.
+4. **A ticket's `body` defines acceptance.** The body is structured markdown (`# Context`,
+   `# Acceptance Criteria`, `# Relevant Files`, `# Approach`, `# Out of Scope`); the review agent
+   grades the diff against its `# Acceptance Criteria` section + CI status. Other sections are
+   context/pointers and may be stale — the work agent verifies them against current code.
 
 ## Tenets (changes that touch these need a human)
 

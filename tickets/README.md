@@ -4,9 +4,12 @@
 > files are **seed fixtures**: example tickets the loop ingests once to bootstrap a backlog for
 > testing. They are not where ticket state lives.
 
-A ticket (in the store) = `{ id, title, goal, state, target, branch, pr, attempts, usage }`.
-`goal` is the acceptance criterion; "green, merged PR" is a system invariant, never written in `goal`.
-Done = a DB state transition the reconciler makes after auto-merge (review ✅ + CI ✅ + merged).
+A ticket (in the store) = `{ id, title, body, state, target, branch, pr, attempts, usage }`.
+`body` is structured markdown (`# Context`, `# Acceptance Criteria`, `# Relevant Files`, `# Approach`,
+`# Out of Scope`) — the sole intent field the work + review agents read. The review agent grades the
+diff against the `# Acceptance Criteria` section; "green, merged PR" is a system invariant, never
+written in the body. Done = a DB state transition the reconciler makes after auto-merge (review ✅ +
+CI ✅ + merged).
 
 Fixture frontmatter:
 
@@ -14,11 +17,20 @@ Fixture frontmatter:
 ---
 id: tckt_xxxxxx
 title: short title
-goal: "checkable acceptance criterion"
 priority: 1
 target: tidepool-testbed
 ---
-Optional notes for the agent.
+# Context
+## Problem
+what's missing/broken today.
+## Motivation
+why it matters now.
+
+# Acceptance Criteria
+- checkable, gradeable statement of done.
+
+# Relevant Files
+- path:line pointers (as of writing — verify against current code).
 ```
 
 `tckt_001` (slugify) is the terminal-check function: `tp doctor` asserts slugify exists on

@@ -82,9 +82,21 @@ const migration0001Init = Effect.gen(function* () {
   yield* sql`CREATE INDEX run_events_run ON run_events (run_id)`;
 });
 
+/**
+ * The single intent field `goal` became the structured markdown `body` (same
+ * NOT NULL constraint, carried in place). A NEW migration — never edit an
+ * already-applied one — so existing prod rows keep their content under the new
+ * name. The sqlite backing does the same via a guarded `ALTER … RENAME COLUMN`.
+ */
+const migration0002RenameGoalToBody = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`ALTER TABLE tickets RENAME COLUMN goal TO body`;
+});
+
 /** The migration set, shared by the on-boot migrator and the store open path. */
 export const pgMigrations: Record<string, Effect.Effect<void, unknown, SqlClient.SqlClient>> = {
   '0001_init': migration0001Init,
+  '0002_rename_goal_to_body': migration0002RenameGoalToBody,
 };
 
 /**

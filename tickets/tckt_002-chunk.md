@@ -1,7 +1,7 @@
 ---
 id: tckt_002
 title: fix chunk off-by-one
-goal: "fix chunk(arr, n) in src/array.ts so the final partial group is included when arr.length % n !== 0. Add a failing test first that reproduces the bug, then fix."
+body: "fix chunk(arr, n) in src/array.ts so the final partial group is included when arr.length % n !== 0. Add a failing test first that reproduces the bug, then fix."
 priority: 2
 target: tidepool-testbed
 ---

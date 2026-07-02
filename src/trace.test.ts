@@ -23,7 +23,7 @@ const seed = (
 ) =>
   Effect.gen(function* () {
     const store = yield* TicketStore;
-    const ticket = yield* store.add({ title: 'Add slugify', goal: 'g', target: 't/repo' });
+    const ticket = yield* store.add({ title: 'Add slugify', body: 'g', target: 't/repo' });
     yield* f({ ticketId: ticket.id, workRun: newRunId(), reviewRun: newRunId(), store });
   }).pipe(Effect.provide(InMemoryTicketStore));
 
@@ -40,7 +40,7 @@ const event = (
 
 const ticket = (over: Partial<Ticket> & Pick<Ticket, 'id'>): Ticket => ({
   title: 't',
-  goal: 'g',
+  body: 'g',
   target: 't/repo',
   state: 'backlog',
   branch: null,
@@ -56,12 +56,12 @@ const ticket = (over: Partial<Ticket> & Pick<Ticket, 'id'>): Ticket => ({
 });
 
 describe('renderTicketHeader', () => {
-  it('prints every ticket field, including the full multi-line goal', () => {
+  it('prints every ticket field, including the full multi-line body', () => {
     const prId = newPrId();
     const t = ticket({
       id: newTicketId(),
       title: 'Add slugify',
-      goal: 'line one\nline two',
+      body: 'line one\nline two',
       target: 't/repo',
       state: 'failed',
       branch: 'tp/tckt_abc-add-slugify',
@@ -97,6 +97,26 @@ describe('renderTicketHeader', () => {
     assert.include(out, 'worked-attempt: -');
     assert.include(out, '  reason: -');
     assert.include(out, '  dispatched: -');
+  });
+
+  it('truncates a long body by default and points at --full (AXI §3)', () => {
+    const id = newTicketId();
+    const tail = 'THE-VERY-END-MARKER';
+    const body = `# Acceptance Criteria\n${'x'.repeat(2000)}\n${tail}`;
+    const out = renderTicketHeader(ticket({ id, body }));
+    assert.include(out, '# Acceptance Criteria'); // preview keeps the head
+    assert.notInclude(out, tail); // ...but drops the tail past the limit
+    assert.include(out, `truncated, ${body.length} chars total`);
+    assert.include(out, `tp ticket get ${id} --full`);
+  });
+
+  it('prints the whole body when full is set, with no truncation marker', () => {
+    const tail = 'THE-VERY-END-MARKER';
+    const body = `# Acceptance Criteria\n${'x'.repeat(2000)}\n${tail}`;
+    const out = renderTicketHeader(ticket({ id: newTicketId(), body }), { full: true });
+    assert.include(out, tail);
+    assert.notInclude(out, 'truncated');
+    assert.notInclude(out, '--full');
   });
 });
 
@@ -236,8 +256,8 @@ describe('costReport', () => {
   it.effect('aggregates across all tickets when no ticket is given', () =>
     Effect.gen(function* () {
       const store = yield* TicketStore;
-      const t1 = yield* store.add({ title: 'a', goal: 'g', target: 't/repo' });
-      const t2 = yield* store.add({ title: 'b', goal: 'g', target: 't/repo' });
+      const t1 = yield* store.add({ title: 'a', body: 'g', target: 't/repo' });
+      const t2 = yield* store.add({ title: 'b', body: 'g', target: 't/repo' });
       yield* store.addRun(
         run({
           id: newRunId(),

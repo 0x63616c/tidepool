@@ -52,7 +52,7 @@ describe('Usage schema', () => {
 const validTicket = {
   id: 'tckt_abcdefghij',
   title: 't',
-  goal: 'g',
+  body: 'g',
   target: 'r/repo',
   state: 'backlog',
   branch: null,

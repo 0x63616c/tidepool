@@ -17,7 +17,7 @@ export interface StoreMedium {
   readonly open: Effect.Effect<TicketStoreApi, never, Scope.Scope>;
 }
 
-const newTicket = { title: 'Add slugify', goal: 'add slugify(s)', target: 't/repo' };
+const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
 const MISSING_ID = newTicketId();
 
 export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMedium>): void => {

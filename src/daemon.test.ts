@@ -32,7 +32,7 @@ describe('makeDaemon', () => {
   it.effect('runs the reconcile loop and drives a backlog ticket to done', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
-      const seeded = yield* store.add({ title: 'real work', goal: 'do it', target: 't/repo' });
+      const seeded = yield* store.add({ title: 'real work', body: 'do it', target: 't/repo' });
 
       const fiber = yield* makeDaemon().pipe(Effect.provide(env(store)), Effect.fork);
       // Let round 1 (t=0) settle to a fixpoint, then stop the forever loop.

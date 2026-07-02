@@ -450,7 +450,7 @@ const stepTicket = (
 
         // No admission check here either: this ticket has held its slot since
         // the `backlog` exit admitted it (Decision 1).
-        // CI green → dispatch the review agent-worker (grades the diff vs goal) and
+        // CI green → dispatch the review agent-worker (grades the diff vs the ticket body) and
         // move to `running`; the verdict is harvested when its poll succeeds. The
         // control-plane never runs opencode — the worker does (FIX 1).
         yield* Effect.logInfo('CI green; dispatching review agent').pipe(

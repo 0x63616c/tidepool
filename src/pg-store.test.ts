@@ -50,7 +50,7 @@ if (PG_URL === undefined) {
         const id = yield* Effect.scoped(
           Effect.gen(function* () {
             const store = yield* medium.open;
-            const t = yield* store.add({ title: 'x', goal: 'g', target: 't/r' });
+            const t = yield* store.add({ title: 'x', body: 'g', target: 't/r' });
             const patched = yield* store.patch(t.id, {
               state: 'running',
               workHandle: makeWorkHandle('tp-work-tckt_x-1'),

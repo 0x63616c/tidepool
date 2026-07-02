@@ -80,14 +80,25 @@ const renderTimeline = (events: ReadonlyArray<RunEvent>, runs: ReadonlyArray<Run
 const orDash = (v: string | number | null): string => (v === null ? '-' : String(v));
 
 /**
- * Ticket-header block — every field the store row itself carries (title, goal,
- * target, state, branch/PR/merge reattach handles, attempt bookkeeping),
- * always printed in full including the whole multi-line goal. Pure over
- * `Ticket` alone (no runs/events dependency), so `tp ticket get` can show what
- * a ticket was asked to do even before it has ever been dispatched.
+ * How many characters of the (potentially long, multi-line markdown) ticket
+ * body `tp ticket get` prints before truncating. Long-form content is truncated
+ * by default in detail views (AXI §3) with a definitive marker + `--full`
+ * escape hatch, so a large body doesn't blow the agent's token budget.
  */
-export const renderTicketHeader = (ticket: Ticket): string =>
-  [
+const BODY_PREVIEW = 800;
+
+/**
+ * Ticket-header block — every field the store row itself carries (title, body,
+ * target, state, branch/PR/merge reattach handles, attempt bookkeeping). Pure
+ * over `Ticket` alone (no runs/events dependency), so `tp ticket get` can show
+ * what a ticket was asked to do even before it has ever been dispatched. The
+ * markdown `body` is truncated to `BODY_PREVIEW` chars unless `full` is set.
+ */
+export const renderTicketHeader = (ticket: Ticket, opts: { full?: boolean } = {}): string => {
+  const full = opts.full ?? false;
+  const truncated = !full && ticket.body.length > BODY_PREVIEW;
+  const shown = truncated ? ticket.body.slice(0, BODY_PREVIEW) : ticket.body;
+  return [
     `ticket: ${ticket.id}`,
     `  title: ${ticket.title}`,
     `  state: ${ticket.state}`,
@@ -98,9 +109,16 @@ export const renderTicketHeader = (ticket: Ticket): string =>
     `  attempts: ${ticket.attempts}, worked-attempt: ${orDash(ticket.workedAttempt)}`,
     `  dispatched: ${ticket.dispatchedAt === null ? '-' : new Date(ticket.dispatchedAt).toISOString()}`,
     `  reason: ${orDash(ticket.reason)}`,
-    '  goal: |',
-    ...ticket.goal.split('\n').map((line) => `    ${line}`),
+    '  body: |',
+    ...shown.split('\n').map((line) => `    ${line}`),
+    ...(truncated
+      ? [
+          `    … (truncated, ${ticket.body.length} chars total)`,
+          `  Run \`tp ticket get ${ticket.id} --full\` to see the complete body`,
+        ]
+      : []),
   ].join('\n');
+};
 
 /** Pure trace renderer — reused by `tp ticket get` (fed from QueueControl data). */
 export const renderTrace = (

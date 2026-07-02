@@ -50,7 +50,7 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
         const ticket: Ticket = {
           id: newTicketId(),
           title: input.title,
-          goal: input.goal,
+          body: input.body,
           target: input.target,
           state: 'backlog',
           branch: null,
@@ -226,7 +226,7 @@ export const fakeAgentWorker = (opts: FakeAgentWorkerOptions = {}): Layer.Layer<
               ? DispatchOutcome.Work({
                   result: {
                     title: `feat: ${input.ticket.title} (${input.ticket.id})`,
-                    body: input.ticket.goal,
+                    body: input.ticket.body,
                     commitSha: 'deadbeef',
                     usage: {
                       model: input.model,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { homedir } from 'node:os';
 import { Args, Command, Options } from '@effect/cli';
-import { FetchHttpClient, type FileSystem } from '@effect/platform';
+import { FetchHttpClient, FileSystem } from '@effect/platform';
 import { BunContext, BunRuntime } from '@effect/platform-bun';
 import { Console, Effect, Either, Layer, Logger, Option, Schema } from 'effect';
 import {
@@ -54,7 +54,7 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
     return [
       'tickets: 0 tickets found',
       'help[1]:',
-      '  Run `tp ticket add --title "..." --goal "..." --target "<owner/repo>"` to add one',
+      '  Run `tp ticket add --title "..." --body "..." --target "<owner/repo>"` to add one',
     ].join('\n');
   }
   const rows = tickets.map((t) => `  ${t.id},${t.state},${t.target},${t.title}`);
@@ -62,7 +62,7 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
     `tickets[${tickets.length}]{id,state,target,title}:`,
     ...rows,
     'help[1]:',
-    '  Run `tp ticket add --title "..." --goal "..." --target "<owner/repo>"` to add one',
+    '  Run `tp ticket add --title "..." --body "..." --target "<owner/repo>"` to add one',
   ].join('\n');
 };
 
@@ -145,6 +145,7 @@ export const listAction = (opts: {
 /** `tp ticket get <id>` — the merged lifecycle + cost detail view for one ticket. */
 export const getAction = (
   id: TicketId,
+  full = false,
 ): Effect.Effect<string, import('./domain.ts').TicketNotFound, QueueControl> =>
   Effect.gen(function* () {
     const qc = yield* QueueControl;
@@ -158,7 +159,7 @@ export const getAction = (
       cursor: null,
     });
     return [
-      renderTicketHeader(ticket),
+      renderTicketHeader(ticket, { full }),
       renderTrace(ticket, runs, events.items),
       renderTicketCost(id, runs),
     ].join('\n');
@@ -199,29 +200,82 @@ const notFound = (what: string, help: string) =>
 
 // ── tp ticket subcommands ────────────────────────────────────────────────────
 
+const ADD_HELP =
+  'tp ticket add --title "..." --target "<owner/repo>" (--body "..." | --body-file <path|->)';
+
+/** Where a ticket's markdown body comes from once the flags are resolved. */
+export type BodySource =
+  | { readonly kind: 'inline'; readonly value: string }
+  | { readonly kind: 'file'; readonly path: string }
+  | { readonly kind: 'stdin' };
+
+/**
+ * Resolve the mutually-exclusive `--body` / `--body-file` inputs to a single
+ * source (AXI §6: exactly one required, structured error, never an interactive
+ * prompt). `--body-file -` reads stdin. Pure + exported so the xor rules are
+ * unit-tested without touching the filesystem.
+ */
+export const chooseBodySource = (opts: {
+  readonly body: Option.Option<string>;
+  readonly bodyFile: Option.Option<string>;
+}): Either.Either<BodySource, string> => {
+  if (Option.isSome(opts.body) && Option.isSome(opts.bodyFile))
+    return Either.left('pass either --body or --body-file, not both');
+  if (Option.isSome(opts.body)) return Either.right({ kind: 'inline', value: opts.body.value });
+  if (Option.isSome(opts.bodyFile)) {
+    const path = opts.bodyFile.value;
+    return Either.right(path === '-' ? { kind: 'stdin' } : { kind: 'file', path });
+  }
+  return Either.left('a ticket needs a body: pass --body or --body-file');
+};
+
+/** Read the chosen body source to its string, exiting 2 on an unreadable file. */
+const resolveBody = (src: BodySource): Effect.Effect<string, never, FileSystem.FileSystem> => {
+  switch (src.kind) {
+    case 'inline':
+      return Effect.succeed(src.value);
+    case 'stdin':
+      return Effect.promise(() => Bun.stdin.text());
+    case 'file':
+      return FileSystem.FileSystem.pipe(
+        Effect.flatMap((fs) => fs.readFileString(src.path)),
+        Effect.catchAll(() =>
+          usageError(`could not read --body-file ${src.path}`, ADD_HELP).pipe(Effect.as('')),
+        ),
+      );
+  }
+};
+
 const addCommand = Command.make(
   'add',
   {
     title: Options.text('title'),
-    goal: Options.text('goal'),
+    body: Options.text('body').pipe(Options.optional),
+    bodyFile: Options.text('body-file').pipe(Options.optional),
     target: Options.text('target'),
     context: contextOption,
   },
-  ({ context, goal, target, title }) =>
-    withQueue(
+  ({ body, bodyFile, context, target, title }) => {
+    const src = chooseBodySource({ body, bodyFile });
+    if (Either.isLeft(src)) return usageError(src.left, ADD_HELP);
+    return withQueue(
       flagOf(context),
-      addAction({ title, goal, target }).pipe(
-        Effect.flatMap(Console.log),
-        Effect.catchTag('TargetNotConfigured', (e) =>
-          Console.log(
-            [
-              `error: ${e.repo} is not a configured target`,
-              `help: add it to tidepool.config.ts (configured: ${e.configured.join(', ')})`,
-            ].join('\n'),
-          ).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
-        ),
-      ),
-    ),
+      Effect.gen(function* () {
+        const resolved = yield* resolveBody(src.right);
+        return yield* addAction({ title, body: resolved, target }).pipe(
+          Effect.flatMap(Console.log),
+          Effect.catchTag('TargetNotConfigured', (e) =>
+            Console.log(
+              [
+                `error: ${e.repo} is not a configured target`,
+                `help: add it to tidepool.config.ts (configured: ${e.configured.join(', ')})`,
+              ].join('\n'),
+            ).pipe(Effect.zipRight(Effect.sync(() => process.exit(1)))),
+          ),
+        );
+      }),
+    );
+  },
 );
 
 const listCommand = Command.make(
@@ -246,15 +300,15 @@ const listCommand = Command.make(
 
 const getCommand = Command.make(
   'get',
-  { ticket: Args.text({ name: 'ticket' }), context: contextOption },
-  ({ context, ticket }) =>
+  { ticket: Args.text({ name: 'ticket' }), full: Options.boolean('full'), context: contextOption },
+  ({ context, full, ticket }) =>
     withQueue(
       flagOf(context),
       Effect.gen(function* () {
         const decoded = decodeTicketId(ticket);
         if (Either.isLeft(decoded))
           return yield* usageError(`not a ticket id: ${ticket}`, 'tp ticket get tckt_…');
-        return yield* getAction(decoded.right).pipe(
+        return yield* getAction(decoded.right, full).pipe(
           Effect.flatMap(Console.log),
           Effect.catchTag('TicketNotFound', () => notFound(`ticket ${ticket}`, 'tp ticket list')),
         );

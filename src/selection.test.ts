@@ -22,7 +22,7 @@ const ticketIn = (state: TicketState): Ticket =>
   ({
     id: `tckt_${++seq}` as Ticket['id'],
     title: 't',
-    goal: 'g',
+    body: 'g',
     target: 't/repo',
     state,
     branch: null,
