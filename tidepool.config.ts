@@ -21,5 +21,5 @@ export default defineConfig({
   ],
   models: { work: 'openai/gpt-5.5', review: 'openai/gpt-5.5' },
   workers: { max: 1, idleTimeoutSec: 300, maxTtlSec: 3600 },
-  retries: 2,
+  retries: 3,
 });

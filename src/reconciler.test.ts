@@ -828,6 +828,31 @@ describe('reconciler observability', () => {
     }),
   );
 
+  it.effect('worker-side poll Failed retries after 2 failures and fails on the 3rd', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* inProgress(store, 1);
+      const threeRetryConfig: Config = { ...testConfig, retries: 3 };
+      const env = Layer.mergeAll(
+        Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, threeRetryConfig)),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ pollFails: 'worker exited non-zero' }),
+      );
+
+      yield* runSteps(2, env);
+
+      const afterSecondFailure = yield* store.byId(ticket.id);
+      assert.strictEqual(afterSecondFailure.state, 'in_progress');
+      assert.strictEqual(afterSecondFailure.attempts, 2);
+
+      yield* runSteps(2, env);
+
+      const final = yield* store.byId(ticket.id);
+      assert.strictEqual(final.state, 'failed');
+      assert.strictEqual(final.attempts, 3);
+    }),
+  );
+
   it.effect("dispatch RateCapped → rate_capped + reason 'rate-capped' + event", () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
