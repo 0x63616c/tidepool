@@ -2,6 +2,7 @@ import { Clock, Duration, Effect, Schedule } from 'effect';
 import { AppConfig, baseFor, modelsFor } from './config.ts';
 import {
   type AgentFailed,
+  type BreakerEvent,
   deriveStateFromPhase,
   isTerminalPhase,
   type MergeConflict,
@@ -205,6 +206,13 @@ const transitionEvent = (ticketId: TicketId, line: string): RunEvent => ({
   source: 'control-plane',
   ts: Date.now(),
   level: 'info',
+  line,
+});
+
+const breakerEvent = (target: string, line: string): BreakerEvent => ({
+  target,
+  ts: Date.now(),
+  level: 'warn',
   line,
 });
 
@@ -418,6 +426,9 @@ const stepTicket = (
     const worker = yield* AgentWorker;
     const models = modelsFor(config, ticket.target);
     const base = baseFor(config, ticket.target);
+    const breakerOpen = (yield* store.listBreakers()).some(
+      (b) => b.target === ticket.target && b.isOpen,
+    );
 
     const cleanupFailedOpenPr = Effect.gen(function* () {
       const prNumber = ticket.prNumber;
@@ -638,6 +649,7 @@ const stepTicket = (
 
     switch (ticket.phase) {
       case 'queued': {
+        if (breakerOpen) return;
         // The ONE admission gate for `workers.max` (Decision 1: caps the whole
         // pipeline, not just live Jobs) — every other transition below moves a
         // ticket between two states that already hold its slot, so it never
@@ -664,6 +676,8 @@ const stepTicket = (
           yield* pollInFlight(ticket.workHandle);
           return;
         }
+
+        if (breakerOpen) return;
 
         // Resume guard: this attempt's work already produced the open PR →
         // advance to reviewing rather than re-dispatching the agent (resumability).
@@ -731,6 +745,8 @@ const stepTicket = (
           yield* pollInFlight(ticket.workHandle);
           return;
         }
+
+        if (breakerOpen) return;
 
         const prNumber = ticket.prNumber;
         if (prNumber === null) {
@@ -819,6 +835,7 @@ const stepTicket = (
       }
 
       case 'merging': {
+        if (breakerOpen) return;
         const prNumber = ticket.prNumber;
         if (prNumber === null) {
           // Inconsistent: nothing to merge. Re-drive work.
@@ -939,17 +956,23 @@ const stepTicket = (
         const ci = yield* forge.checksForCommitOnMain({ repo: ticket.target, sha });
         if (ci === 'pending') return;
         if (ci === 'red') {
-          yield* Effect.logWarning('main checks red after merge; holding ticket').pipe(
-            Effect.annotateLogs({ sha }),
-          );
-          yield* store.patch(ticket.id, {
-            conditions: [{ type: 'main_red', sha }],
+          const before = yield* store.listBreakers();
+          const wasOpen = before.some((b) => b.target === ticket.target && b.isOpen);
+          const now = yield* Clock.currentTimeMillis;
+          yield* store.openBreaker({
+            target: ticket.target,
             reason: 'main-red',
+            sha,
+            now,
           });
-          yield* store.appendEvents([
-            failureEvent(ticket.id, `main checks red after merge: ${sha}`),
-            transitionEvent(ticket.id, `condition set: main_red (${sha})`),
-          ]);
+          if (!wasOpen) {
+            const line = `breaker opened: main red (${sha})`;
+            yield* Effect.logError(line).pipe(Effect.annotateLogs({ target: ticket.target, sha }));
+            yield* store.appendBreakerEvents([breakerEvent(ticket.target, line)]);
+          }
+          yield* store.appendEvents(
+            wasOpen ? [] : [failureEvent(ticket.id, `main checks red after merge: ${sha}`)],
+          );
           return;
         }
         yield* Effect.logInfo('main checks green; ticket done').pipe(Effect.annotateLogs({ sha }));
@@ -1066,6 +1089,23 @@ export const step: Effect.Effect<void, never, TicketStore | Forge | AgentWorker 
   Effect.gen(function* () {
     const store = yield* TicketStore;
     const config = yield* AppConfig;
+    const forge = yield* Forge;
+
+    const breakers = yield* store.listBreakers();
+    for (const breaker of breakers.filter((b) => b.isOpen)) {
+      const ref = breaker.sha ?? baseFor(config, breaker.target);
+      const ci = yield* forge
+        .checksForCommitOnMain({ repo: breaker.target, sha: ref })
+        .pipe(Effect.catchTag('ForgeError', () => Effect.succeed('pending' as const)));
+      if (ci !== 'green') continue;
+      const now = yield* Clock.currentTimeMillis;
+      const closed = yield* store.closeBreaker(breaker.target, now);
+      if (closed === null) continue;
+      const line = 'breaker closed: main green';
+      yield* Effect.logError(line).pipe(Effect.annotateLogs({ target: breaker.target }));
+      yield* store.appendBreakerEvents([breakerEvent(breaker.target, line)]);
+    }
+
     const tickets = yield* store.list();
 
     // ONE aggregate line per CHANGE in who's waiting on `workers.max`, not an

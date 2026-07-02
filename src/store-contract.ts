@@ -492,5 +492,48 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
         assert.deepStrictEqual(fetched, created);
       }),
     );
+
+    it.effect('open breaker rows and breaker events survive a reopen', () =>
+      Effect.gen(function* () {
+        const medium = yield* makeMedium;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            yield* store.openBreaker({
+              target: 't/repo',
+              reason: null,
+              sha: null,
+              now: 100,
+            });
+            yield* store.appendBreakerEvents([
+              { target: 't/repo', ts: 100, level: 'warn', line: 'breaker opened' },
+            ]);
+          }),
+        );
+        const reread = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* medium.open;
+            return {
+              breakers: yield* store.listBreakers(),
+              events: yield* store.breakerEvents(),
+            };
+          }),
+        );
+        assert.deepStrictEqual(reread.breakers, [
+          {
+            target: 't/repo',
+            isOpen: true,
+            reason: null,
+            sha: null,
+            since: 100,
+            updatedAt: 100,
+          },
+        ]);
+        assert.deepStrictEqual(
+          reread.events.map((e) => e.line),
+          ['breaker opened'],
+        );
+      }),
+    );
   });
 };

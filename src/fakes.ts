@@ -1,7 +1,9 @@
 import { Effect, Layer, Ref } from 'effect';
 import {
   AgentFailed,
+  type BreakerEvent,
   type CIStatus,
+  type CircuitBreaker,
   CredentialError,
   MergeConflict,
   makeWorkHandle,
@@ -44,6 +46,8 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
   const tickets = yield* Ref.make<ReadonlyArray<Ticket>>([]);
   const runs = yield* Ref.make<ReadonlyArray<Run>>([]);
   const events = yield* Ref.make<ReadonlyArray<RunEvent>>([]);
+  const breakers = yield* Ref.make<ReadonlyArray<CircuitBreaker>>([]);
+  const breakerEvents = yield* Ref.make<ReadonlyArray<BreakerEvent>>([]);
 
   const api: TicketStoreApi = {
     add: (input) =>
@@ -109,6 +113,34 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
             (q.source === undefined || e.source === q.source),
         ),
       ),
+    listBreakers: () => Ref.get(breakers),
+    openBreaker: (input) =>
+      Ref.modify(breakers, (cur) => {
+        const existing = cur.find((b) => b.target === input.target);
+        const next: CircuitBreaker = {
+          target: input.target,
+          isOpen: true,
+          reason: input.reason,
+          sha: input.sha,
+          since: existing?.isOpen === true ? existing.since : input.now,
+          updatedAt: input.now,
+        };
+        return [
+          next,
+          existing === undefined
+            ? [...cur, next]
+            : cur.map((b) => (b.target === input.target ? next : b)),
+        ];
+      }),
+    closeBreaker: (target, now) =>
+      Ref.modify(breakers, (cur) => {
+        const existing = cur.find((b) => b.target === target);
+        if (existing === undefined || !existing.isOpen) return [null, cur];
+        const next: CircuitBreaker = { ...existing, isOpen: false, updatedAt: now };
+        return [next, cur.map((b) => (b.target === target ? next : b))];
+      }),
+    appendBreakerEvents: (evs) => Ref.update(breakerEvents, (cur) => [...cur, ...evs]),
+    breakerEvents: () => Ref.get(breakerEvents),
   };
 
   return api;

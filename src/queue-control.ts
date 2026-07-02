@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Schema } from 'effect';
 import { AppConfig, configuredRepos } from './config.ts';
-import type { NewTicket, Run, Ticket, TicketNotFound } from './domain.ts';
+import type { CircuitBreaker, NewTicket, Run, Ticket, TicketNotFound } from './domain.ts';
 import { type RunEvent, RunSource } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
 import { TicketStore } from './services.ts';
@@ -53,6 +53,7 @@ export class TargetNotConfigured extends Schema.TaggedError<TargetNotConfigured>
 export interface QueueControlApi {
   readonly add: (input: NewTicket) => Effect.Effect<Ticket, TargetNotConfigured>;
   readonly list: (q: ListTicketsQuery) => Effect.Effect<Page<Ticket>>;
+  readonly breakers: () => Effect.Effect<ReadonlyArray<CircuitBreaker>>;
   readonly get: (id: TicketId) => Effect.Effect<Ticket, TicketNotFound>;
   readonly runsFor: (id: TicketId) => Effect.Effect<ReadonlyArray<Run>, TicketNotFound>;
   readonly events: (q: EventsQuery) => Effect.Effect<Page<RunEvent>, TicketNotFound>;
@@ -97,6 +98,7 @@ export const LocalQueueControl = Layer.effect(
             return paginateById([...filtered].reverse(), q.limit, q.cursor);
           }),
         ),
+      breakers: () => store.listBreakers(),
       get: (id) => store.byId(id),
       runsFor: (id) => store.byId(id).pipe(Effect.flatMap(() => store.runsFor(id))),
       events: (q) => {

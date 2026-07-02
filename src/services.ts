@@ -1,7 +1,9 @@
 import { Context, Data, type Effect } from 'effect';
 import type {
   AgentFailed,
+  BreakerEvent,
   CIStatus,
+  CircuitBreaker,
   CredentialError,
   ForgeError,
   MergeConflict,
@@ -70,6 +72,16 @@ export interface TicketStoreApi {
   readonly appendEvents: (events: ReadonlyArray<RunEvent>) => Effect.Effect<void>;
   /** Read events oldest-first, narrowed by ticket / run / source. */
   readonly eventsFor: (q: EventQuery) => Effect.Effect<ReadonlyArray<RunEvent>>;
+  readonly listBreakers: () => Effect.Effect<ReadonlyArray<CircuitBreaker>>;
+  readonly openBreaker: (input: {
+    readonly target: string;
+    readonly reason: string | null;
+    readonly sha: string | null;
+    readonly now: number;
+  }) => Effect.Effect<CircuitBreaker>;
+  readonly closeBreaker: (target: string, now: number) => Effect.Effect<CircuitBreaker | null>;
+  readonly appendBreakerEvents: (events: ReadonlyArray<BreakerEvent>) => Effect.Effect<void>;
+  readonly breakerEvents: () => Effect.Effect<ReadonlyArray<BreakerEvent>>;
 }
 
 export class TicketStore extends Context.Tag('TicketStore')<TicketStore, TicketStoreApi>() {}

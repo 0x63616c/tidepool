@@ -32,6 +32,15 @@ const testConfig: Config = defineConfig({
   retries: 3,
 });
 
+const twoTargetConfig: Config = defineConfig({
+  ...testConfig,
+  targets: [
+    { repo: 't/repo', base: 'main', models: { work: 'm', review: 'm' } },
+    { repo: 'other/repo', base: 'main', models: { work: 'm', review: 'm' } },
+  ],
+  workers: { ...testConfig.workers, max: 10 },
+});
+
 const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
 
 const baseLayers = (store: TicketStoreApi, config: Config = testConfig) =>
@@ -571,9 +580,125 @@ describe('transition table: verifying', () => {
 
         const t = yield* store.byId(ticket.id);
         assert.strictEqual(t.phase, 'verifying');
-        assert.deepStrictEqual(t.conditions, [{ type: 'main_red', sha: 'abc123' }]);
+        assert.deepStrictEqual(t.conditions, []);
         assert.strictEqual(t.attempts, 0);
+        const breakers = yield* store.listBreakers();
+        assert.strictEqual(breakers[0]?.target, 't/repo');
+        assert.strictEqual(breakers[0]?.isOpen, true);
+        assert.strictEqual(breakers[0]?.sha, 'abc123');
+        const events = yield* store.breakerEvents();
+        assert.include(
+          events.map((e) => e.line),
+          'breaker opened: main red (abc123)',
+        );
       }),
+  );
+});
+
+describe('transition table: target circuit breaker', () => {
+  it.effect('open breaker freezes admissions, new dispatches, and merges for that target', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      yield* store.openBreaker({ target: 't/repo', reason: 'main-red', sha: 'bad', now: 1 });
+      const queued = yield* store.add({ ...newTicket, title: 'Queued' });
+      const working = yield* store.add({ ...newTicket, title: 'Working' });
+      yield* store.patch(working.id, { phase: 'working' });
+      const reviewing = yield* store.add({ ...newTicket, title: 'Reviewing' });
+      yield* store.patch(reviewing.id, { phase: 'reviewing', prNumber: 7, prId: newPrId() });
+      const merging = yield* store.add({ ...newTicket, title: 'Merging' });
+      yield* store.patch(merging.id, {
+        phase: 'merging',
+        branch: 'tp/x',
+        prNumber: 8,
+        prId: newPrId(),
+      });
+      const dispatches: DispatchInput[] = [];
+      const merges: number[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store, twoTargetConfig),
+        fakeForge({ mainCi: 'red', onMerge: ({ prNumber }) => merges.push(prNumber) }),
+        fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+      );
+
+      yield* runSteps(1, env);
+
+      assert.strictEqual((yield* store.byId(queued.id)).phase, 'queued');
+      assert.strictEqual((yield* store.byId(working.id)).phase, 'working');
+      assert.strictEqual((yield* store.byId(reviewing.id)).phase, 'reviewing');
+      assert.strictEqual((yield* store.byId(merging.id)).phase, 'merging');
+      assert.strictEqual(dispatches.length, 0);
+      assert.deepStrictEqual(merges, []);
+    }),
+  );
+
+  it.effect('CI-red judgment is deferred while breaker is open', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      yield* store.openBreaker({ target: 't/repo', reason: 'main-red', sha: 'bad', now: 1 });
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, { phase: 'reviewing', prNumber: 7, prId: newPrId() });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'red', mainCi: 'red' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(3, env);
+
+      const t = yield* store.byId(ticket.id);
+      assert.strictEqual(t.phase, 'reviewing');
+      assert.strictEqual(t.attempts, 0);
+      assert.isNull(t.reason);
+    }),
+  );
+
+  it.effect(
+    'green main closes every open breaker, including null reason/SHA, and resumes held tickets',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        yield* store.openBreaker({ target: 't/repo', reason: null, sha: null, now: 1 });
+        const ticket = yield* store.add(newTicket);
+        yield* store.patch(ticket.id, { phase: 'working' });
+        const dispatches: DispatchInput[] = [];
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ mainCi: 'green' }),
+          fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+        );
+
+        yield* runSteps(1, env);
+
+        assert.strictEqual((yield* store.listBreakers())[0]?.isOpen, false);
+        assert.deepStrictEqual(
+          dispatches.map((d) => d.kind),
+          ['work'],
+        );
+        const events = yield* store.breakerEvents();
+        assert.include(
+          events.map((e) => e.line),
+          'breaker closed: main green',
+        );
+      }),
+  );
+
+  it.effect('tickets of other targets are unaffected by an open breaker', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      yield* store.openBreaker({ target: 't/repo', reason: 'main-red', sha: 'bad', now: 1 });
+      const frozen = yield* store.add({ ...newTicket, title: 'Frozen' });
+      const other = yield* store.add({ ...newTicket, title: 'Other', target: 'other/repo' });
+      const env = Layer.mergeAll(
+        baseLayers(store, twoTargetConfig),
+        fakeForge({ mainCi: 'red' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(1, env);
+
+      assert.strictEqual((yield* store.byId(frozen.id)).phase, 'queued');
+      assert.strictEqual((yield* store.byId(other.id)).phase, 'working');
+    }),
   );
 });
 

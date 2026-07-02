@@ -310,6 +310,14 @@ everything upstream). Two levels:
   set/clear appends a control-plane ticket event. The reconciler is still the only mover and
   resumable — the handle on the ticket is the reattach point. Bounded retries → then `failed`
   (surfaced, never crash).
+- **Per-target main-red circuit breaker.** If a verifying ticket sees main red for a target, the
+  reconciler opens a durable `circuit_breakers` row for that target and appends a ticket-independent
+  breaker event. While open, that target admits no queued tickets, dispatches no new work/review runs,
+  performs no merges, and defers PR CI-red judgments so unrelated tickets do not burn attempts against
+  a broken base. In-flight workers may still be polled. Each round re-checks every open breaker row;
+  main green closes it cause-agnostically (including rows with null reason/SHA) and held tickets resume
+  from their unchanged phases. Other targets are unaffected, and `tp ticket list` prints open breaker
+  status so a frozen queue is self-explanatory.
 - **Closed-loop PR-state reconciliation.** `done` used to happen only as a side-effect of the
   reconciler's OWN successful `forge.merge()` call — the loop never asked GitHub "is this PR
   actually merged?" That leaves three windows where `PR merged ∧ ticket ≠ done`: (1) an external/

@@ -242,6 +242,24 @@ export const RunEvent = Schema.Struct({
 });
 export type RunEvent = typeof RunEvent.Type;
 
+export const CircuitBreaker = Schema.Struct({
+  target: Schema.String,
+  isOpen: Schema.Boolean,
+  reason: Schema.NullOr(Schema.String),
+  sha: Schema.NullOr(Schema.String),
+  since: Schema.Number,
+  updatedAt: Schema.Number,
+});
+export type CircuitBreaker = typeof CircuitBreaker.Type;
+
+export const BreakerEvent = Schema.Struct({
+  target: Schema.String,
+  ts: Schema.Number,
+  level: EventLevel,
+  line: Schema.String,
+});
+export type BreakerEvent = typeof BreakerEvent.Type;
+
 export const CIStatus = Schema.Literal('pending', 'green', 'red');
 export type CIStatus = typeof CIStatus.Type;
 

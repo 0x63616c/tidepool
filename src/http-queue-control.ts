@@ -43,6 +43,7 @@ export const HttpQueueControl = (
               },
             })
             .pipe(Effect.orDie),
+        breakers: () => client.tickets.breakers().pipe(Effect.orDie),
         get: (id) => client.tickets.get({ path: { id } }).pipe(domainOnly('TicketNotFound')),
         runsFor: (id) => client.tickets.runs({ path: { id } }).pipe(domainOnly('TicketNotFound')),
         events: (q) =>

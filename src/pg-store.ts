@@ -139,6 +139,30 @@ const migration0005ContentionCount = Effect.gen(function* () {
   yield* sql`ALTER TABLE tickets ADD COLUMN contention_count INTEGER NOT NULL DEFAULT 0`;
 });
 
+const migration0006CircuitBreakers = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    CREATE TABLE circuit_breakers (
+      seq BIGINT GENERATED ALWAYS AS IDENTITY,
+      target TEXT PRIMARY KEY,
+      is_open BOOLEAN NOT NULL,
+      reason TEXT,
+      sha TEXT,
+      since BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    )
+  `;
+  yield* sql`
+    CREATE TABLE breaker_events (
+      seq BIGINT GENERATED ALWAYS AS IDENTITY,
+      target TEXT NOT NULL,
+      ts BIGINT NOT NULL,
+      level TEXT NOT NULL,
+      line TEXT NOT NULL
+    )
+  `;
+});
+
 /** The migration set, shared by the on-boot migrator and the store open path. */
 export const pgMigrations: Record<string, Effect.Effect<void, unknown, SqlClient.SqlClient>> = {
   '0001_init': migration0001Init,
@@ -146,6 +170,7 @@ export const pgMigrations: Record<string, Effect.Effect<void, unknown, SqlClient
   '0003_run_ledger': migration0003RunLedger,
   '0004_ticket_phase_conditions': migration0004TicketPhaseConditions,
   '0005_contention_count': migration0005ContentionCount,
+  '0006_circuit_breakers': migration0006CircuitBreakers,
 };
 
 /**

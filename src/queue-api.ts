@@ -1,6 +1,14 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from '@effect/platform';
 import { Schema } from 'effect';
-import { NewTicket, Run, RunEvent, RunSource, Ticket, TicketNotFound } from './domain.ts';
+import {
+  CircuitBreaker,
+  NewTicket,
+  Run,
+  RunEvent,
+  RunSource,
+  Ticket,
+  TicketNotFound,
+} from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
 import { Page, TargetNotConfigured } from './queue-control.ts';
 
@@ -43,6 +51,7 @@ const tickets = HttpApiGroup.make('tickets')
       .addError(TargetNotConfigured, { status: 422 }),
   )
   .add(HttpApiEndpoint.get('list', '/tickets').setUrlParams(ListParams).addSuccess(Page(Ticket)))
+  .add(HttpApiEndpoint.get('breakers', '/breakers').addSuccess(Schema.Array(CircuitBreaker)))
   .add(
     HttpApiEndpoint.get('get', '/tickets/:id')
       .setPath(IdPath)
