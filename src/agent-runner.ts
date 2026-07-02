@@ -298,7 +298,7 @@ export const makeOpencodeAgentRunner = (creds: WorkerCredentials): OpencodeRunne
             model: input.model,
             prompt: reviewPrompt(input.ticket, diff),
           });
-          return { verdict: parseVerdict(text), usage };
+          return { verdict: parseVerdict(text), reason: text, usage };
         },
         catch: mapAgentError,
       }),

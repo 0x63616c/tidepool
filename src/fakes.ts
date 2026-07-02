@@ -195,6 +195,8 @@ export interface FakeAgentWorkerOptions {
   readonly cloudInitLog?: string;
   /** Capture payload to attach to the ReviewResult. */
   readonly reviewTranscript?: ReadonlyArray<unknown>;
+  /** The reviewer's free-text reason attached to the ReviewResult (defaults to a canned line). */
+  readonly reviewReason?: string;
   /** Force `poll` to report the worker still in flight (drives the wait + reaper paths). */
   readonly stuckRunning?: boolean;
   /** Force `poll` to report a worker-side failure (drives the async `Failed` branch). */
@@ -242,6 +244,7 @@ export const fakeAgentWorker = (opts: FakeAgentWorkerOptions = {}): Layer.Layer<
               : DispatchOutcome.Review({
                   result: {
                     verdict: opts.verdict ?? 'approve',
+                    reason: opts.reviewReason ?? 'fake review: looks good',
                     usage: { model: input.model, tokensIn: 20, tokensOut: 10, wallTimeSec: 0.5 },
                     ...(opts.reviewTranscript === undefined
                       ? {}

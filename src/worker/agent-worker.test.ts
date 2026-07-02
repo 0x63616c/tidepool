@@ -167,6 +167,80 @@ describe('agent-worker dispatch', () => {
       `expected the startup log to carry sha=dev; got: ${JSON.stringify(lines)}`,
     );
   });
+
+  it('stamps the run-id annotation on every log line (fail-open to dev when unset)', async () => {
+    const original = process.env.TIDEPOOL_RUN_ID;
+    delete process.env.TIDEPOOL_RUN_ID;
+    const lines: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message, annotations }) => {
+        const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(
+          ' ',
+        );
+        lines.push(`${String(message)} ${ann}`.trim());
+      }),
+    );
+    try {
+      await Effect.runPromise(
+        makeAgentWorkerProgram({
+          git: fakeGit,
+          opencode: fakeOpencode('done'),
+          format: fakeFormat,
+          ensureDir: () => Promise.resolve(),
+          readConfig: () => Promise.resolve(JSON.stringify(workConfig)),
+          emit: () => {},
+        }).pipe(Effect.provide(capture)),
+      );
+    } finally {
+      if (original === undefined) delete process.env.TIDEPOOL_RUN_ID;
+      else process.env.TIDEPOOL_RUN_ID = original;
+    }
+    assert.isTrue(
+      lines.some(
+        (l) => l.startsWith('work run: branch=tp/tckt_x-do-thing') && l.includes('runId=dev'),
+      ),
+      `expected the startup log to carry runId=dev; got: ${JSON.stringify(lines)}`,
+    );
+  });
+
+  it('threads a real TIDEPOOL_RUN_ID (the reconciler-minted dispatch handle) onto every log line', async () => {
+    const original = process.env.TIDEPOOL_RUN_ID;
+    process.env.TIDEPOOL_RUN_ID = 'work-tckt-ab12cd-x7q2';
+    const lines: string[] = [];
+    const capture = Logger.replace(
+      Logger.defaultLogger,
+      Logger.make(({ message, annotations }) => {
+        const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(
+          ' ',
+        );
+        lines.push(`${String(message)} ${ann}`.trim());
+      }),
+    );
+    try {
+      await Effect.runPromise(
+        makeAgentWorkerProgram({
+          git: fakeGit,
+          opencode: fakeOpencode('done'),
+          format: fakeFormat,
+          ensureDir: () => Promise.resolve(),
+          readConfig: () => Promise.resolve(JSON.stringify(workConfig)),
+          emit: () => {},
+        }).pipe(Effect.provide(capture)),
+      );
+    } finally {
+      if (original === undefined) delete process.env.TIDEPOOL_RUN_ID;
+      else process.env.TIDEPOOL_RUN_ID = original;
+    }
+    assert.isTrue(
+      lines.some(
+        (l) =>
+          l.startsWith('work run: branch=tp/tckt_x-do-thing') &&
+          l.includes('runId=work-tckt-ab12cd-x7q2'),
+      ),
+      `expected the startup log to carry the real runId; got: ${JSON.stringify(lines)}`,
+    );
+  });
 });
 
 describe('describeConfig', () => {

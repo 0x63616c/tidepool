@@ -1,5 +1,6 @@
 import type { Config } from './config.ts';
 import type { Ticket, TicketState } from './domain.ts';
+import type { TicketId } from './ids.ts';
 
 /**
  * Ticket selection — the ONE question the reconciler asks before letting a
@@ -56,4 +57,26 @@ export interface TicketSelector {
 export const fifoSelector: TicketSelector = {
   admit: (tickets, config) =>
     tickets.filter((t) => PIPELINE_OCCUPIED.includes(t.state)).length < config.workers.max,
+};
+
+/**
+ * Which BACKLOG tickets are waiting because `workers.max` is full — a
+ * ROUND-level view (given one ticket snapshot) rather than `admit`'s per-ticket
+ * one, used ONLY to power the reconciler's aggregate "cap full" log line so a
+ * whole tick can be summarized in ONE line instead of an identical INFO per
+ * deferred ticket, every 5s, forever. Never used for actual admission — that
+ * stays `admit`, re-read fresh per ticket inside `stepTicket` (race-free within
+ * a round, see its doc comment); this is a read-only approximation of the same
+ * FIFO-order-plus-free-slots rule, for reporting.
+ */
+export const deferredBacklog = (
+  tickets: ReadonlyArray<Ticket>,
+  config: Config,
+): ReadonlyArray<TicketId> => {
+  const occupied = tickets.filter((t) => PIPELINE_OCCUPIED.includes(t.state)).length;
+  const free = Math.max(0, config.workers.max - occupied);
+  return tickets
+    .filter((t) => t.state === 'backlog')
+    .slice(free)
+    .map((t) => t.id);
 };

@@ -1,7 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import { defineConfig } from './config.ts';
 import type { Ticket, TicketState } from './domain.ts';
-import { fifoSelector, PIPELINE_OCCUPIED } from './selection.ts';
+import { deferredBacklog, fifoSelector, PIPELINE_OCCUPIED } from './selection.ts';
 
 /**
  * `fifoSelector` — pure, no Effect/DI needed (that's the point of the seam:
@@ -78,6 +78,43 @@ describe('fifoSelector.admit', () => {
     assert.isTrue(fifoSelector.admit([ticketIn('running')], config)); // 1 occupied < 2
     assert.isFalse(
       fifoSelector.admit([ticketIn('running'), ticketIn('review')], config), // 2 occupied >= 2
+    );
+  });
+});
+
+describe('deferredBacklog', () => {
+  // A round-level (not per-ticket) view of who's waiting — feeds the reconciler's
+  // aggregate 'cap full' log line so it can summarize a whole tick in ONE line
+  // instead of an identical INFO per deferred ticket, every 5s, forever.
+
+  it('reports nothing deferred when there is a free slot', () => {
+    assert.deepStrictEqual(deferredBacklog([ticketIn('backlog')], configWithMax(1)), []);
+  });
+
+  it('defers every backlog ticket when the cap is already full', () => {
+    const occupied = ticketIn('running');
+    const waiting = [ticketIn('backlog'), ticketIn('backlog')];
+    assert.deepStrictEqual(
+      deferredBacklog([occupied, ...waiting], configWithMax(1)),
+      waiting.map((t) => t.id),
+    );
+  });
+
+  it('defers only the overflow past the free slots, in list (FIFO) order', () => {
+    const first = ticketIn('backlog');
+    const second = ticketIn('backlog');
+    const third = ticketIn('backlog');
+    // max=2, nothing occupied yet → 2 free slots → the first 2 admit, the 3rd waits.
+    assert.deepStrictEqual(deferredBacklog([first, second, third], configWithMax(2)), [third.id]);
+  });
+
+  it('never defers non-backlog tickets', () => {
+    assert.deepStrictEqual(
+      deferredBacklog(
+        [ticketIn('running'), ticketIn('done'), ticketIn('failed')],
+        configWithMax(1),
+      ),
+      [],
     );
   });
 });

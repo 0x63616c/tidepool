@@ -132,6 +132,8 @@ export interface WorkResult {
 
 export interface ReviewResult {
   readonly verdict: ReviewVerdict;
+  /** The reviewer's free-text output `verdict` was parsed from — logged alongside it (tckt_4utv62nij6) so a `request_changes` is greppable WHY, not just WHAT. */
+  readonly reason: string;
   readonly usage: Usage;
   readonly transcript?: ReadonlyArray<unknown>;
 }

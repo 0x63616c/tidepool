@@ -11,7 +11,7 @@ import type {
 } from './domain.ts';
 import { shortGitSha } from './git-sha.ts';
 import { newRunId, type RunId, type TicketId } from './ids.ts';
-import { fifoSelector } from './selection.ts';
+import { deferredBacklog, fifoSelector } from './selection.ts';
 import {
   AgentWorker,
   Forge,
@@ -20,6 +20,10 @@ import {
   type TicketStoreApi,
   type WorkResult,
 } from './services.ts';
+import { truncate } from './strings.ts';
+
+/** Bound a reviewer's free-text reason before it lands in a log line. */
+const REASON_LOG_MAX = 200;
 
 /**
  * The reconciler — the ONLY mover (tenet 3). Every ticket state transition
@@ -117,6 +121,69 @@ const failureEvent = (ticketId: TicketId, line: string): RunEvent => ({
   line,
 });
 
+// ── Log-throttle helpers (pure, DI-free — mirrors fifoSelector/deferredBacklog) ──
+//
+// Both throttles below track EPHEMERAL, in-process state, explicitly NOT
+// persisted: they only decide log cadence, never a ticket transition (tenet 3
+// is unaffected), and reset harmlessly on reconciler restart (a fresh process
+// just re-announces once more, not spam). Kept as pure functions over
+// explicit state (not module mutation) so they're unit-testable in isolation;
+// `step`/`stepTicket` own the one long-lived instance of each map/set.
+
+/** Per-ticket "since when has CI been observed pending" — drives the once-per-streak log. */
+export type CiPendingState = ReadonlyMap<TicketId, number>;
+
+/**
+ * Record one CI-`pending` observation. `shouldLog` is true only the FIRST tick
+ * of a streak (so a PR sitting in CI for minutes logs once, not every 5s);
+ * `elapsedMs` reports how long the streak has run so far.
+ */
+export const observeCiPending = (
+  state: CiPendingState,
+  ticketId: TicketId,
+  now: number,
+): { readonly shouldLog: boolean; readonly elapsedMs: number; readonly state: CiPendingState } => {
+  const since = state.get(ticketId);
+  if (since === undefined) {
+    return { shouldLog: true, elapsedMs: 0, state: new Map(state).set(ticketId, now) };
+  }
+  return { shouldLog: false, elapsedMs: now - since, state };
+};
+
+/** Forget a ticket's pending streak (CI resolved) so the NEXT pending run logs fresh. */
+export const clearCiPending = (state: CiPendingState, ticketId: TicketId): CiPendingState => {
+  if (!state.has(ticketId)) return state;
+  const next = new Map(state);
+  next.delete(ticketId);
+  return next;
+};
+
+/** The set of backlog tickets deferred by `workers.max` as of the last round. */
+export type DeferredSet = ReadonlySet<TicketId>;
+
+/**
+ * Compare this round's deferred-backlog set to the last one `step` logged.
+ * `changed` is true only when membership actually differs (grew, shrank, or
+ * flipped to/from empty) — so a cap that stays full with the SAME waiters
+ * logs once, not every tick.
+ */
+export const diffDeferred = (
+  prev: DeferredSet,
+  current: ReadonlyArray<TicketId>,
+): { readonly changed: boolean; readonly next: DeferredSet } => {
+  const next = new Set(current);
+  const changed = next.size !== prev.size || current.some((id) => !prev.has(id));
+  return { changed, next };
+};
+
+/** One-line summary of `workers.max` backlog pressure, for the aggregate log. */
+export const formatCapFull = (deferred: ReadonlyArray<TicketId>, max: number): string =>
+  `workers.max (${max}) full; ${deferred.length} ticket(s) waiting in backlog`;
+
+/** Ephemeral state owned by the reconciler loop — see the doc comment above. */
+let ciPendingState: CiPendingState = new Map();
+let lastDeferred: DeferredSet = new Set();
+
 /**
  * Bump attempts; fail the ticket once it has burned through `retries`. Routing:
  *  - `rework` retries (the diff is deficient — review requested changes, or CI is
@@ -134,18 +201,27 @@ const retryOrFail = (
   retries: number,
   reason: string,
   opts?: { readonly rework?: boolean },
-): Effect.Effect<unknown, TicketNotFound> => {
-  const attempts = ticket.attempts + 1;
-  const retryState: Ticket['state'] = opts?.rework
-    ? 'in_progress'
-    : ticket.prNumber !== null
-      ? 'review'
-      : 'in_progress';
-  const cleared = { workHandle: null, dispatchedAt: null } as const;
-  return attempts >= retries
-    ? store.patch(ticket.id, { attempts, state: 'failed', reason, ...cleared })
-    : store.patch(ticket.id, { attempts, state: retryState, reason, ...cleared });
-};
+): Effect.Effect<unknown, TicketNotFound> =>
+  Effect.gen(function* () {
+    const attempts = ticket.attempts + 1;
+    const retryState: Ticket['state'] = opts?.rework
+      ? 'in_progress'
+      : ticket.prNumber !== null
+        ? 'review'
+        : 'in_progress';
+    const cleared = { workHandle: null, dispatchedAt: null } as const;
+    const to: Ticket['state'] = attempts >= retries ? 'failed' : retryState;
+    // The ONE place every retry-or-fail decision is logged, regardless of the
+    // 4 call sites (work Failed, CI red, dispatch AgentFailed, review-rejected)
+    // that route through here — each caller ALSO logs its own proximate cause
+    // (e.g. "worker failed; retrying or failing"); this line adds the outcome
+    // (retry vs exhausted) that the caller can't know without duplicating
+    // `retries`/`attempts` bookkeeping.
+    yield* Effect.logInfo(to === 'failed' ? 'attempts exhausted; failing' : 'retrying').pipe(
+      Effect.annotateLogs({ from: ticket.state, to, attempts, retries, reason }),
+    );
+    return yield* store.patch(ticket.id, { attempts, state: to, reason, ...cleared });
+  });
 
 /**
  * Tri-state settle from the forge's ground truth for a ticket's PR — the closed
@@ -213,10 +289,13 @@ const stepTicket = (
         // visible to the next ticket's admission check — `step` runs tickets
         // sequentially (no `concurrency` option) specifically so this
         // read-then-decide is race-free within one pass.
-        if (!fifoSelector.admit(yield* store.list(), config)) {
-          yield* Effect.logInfo('workers.max reached; deferring backlog exit');
-          return;
-        }
+        // Silent by design: `step` logs the whole round's backlog pressure as
+        // ONE aggregate line (see `formatCapFull` + its call site below) rather
+        // than an identical INFO here per deferred ticket, every 5s, forever.
+        if (!fifoSelector.admit(yield* store.list(), config)) return;
+        yield* Effect.logInfo('admitted from backlog').pipe(
+          Effect.annotateLogs({ from: 'backlog', to: 'in_progress' }),
+        );
         yield* store.patch(ticket.id, { state: 'in_progress' });
         return;
       }
@@ -245,6 +324,13 @@ const stepTicket = (
           branch,
           model: models.work,
         });
+        // The handle IS the correlation id (tckt_4utv62nij6): it's already the
+        // k8s Job's name (see k8s-agent-worker.ts), threaded onto the Job's
+        // `TIDEPOOL_RUN_ID` env var and the worker's own log annotations — one
+        // value greps a ticket's flow end-to-end across reconciler + pod logs.
+        yield* Effect.logInfo('dispatched work agent').pipe(
+          Effect.annotateLogs({ branch, runId: handle }),
+        );
         const now = yield* Clock.currentTimeMillis;
         yield* store.patch(ticket.id, {
           branch,
@@ -380,6 +466,19 @@ const stepTicket = (
                 },
               ]);
 
+            // The verdict + WHY were previously invisible in `kubectl logs` — a
+            // `request_changes` looked identical to an approve until you went
+            // digging in the persisted transcript. The full untruncated reason
+            // stays in that transcript (`RunEvent` above); this line is just the
+            // log-signal slice of it.
+            yield* Effect.logInfo('review verdict').pipe(
+              Effect.annotateLogs({
+                pr: ticket.prNumber,
+                verdict: review.verdict,
+                reason: truncate(review.reason, REASON_LOG_MAX),
+              }),
+            );
+
             if (review.verdict === 'request_changes') {
               yield* retryOrFail(store, ticket, config.retries, 'review-rejected', {
                 rework: true,
@@ -439,7 +538,22 @@ const stepTicket = (
         if (yield* settleFromPrState(store, ticket, prNumber, prState)) return;
 
         const ci = yield* forge.checks({ repo: ticket.target, prNumber });
-        if (ci === 'pending') return; // wait; next tick re-checks
+        if (ci === 'pending') {
+          // Log ONCE per pending streak (not every 5s tick) — see the
+          // Log-throttle helpers doc comment above `retryOrFail`.
+          const now = yield* Clock.currentTimeMillis;
+          const observed = observeCiPending(ciPendingState, ticket.id, now);
+          ciPendingState = observed.state;
+          if (observed.shouldLog) {
+            yield* Effect.logInfo('CI pending').pipe(
+              Effect.annotateLogs({ pr: prNumber, elapsedMs: observed.elapsedMs }),
+            );
+          }
+          return; // wait; next tick re-checks
+        }
+        // CI resolved (green or red) — forget the streak so a LATER pending
+        // run (e.g. after a retry re-dispatches work) logs fresh, not silently.
+        ciPendingState = clearCiPending(ciPendingState, ticket.id);
         if (ci === 'red') {
           yield* Effect.logWarning('PR CI red; retrying or failing').pipe(
             Effect.annotateLogs({ pr: prNumber }),
@@ -463,6 +577,10 @@ const stepTicket = (
           prNumber,
           model: models.review,
         });
+        // Same correlation id as the work dispatch above (tckt_4utv62nij6).
+        yield* Effect.logInfo('dispatched review agent').pipe(
+          Effect.annotateLogs({ pr: prNumber, runId: handle }),
+        );
         const now = yield* Clock.currentTimeMillis;
         yield* store.patch(ticket.id, {
           state: 'running',
@@ -478,9 +596,11 @@ const stepTicket = (
         // ever asked to wait out a provider rate limit, not to give up its place.
         // Re-pick it immediately: no PR yet → back to work; PR already open →
         // back to review (CI/review dispatch picks up right where it left off).
-        yield* store.patch(ticket.id, {
-          state: ticket.prNumber !== null ? 'review' : 'in_progress',
-        });
+        const to: Ticket['state'] = ticket.prNumber !== null ? 'review' : 'in_progress';
+        yield* Effect.logInfo('re-picking rate-capped ticket').pipe(
+          Effect.annotateLogs({ from: 'rate_capped', to }),
+        );
+        yield* store.patch(ticket.id, { state: to });
         return;
       }
 
@@ -562,7 +682,27 @@ const NON_TERMINAL: ReadonlyArray<Ticket['state']> = [
 export const step: Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =
   Effect.gen(function* () {
     const store = yield* TicketStore;
+    const config = yield* AppConfig;
     const tickets = yield* store.list();
+
+    // ONE aggregate line per CHANGE in who's waiting on `workers.max`, not an
+    // identical per-ticket INFO every 5s tick forever (the noise this PR
+    // quiets — see the "workers.max reached; deferring backlog exit" removal
+    // in `stepTicket`'s `backlog` case). Computed from the round's snapshot,
+    // BEFORE any ticket in this round dispatches — a slight staleness that
+    // only affects this report, never actual admission (`fifoSelector.admit`,
+    // re-read fresh per ticket inside `stepTicket`).
+    const deferred = deferredBacklog(tickets, config);
+    const diff = diffDeferred(lastDeferred, deferred);
+    if (diff.changed) {
+      lastDeferred = diff.next;
+      yield* deferred.length > 0
+        ? Effect.logInfo(formatCapFull(deferred, config.workers.max)).pipe(
+            Effect.annotateLogs({ waiting: deferred.length, max: config.workers.max }),
+          )
+        : Effect.logInfo('workers.max backlog pressure cleared');
+    }
+
     const active = tickets.filter((t) => NON_TERMINAL.includes(t.state));
     yield* Effect.forEach(active, stepTicket, { discard: true });
   });
