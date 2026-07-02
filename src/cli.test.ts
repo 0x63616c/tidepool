@@ -53,6 +53,24 @@ describe('tp ticket get', () => {
     ),
   );
 
+  it.effect('still shows the full goal + core fields for a ticket with zero runs', () =>
+    run(
+      Effect.gen(function* () {
+        const qcApi = yield* QueueControl;
+        const t = yield* qcApi.add({
+          title: 'no runs yet',
+          goal: 'do the thing\nacross two lines',
+          target: 't/repo',
+        });
+        const view = yield* getAction(t.id);
+        expect(view).toContain('title: no runs yet');
+        expect(view).toContain('do the thing');
+        expect(view).toContain('across two lines');
+        expect(view).toContain('target: t/repo');
+      }),
+    ),
+  );
+
   it.effect('fails TicketNotFound for an unknown ticket id', () =>
     run(
       Effect.gen(function* () {
