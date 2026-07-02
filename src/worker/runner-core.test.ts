@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assert, describe, it } from '@effect/vitest';
-import { Cause, Duration, Effect, Exit, Fiber, TestClock } from 'effect';
+import { Cause, Effect, Exit, Schedule } from 'effect';
 import type { OpencodePort } from './opencode-session.ts';
 import type { RunnerConfig } from './protocol.ts';
 import {
@@ -42,6 +42,8 @@ const assistantInfo = {
   providerID: 'openai',
   tokens: { input: 1200, output: 340 },
 };
+
+const immediateNetworkRetries = Schedule.recurs(2);
 
 interface GitCalls {
   readonly ops: Array<string>;
@@ -234,9 +236,12 @@ describe('makeRunner', () => {
       const { format } = makeFormat({}, calls);
       const { opencode } = makeOpencode();
 
-      const fiber = yield* makeRunner({ git, opencode, format })(config).pipe(Effect.fork);
-      yield* TestClock.adjust(Duration.seconds(1));
-      const result = yield* Fiber.join(fiber);
+      const result = yield* makeRunner({
+        git,
+        opencode,
+        format,
+        gitNetRetrySchedule: immediateNetworkRetries,
+      })(config);
 
       assert.strictEqual(result.commitSha, 'deadbeef');
       assert.strictEqual(cloneAttempts, 2);
@@ -268,11 +273,12 @@ describe('makeRunner', () => {
       const { format } = makeFormat({}, calls);
       const { opencode } = makeOpencode();
 
-      const fiber = yield* makeRunner({ git, opencode, format })({ ...config, dir }).pipe(
-        Effect.fork,
-      );
-      yield* TestClock.adjust(Duration.seconds(1));
-      const result = yield* Fiber.join(fiber);
+      const result = yield* makeRunner({
+        git,
+        opencode,
+        format,
+        gitNetRetrySchedule: immediateNetworkRetries,
+      })({ ...config, dir });
 
       assert.strictEqual(result.commitSha, 'deadbeef');
       assert.strictEqual(cloneAttempts, 2);
@@ -299,9 +305,12 @@ describe('makeRunner', () => {
       const { format } = makeFormat({}, calls);
       const { opencode } = makeOpencode();
 
-      const fiber = yield* makeRunner({ git, opencode, format })(config).pipe(Effect.fork);
-      yield* TestClock.adjust(Duration.seconds(1));
-      const result = yield* Fiber.join(fiber);
+      const result = yield* makeRunner({
+        git,
+        opencode,
+        format,
+        gitNetRetrySchedule: immediateNetworkRetries,
+      })(config);
 
       assert.strictEqual(result.commitSha, 'deadbeef');
       assert.strictEqual(pushAttempts, 2);
@@ -325,12 +334,12 @@ describe('makeRunner', () => {
       const { format } = makeFormat({}, calls);
       const { opencode } = makeOpencode();
 
-      const fiber = yield* makeRunner({ git, opencode, format })(config).pipe(
-        Effect.exit,
-        Effect.fork,
-      );
-      yield* TestClock.adjust(Duration.seconds(3));
-      const exit = yield* Fiber.join(fiber);
+      const exit = yield* makeRunner({
+        git,
+        opencode,
+        format,
+        gitNetRetrySchedule: immediateNetworkRetries,
+      })(config).pipe(Effect.exit);
 
       assert.strictEqual(cloneAttempts, 3);
       assert.strictEqual(
