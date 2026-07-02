@@ -37,10 +37,14 @@ jobs:
         id: prefix
         run: echo "value=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/tidepool" >>"$GITHUB_OUTPUT"
 
-      # Base first (local tag, GHA-cached so an unchanged Dockerfile is a cache
-      # hit instead of the ~6-8min cold rebuild), then the two derived images
-      # build concurrently off it — each references BASE_IMAGE via build-arg,
-      # same as the local `docker build` smoke, just via buildx for caching.
+      # Base first (GHA-cached so an unchanged Dockerfile is a cache hit instead
+      # of the ~6-8min cold rebuild — this is where the expensive apt/opencode
+      # layers live). `--load` puts it in the local docker daemon; the two
+      # derived builds then use plain `docker build` (not buildx), since the
+      # docker-container driver buildx needs for GHA caching can't see a
+      # locally-loaded image for FROM resolution — it tries to pull it from
+      # Docker Hub instead. Derived images are cheap (just COPY app source onto
+      # base), so plain local-daemon builds in parallel is the right tradeoff.
       - name: build base
         run: >
           docker buildx build -f infra/docker/base.Dockerfile
@@ -49,15 +53,13 @@ jobs:
       - name: build control-plane + agent-worker (parallel)
         run: |
           set -eu
-          docker buildx build -f infra/docker/control-plane.Dockerfile \
+          docker build -f infra/docker/control-plane.Dockerfile \
             --build-arg BASE_IMAGE=tidepool-base:latest \
-            --cache-from type=gha,scope=control-plane --cache-to type=gha,scope=control-plane,mode=max \
-            --load -t tidepool-control-plane:latest . &
+            -t tidepool-control-plane:latest . &
           pids=("$!")
-          docker buildx build -f infra/docker/agent-worker.Dockerfile \
+          docker build -f infra/docker/agent-worker.Dockerfile \
             --build-arg BASE_IMAGE=tidepool-base:latest \
-            --cache-from type=gha,scope=agent-worker --cache-to type=gha,scope=agent-worker,mode=max \
-            --load -t tidepool-agent-worker:latest . &
+            -t tidepool-agent-worker:latest . &
           pids+=("$!")
           status=0
           for pid in "${pids[@]}"; do
