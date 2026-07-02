@@ -15,7 +15,10 @@ permissions:
   packages: write
 
 concurrency:
-  group: images-${{ github.ref }}
+  # push-to-main builds keyed by sha — deploy polls ghcr for a specific sha's
+  # image, so one push must never cancel another push's in-flight build.
+  # PR builds still dedupe/cancel by ref.
+  group: images-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 env:
