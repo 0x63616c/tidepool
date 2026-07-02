@@ -12,6 +12,7 @@ import type {
   Run,
   RunEvent,
   RunSource,
+  TargetBreaker,
   Ticket,
   Usage,
   WorkHandle,
@@ -56,6 +57,8 @@ export interface TicketStoreApi {
   readonly add: (input: NewTicket) => Effect.Effect<Ticket>;
   readonly byId: (id: TicketId) => Effect.Effect<Ticket, import('./domain.ts').TicketNotFound>;
   readonly list: () => Effect.Effect<ReadonlyArray<Ticket>>;
+  readonly listBreakers: () => Effect.Effect<ReadonlyArray<TargetBreaker>>;
+  readonly upsertBreaker: (breaker: TargetBreaker) => Effect.Effect<void>;
   readonly patch: (
     id: TicketId,
     patch: TicketPatch,

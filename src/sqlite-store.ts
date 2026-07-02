@@ -162,7 +162,7 @@ export const openSqlite = (
 
     yield* sql`
       CREATE TABLE IF NOT EXISTS run_events (
-        ticket_id TEXT NOT NULL,
+        ticket_id TEXT,
         run_id TEXT,
         box_id TEXT,
         source TEXT NOT NULL,
@@ -171,10 +171,44 @@ export const openSqlite = (
         line TEXT NOT NULL
       )
     `.pipe(Effect.orDie);
+
+    const eventCols = yield* sql<{
+      readonly name: string;
+      readonly notnull: number;
+    }>`PRAGMA table_info(run_events)`.pipe(Effect.orDie);
+    if ((eventCols.find((c) => c.name === 'ticket_id')?.notnull ?? 0) !== 0) {
+      yield* sql`
+        CREATE TABLE run_events_next (
+          ticket_id TEXT,
+          run_id TEXT,
+          box_id TEXT,
+          source TEXT NOT NULL,
+          ts INTEGER NOT NULL,
+          level TEXT,
+          line TEXT NOT NULL
+        )
+      `.pipe(Effect.orDie);
+      yield* sql`
+        INSERT INTO run_events_next (ticket_id, run_id, box_id, source, ts, level, line)
+        SELECT ticket_id, run_id, box_id, source, ts, level, line FROM run_events
+      `.pipe(Effect.orDie);
+      yield* sql`DROP TABLE run_events`.pipe(Effect.orDie);
+      yield* sql`ALTER TABLE run_events_next RENAME TO run_events`.pipe(Effect.orDie);
+    }
+
     yield* sql`CREATE INDEX IF NOT EXISTS run_events_ticket ON run_events (ticket_id)`.pipe(
       Effect.orDie,
     );
     yield* sql`CREATE INDEX IF NOT EXISTS run_events_run ON run_events (run_id)`.pipe(Effect.orDie);
+
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS target_breakers (
+        target TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        reason TEXT,
+        since INTEGER NOT NULL
+      )
+    `.pipe(Effect.orDie);
 
     return sql;
   });

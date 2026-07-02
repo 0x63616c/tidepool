@@ -85,6 +85,22 @@ const sqliteMedium = Effect.sync(() => {
           ('tckt_legacy0005', 'Legacy rate capped review', 'body', 't/repo', 'rate_capped', 7, 0)
       `.pipe(Effect.orDie);
     }),
+    createLegacyRunEventsTable: Effect.gen(function* () {
+      const sql = yield* SqliteClient.make({ filename: path }).pipe(
+        Effect.provide(Reactivity.layer),
+      );
+      yield* sql`
+        CREATE TABLE run_events (
+          ticket_id TEXT NOT NULL,
+          run_id TEXT,
+          box_id TEXT,
+          source TEXT NOT NULL,
+          ts INTEGER NOT NULL,
+          level TEXT,
+          line TEXT NOT NULL
+        )
+      `.pipe(Effect.orDie);
+    }),
   } satisfies StoreMedium;
 });
 

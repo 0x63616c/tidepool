@@ -96,6 +96,14 @@ export const Run = Schema.Struct({
 });
 export type Run = typeof Run.Type;
 
+export const TargetBreaker = Schema.Struct({
+  target: Schema.String,
+  status: Schema.Literal('open', 'closed'),
+  reason: Schema.NullOr(Schema.String),
+  since: Schema.Number,
+});
+export type TargetBreaker = typeof TargetBreaker.Type;
+
 /**
  * Ticket — a first-class store row (the backlog IS the db, never files).
  * `branch`/`prNumber` are the reattach handles; `workedAttempt` records which
@@ -232,7 +240,7 @@ export type EventLevel = typeof EventLevel.Type;
  * read a single durable stream instead of files (tenet 1: state in sqlite).
  */
 export const RunEvent = Schema.Struct({
-  ticketId: TicketId,
+  ticketId: Schema.NullOr(TicketId),
   runId: Schema.NullOr(RunId),
   boxId: Schema.NullOr(BoxId),
   source: RunSource,

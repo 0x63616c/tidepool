@@ -11,6 +11,7 @@ import {
   type ReviewVerdict,
   type Run,
   type RunEvent,
+  type TargetBreaker,
   type Ticket,
   TicketNotFound,
   type WorkHandle,
@@ -42,6 +43,7 @@ import {
  */
 export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(function* () {
   const tickets = yield* Ref.make<ReadonlyArray<Ticket>>([]);
+  const breakers = yield* Ref.make<ReadonlyArray<TargetBreaker>>([]);
   const runs = yield* Ref.make<ReadonlyArray<Run>>([]);
   const events = yield* Ref.make<ReadonlyArray<RunEvent>>([]);
 
@@ -75,6 +77,12 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
         return found ? Effect.succeed(found) : Effect.fail(new TicketNotFound({ id }));
       }),
     list: () => Ref.get(tickets),
+    listBreakers: () => Ref.get(breakers),
+    upsertBreaker: (breaker) =>
+      Ref.update(breakers, (cur) => {
+        const rest = cur.filter((b) => b.target !== breaker.target);
+        return [...rest, breaker];
+      }),
     patch: (id, patch) =>
       Effect.gen(function* () {
         const arr = yield* Ref.get(tickets);

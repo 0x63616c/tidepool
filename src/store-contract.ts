@@ -21,6 +21,8 @@ export interface StoreMedium {
   readonly createLegacyRunsTable?: Effect.Effect<void, never, Scope.Scope>;
   /** Test hook: create a pre-phase tickets table before the store migrates it. */
   readonly createLegacyTicketsTable?: Effect.Effect<void, never, Scope.Scope>;
+  /** Test hook: create run_events before ticket-independent events were allowed. */
+  readonly createLegacyRunEventsTable?: Effect.Effect<void, never, Scope.Scope>;
 }
 
 const newTicket = { title: 'Add slugify', body: 'add slugify(s)', target: 't/repo' };
@@ -152,6 +154,61 @@ export const storeContract = (name: string, makeMedium: Effect.Effect<StoreMediu
           const ids = all.map((t) => t.id);
           assert.strictEqual(all.length, 2);
           assert.isTrue(ids.includes(a.id) && ids.includes(b.id));
+        }),
+      ),
+    );
+
+    it.effect('target breakers persist across reopen', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          const store = yield* medium.open;
+          yield* store.upsertBreaker({
+            target: 't/repo',
+            status: 'open',
+            reason: 'abc123',
+            since: 123,
+          });
+
+          const reopened = yield* medium.open;
+          assert.deepStrictEqual(yield* reopened.listBreakers(), [
+            { target: 't/repo', status: 'open', reason: 'abc123', since: 123 },
+          ]);
+        }),
+      ),
+    );
+
+    it.effect('legacy event table accepts ticket-independent events after migration', () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const medium = yield* makeMedium;
+          if (medium.createLegacyRunEventsTable === undefined) return;
+          yield* medium.createLegacyRunEventsTable;
+          const store = yield* medium.open;
+
+          yield* store.appendEvents([
+            {
+              ticketId: null,
+              runId: null,
+              boxId: null,
+              source: 'control-plane',
+              ts: 1,
+              level: 'info',
+              line: 'system event',
+            },
+          ]);
+
+          assert.deepStrictEqual(yield* store.eventsFor({}), [
+            {
+              ticketId: null,
+              runId: null,
+              boxId: null,
+              source: 'control-plane',
+              ts: 1,
+              level: 'info',
+              line: 'system event',
+            },
+          ]);
         }),
       ),
     );

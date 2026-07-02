@@ -136,7 +136,11 @@ export const listAction = (opts: {
   Effect.gen(function* () {
     const qc = yield* QueueControl;
     const page = yield* qc.list({ limit: opts.limit, cursor: null, target: opts.target });
-    const body = renderTickets(page.items);
+    const breakerLines = page.breakers.map(
+      (b) =>
+        `breaker: ${b.target} main red since ${new Date(b.since).toISOString()}${b.reason === null ? '' : ` (${b.reason})`}`,
+    );
+    const body = [...breakerLines, renderTickets(page.items)].join('\n');
     return page.nextCursor === null
       ? body
       : `${body}\nmore: ${page.items.length} shown — raise --limit to see the rest`;

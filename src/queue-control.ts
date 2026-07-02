@@ -1,7 +1,7 @@
 import { Context, Effect, Layer, Schema } from 'effect';
 import { AppConfig, configuredRepos } from './config.ts';
-import type { NewTicket, Run, Ticket, TicketNotFound } from './domain.ts';
-import { type RunEvent, RunSource } from './domain.ts';
+import type { NewTicket, Run, TicketNotFound } from './domain.ts';
+import { type RunEvent, RunSource, TargetBreaker, Ticket } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
 import { TicketStore } from './services.ts';
 
@@ -20,6 +20,13 @@ import { TicketStore } from './services.ts';
 export const Page = <A, I>(item: Schema.Schema<A, I>) =>
   Schema.Struct({ items: Schema.Array(item), nextCursor: Schema.NullOr(Schema.String) });
 export type Page<A> = { readonly items: ReadonlyArray<A>; readonly nextCursor: string | null };
+
+export const TicketPage = Schema.Struct({
+  items: Schema.Array(Ticket),
+  nextCursor: Schema.NullOr(Schema.String),
+  breakers: Schema.Array(TargetBreaker),
+});
+export type TicketPage = Page<Ticket> & { readonly breakers: ReadonlyArray<TargetBreaker> };
 
 /** `list` query — `limit` bounded, opaque `cursor`, optional `target` repo filter. */
 export const ListTicketsQuery = Schema.Struct({
@@ -52,7 +59,7 @@ export class TargetNotConfigured extends Schema.TaggedError<TargetNotConfigured>
 
 export interface QueueControlApi {
   readonly add: (input: NewTicket) => Effect.Effect<Ticket, TargetNotConfigured>;
-  readonly list: (q: ListTicketsQuery) => Effect.Effect<Page<Ticket>>;
+  readonly list: (q: ListTicketsQuery) => Effect.Effect<TicketPage>;
   readonly get: (id: TicketId) => Effect.Effect<Ticket, TicketNotFound>;
   readonly runsFor: (id: TicketId) => Effect.Effect<ReadonlyArray<Run>, TicketNotFound>;
   readonly events: (q: EventsQuery) => Effect.Effect<Page<RunEvent>, TicketNotFound>;
@@ -91,12 +98,16 @@ export const LocalQueueControl = Layer.effect(
           ? store.add(input)
           : Effect.fail(new TargetNotConfigured({ repo: input.target, configured: repos })),
       list: (q) =>
-        store.list().pipe(
-          Effect.map((ts) => {
-            const filtered = q.target === null ? ts : ts.filter((t) => t.target === q.target);
-            return paginateById([...filtered].reverse(), q.limit, q.cursor);
-          }),
-        ),
+        Effect.zipWith(store.list(), store.listBreakers(), (ts, breakers) => {
+          const filtered = q.target === null ? ts : ts.filter((t) => t.target === q.target);
+          const openBreakers = breakers.filter(
+            (b) => b.status === 'open' && (q.target === null || b.target === q.target),
+          );
+          return {
+            ...paginateById([...filtered].reverse(), q.limit, q.cursor),
+            breakers: openBreakers,
+          };
+        }),
       get: (id) => store.byId(id),
       runsFor: (id) => store.byId(id).pipe(Effect.flatMap(() => store.runsFor(id))),
       events: (q) => {

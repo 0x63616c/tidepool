@@ -2,7 +2,7 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup } from '@effect/platform';
 import { Schema } from 'effect';
 import { NewTicket, Run, RunEvent, RunSource, Ticket, TicketNotFound } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
-import { Page, TargetNotConfigured } from './queue-control.ts';
+import { Page, TargetNotConfigured, TicketPage } from './queue-control.ts';
 
 /**
  * The queue-control HTTP surface — the wire form of `QueueControl`. Read +
@@ -42,7 +42,7 @@ const tickets = HttpApiGroup.make('tickets')
       .addSuccess(Ticket)
       .addError(TargetNotConfigured, { status: 422 }),
   )
-  .add(HttpApiEndpoint.get('list', '/tickets').setUrlParams(ListParams).addSuccess(Page(Ticket)))
+  .add(HttpApiEndpoint.get('list', '/tickets').setUrlParams(ListParams).addSuccess(TicketPage))
   .add(
     HttpApiEndpoint.get('get', '/tickets/:id')
       .setPath(IdPath)

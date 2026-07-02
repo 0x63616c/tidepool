@@ -9,6 +9,7 @@ import {
   type Run,
   type RunEvent,
   type RunStatus,
+  type TargetBreaker,
   type Ticket,
   type TicketNotFound,
   type Usage,
@@ -205,6 +206,16 @@ const transitionEvent = (ticketId: TicketId, line: string): RunEvent => ({
   source: 'control-plane',
   ts: Date.now(),
   level: 'info',
+  line,
+});
+
+const systemEvent = (line: string, level: RunEvent['level'] = 'info'): RunEvent => ({
+  ticketId: null,
+  runId: null,
+  boxId: null,
+  source: 'control-plane',
+  ts: Date.now(),
+  level,
   line,
 });
 
@@ -418,6 +429,9 @@ const stepTicket = (
     const worker = yield* AgentWorker;
     const models = modelsFor(config, ticket.target);
     const base = baseFor(config, ticket.target);
+    const breakerOpen = (yield* store.listBreakers()).some(
+      (b) => b.target === ticket.target && b.status === 'open',
+    );
 
     const cleanupFailedOpenPr = Effect.gen(function* () {
       const prNumber = ticket.prNumber;
@@ -635,6 +649,8 @@ const stepTicket = (
       yield* store.appendEvents([transitionEvent(ticket.id, 'condition cleared: rate_capped')]);
       return;
     }
+
+    if (breakerOpen && ticket.workHandle === null) return;
 
     switch (ticket.phase) {
       case 'queued': {
@@ -939,14 +955,25 @@ const stepTicket = (
         const ci = yield* forge.checksForCommitOnMain({ repo: ticket.target, sha });
         if (ci === 'pending') return;
         if (ci === 'red') {
+          const now = yield* Clock.currentTimeMillis;
           yield* Effect.logWarning('main checks red after merge; holding ticket').pipe(
             Effect.annotateLogs({ sha }),
+          );
+          yield* store.upsertBreaker({
+            target: ticket.target,
+            status: 'open',
+            reason: sha,
+            since: now,
+          });
+          yield* Effect.logError('target breaker opened: main red').pipe(
+            Effect.annotateLogs({ target: ticket.target, sha }),
           );
           yield* store.patch(ticket.id, {
             conditions: [{ type: 'main_red', sha }],
             reason: 'main-red',
           });
           yield* store.appendEvents([
+            systemEvent(`breaker opened for ${ticket.target}: main red (${sha})`, 'error'),
             failureEvent(ticket.id, `main checks red after merge: ${sha}`),
             transitionEvent(ticket.id, `condition set: main_red (${sha})`),
           ]);
@@ -1065,8 +1092,53 @@ const stepTicket = (
 export const step: Effect.Effect<void, never, TicketStore | Forge | AgentWorker | AppConfig> =
   Effect.gen(function* () {
     const store = yield* TicketStore;
+    const forge = yield* Forge;
     const config = yield* AppConfig;
     const tickets = yield* store.list();
+
+    const breakers = yield* store.listBreakers();
+    yield* Effect.forEach(
+      breakers.filter(
+        (b): b is TargetBreaker & { readonly status: 'open'; readonly reason: string } =>
+          b.status === 'open' && b.reason !== null,
+      ),
+      (breaker) =>
+        Effect.gen(function* () {
+          const ci = yield* forge.checksForCommitOnMain({
+            repo: breaker.target,
+            sha: breaker.reason,
+          });
+          if (ci !== 'green') return;
+          const now = yield* Clock.currentTimeMillis;
+          yield* store.upsertBreaker({
+            target: breaker.target,
+            status: 'closed',
+            reason: breaker.reason,
+            since: now,
+          });
+          yield* Effect.logInfo('target breaker closed: main green').pipe(
+            Effect.annotateLogs({ target: breaker.target, sha: breaker.reason }),
+          );
+          for (const ticket of tickets.filter((t) => t.target === breaker.target)) {
+            const conditions = ticket.conditions.filter(
+              (c) => c.type !== 'main_red' || c.sha !== breaker.reason,
+            );
+            if (conditions.length !== ticket.conditions.length) {
+              yield* store.patch(ticket.id, { conditions });
+              yield* store.appendEvents([
+                transitionEvent(ticket.id, `condition cleared: main_red (${breaker.reason})`),
+              ]);
+            }
+          }
+          yield* store.appendEvents([
+            systemEvent(`breaker closed for ${breaker.target}: main green (${breaker.reason})`),
+          ]);
+        }).pipe(
+          Effect.catchTag('ForgeError', () => Effect.void),
+          Effect.catchTag('TicketNotFound', () => Effect.void),
+        ),
+      { discard: true },
+    );
 
     // ONE aggregate line per CHANGE in who's waiting on `workers.max`, not an
     // identical per-ticket INFO every 5s tick forever (the noise this PR

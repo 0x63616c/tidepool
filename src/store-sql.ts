@@ -1,6 +1,6 @@
 import type { SqlClient } from '@effect/sql/SqlClient';
 import { Effect, Either, Schema } from 'effect';
-import { projectTicket, Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
+import { projectTicket, Run, RunEvent, TargetBreaker, Ticket, TicketNotFound } from './domain.ts';
 import { newTicketId, type TicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
 
@@ -25,12 +25,14 @@ const decodeRun = Schema.decodeUnknownSync(Run);
 
 const decodeRunEvent = Schema.decodeUnknownSync(RunEvent);
 
+const decodeBreaker = Schema.decodeUnknownSync(TargetBreaker);
+
 /** Columns aliased back to the domain field names so a row decodes as a Ticket. */
 const TICKET_COLS =
   'id, title, body, target, state, phase, conditions, branch, pr_number AS "prNumber", pr_id AS "prId", merge_sha AS "mergeSha", attempts, contention_count AS "contentionCount", worked_attempt AS "workedAttempt", reason, work_handle AS "workHandle", dispatched_at AS "dispatchedAt"';
 
 interface EventRow {
-  readonly ticketId: string;
+  readonly ticketId: string | null;
   readonly runId: string | null;
   readonly boxId: string | null;
   readonly source: string;
@@ -53,6 +55,13 @@ interface RunRow {
   readonly tokensIn: number | null;
   readonly tokensOut: number | null;
   readonly wallTimeSec: number | null;
+}
+
+interface BreakerRow {
+  readonly target: string;
+  readonly status: string;
+  readonly reason: string | null;
+  readonly since: number;
 }
 
 /**
@@ -88,6 +97,9 @@ const runFromRow = (r: RunRow): Run =>
             wallTimeSec: Number(r.wallTimeSec),
           },
   });
+
+const breakerFromRow = (r: BreakerRow): TargetBreaker =>
+  decodeBreaker({ target: r.target, status: r.status, reason: r.reason, since: Number(r.since) });
 
 /** Decode a ticket row, coercing the numeric columns off the raw driver row. */
 const ticketFromRow = (row: unknown): Ticket => {
@@ -192,6 +204,20 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
         return ticket;
       }),
     byId: (id) => findById(id),
+    listBreakers: () =>
+      sql<BreakerRow>`SELECT target, status, reason, since FROM target_breakers ORDER BY target`.pipe(
+        Effect.orDie,
+        Effect.map((rows) => rows.map(breakerFromRow)),
+      ),
+    upsertBreaker: (breaker) =>
+      sql`
+        INSERT INTO target_breakers (target, status, reason, since)
+        VALUES (${breaker.target}, ${breaker.status}, ${breaker.reason}, ${breaker.since})
+        ON CONFLICT (target) DO UPDATE SET
+          status = excluded.status,
+          reason = excluded.reason,
+          since = excluded.since
+      `.pipe(Effect.orDie),
     list: () =>
       sql`SELECT ${sql.literal(TICKET_COLS)} FROM tickets ORDER BY ${order}`.pipe(
         Effect.orDie,
