@@ -398,8 +398,10 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   queue-control API on a **ClusterIP** Service (`tidepool-control-plane:8080`) — no LoadBalancer, no
   Ingress. `tp`'s `http` context reaches it via `kubectl port-forward` through the already-/32-
   firewalled apiserver, so nothing new is exposed. A context can declare the forward
-  (`namespace`/`service`/`remote-port`/`local-port`) and `tp` opens it **invisibly** per command —
-  the operator never runs the tunnel by hand. **No app-level auth in v1**: reaching the port already
+  (`namespace`/`service`/`remote-port`) and `tp` opens it **invisibly** per command, binding an
+  **ephemeral local port** (kubectl/OS-assigned, parsed off its own "Forwarding from" stdout line) —
+  the operator never runs the tunnel by hand, concurrent `tp` invocations never collide, and an
+  orphaned tunnel from a non-graceful exit never blocks a later one. **No app-level auth in v1**: reaching the port already
   requires kube creds + the VPN /32, so reachability *is* the auth (marked `TODO(tailscale)` in the
   server).
 - **v1.1:** **Tailscale** the box → `tp` over the tailnet (a direct address, no per-command forward),
