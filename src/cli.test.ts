@@ -62,3 +62,34 @@ describe('tp ticket get', () => {
     ),
   );
 });
+
+describe('tp help hints', () => {
+  it('names only invokable subcommands in copy-paste hints', async () => {
+    const sources = await Promise.all(
+      ['./cli.ts', './trace.ts'].map((path) => Bun.file(new URL(path, import.meta.url)).text()),
+    );
+    const hinted = sources.flatMap((source) =>
+      [...source.matchAll(/Run \\?`(?<command>tp [^\\`]+)\\?`/g)].map(
+        (match) => match.groups?.command ?? '',
+      ),
+    );
+    const invokable = [
+      'tp ticket add',
+      'tp ticket list',
+      'tp ticket get',
+      'tp ticket logs',
+      'tp ticket transcript',
+      'tp context list',
+      'tp context current',
+      'tp context use',
+      'tp context set',
+      'tp context delete',
+      'tp doctor',
+    ];
+
+    expect(hinted).not.toEqual([]);
+    expect(
+      hinted.filter((command) => !invokable.some((known) => command.startsWith(known))),
+    ).toEqual([]);
+  });
+});
