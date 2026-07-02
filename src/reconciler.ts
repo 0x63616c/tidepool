@@ -480,7 +480,7 @@ const stepTicket = (
             );
 
             if (review.verdict === 'request_changes') {
-              yield* retryOrFail(store, ticket, config.retries, 'review-rejected', {
+              yield* retryOrFail(store, ticket, config.retries, review.reason, {
                 rework: true,
               });
               return;

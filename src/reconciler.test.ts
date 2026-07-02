@@ -166,7 +166,10 @@ describe('reconciler', () => {
         const env = Layer.mergeAll(
           baseLayers(store),
           fakeForge({ ci: 'green' }),
-          fakeAgentWorker({ verdict: 'request_changes' }),
+          fakeAgentWorker({
+            verdict: 'request_changes',
+            reviewReason: 'Missing verification proof.\nVERDICT: REQUEST_CHANGES',
+          }),
         );
 
         // step 1: review → dispatch review agent → running. step 2: poll the rejection.
@@ -178,6 +181,7 @@ describe('reconciler', () => {
         assert.strictEqual(final.state, 'in_progress');
         assert.strictEqual(final.prNumber, 7);
         assert.strictEqual(final.attempts, 1);
+        assert.strictEqual(final.reason, 'Missing verification proof.\nVERDICT: REQUEST_CHANGES');
         assert.isNull(final.workHandle);
         // The next step re-dispatches WORK against the existing branch (the worker
         // force-pushes so the PR updates), rather than re-grading the same diff.

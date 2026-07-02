@@ -222,6 +222,25 @@ describe('workPrompt / reviewPrompt', () => {
     assert.match(p, /stale/i);
   });
 
+  it('prepends stored review feedback on rework prompts', () => {
+    const feedback =
+      'Missing verification proof and secret-hooks coverage.\nVERDICT: REQUEST_CHANGES';
+    const p = workPrompt(
+      ticket({
+        state: 'in_progress',
+        prNumber: 7,
+        workedAttempt: 0,
+        attempts: 1,
+        reason: feedback,
+      }),
+    );
+    assert.include(
+      p,
+      `A previous review requested changes: ${feedback}. Address them before resubmitting.`,
+    );
+    assert.isTrue(p.startsWith('A previous review requested changes:'));
+  });
+
   it('reviewPrompt grades the diff against the acceptance criteria and embeds both', () => {
     const id = newTicketId();
     const t = ticket({ id, body: '# Acceptance Criteria\n- returns a slug' });

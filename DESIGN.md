@@ -103,7 +103,8 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > `Map<TicketId, number>` — never persisted, since it drives no ticket transition, only log
 > cadence); the review agent's verdict AND its free-text reason are logged together
 > (`"review verdict" {pr, verdict, reason}`, reason bounded by `strings.ts#truncate` — the full
-> text still lands in the persisted transcript `RunEvent`, only the log line is capped);
+> text lands in the persisted transcript `RunEvent` and, for `request_changes`, in the ticket
+> `reason` so the next work prompt can address it; only the log line is capped);
 > `retryOrFail` (used by all 4 retry/fail call sites) now logs its own outcome
 > (`{from, to, attempts, retries, reason}`) so "retry vs exhausted" is never silent; the
 > `backlog`→`in_progress` admit and `rate_capped` re-pick transitions each log a
