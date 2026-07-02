@@ -56,13 +56,25 @@ export const parseVerdict = (text: string): ReviewVerdict => {
   return 'request_changes';
 };
 
+/** commitlint.config.mjs (config-conventional) header-max-length rule. */
+const COMMIT_HEADER_MAX = 100;
+
 /**
  * The commit the runner writes after the agent edits files. The runner owns the
  * message (not the agent) so the graded standard — ticket id first, then a
- * conventional subject — holds mechanically every time.
+ * conventional subject — holds mechanically every time. `ticket.title` is
+ * human-written prose (any case, any length), so it's lower-cased (commitlint's
+ * `subject-case` rejects sentence/start/pascal/upper case) and the header is
+ * truncated to `COMMIT_HEADER_MAX` (commitlint's `header-max-length`) — both
+ * mechanical, not best-effort, so every generated commit is valid regardless of
+ * the ticket title it was built from.
  */
-export const commitMessage = (ticket: { readonly id: string; readonly title: string }): string =>
-  `#${ticket.id} feat: ${ticket.title}`;
+export const commitMessage = (ticket: { readonly id: string; readonly title: string }): string => {
+  const prefix = `#${ticket.id} feat: `;
+  const budget = Math.max(0, COMMIT_HEADER_MAX - prefix.length);
+  const subject = ticket.title.toLowerCase().slice(0, budget).trimEnd();
+  return `${prefix}${subject}`;
+};
 
 // ── opencode orchestration ───────────────────────────────────────────────────
 
