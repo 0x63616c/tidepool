@@ -3,6 +3,7 @@ import { Etag, HttpApiBuilder, HttpPlatform } from '@effect/platform';
 import { BunContext, BunHttpServer, BunRuntime } from '@effect/platform-bun';
 import { Effect, Layer, Logger } from 'effect';
 import type { AppConfig } from './config.ts';
+import { shortGitSha } from './git-sha.ts';
 import { queueApi } from './queue-api.ts';
 import { QueueApiLive } from './queue-api-server.ts';
 import { LocalQueueControl } from './queue-control.ts';
@@ -64,6 +65,13 @@ if (import.meta.main) {
       );
       yield* makeDaemon().pipe(Effect.provide(liveStack()));
     }),
-  ).pipe(Effect.provide(BunContext.layer), Effect.provide(Logger.json));
+  ).pipe(
+    // The reconcile loop already self-stamps (reconciler.ts), but the forked
+    // queue API server's own failure log lives outside that wrap — annotate the
+    // whole pod process here too, so EVERY daemon log line carries the sha.
+    Effect.annotateLogs({ sha: shortGitSha() }),
+    Effect.provide(BunContext.layer),
+    Effect.provide(Logger.json),
+  );
   BunRuntime.runMain(program, { disablePrettyLogger: true });
 }

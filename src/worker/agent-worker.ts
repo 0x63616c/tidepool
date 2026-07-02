@@ -2,7 +2,8 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { BunRuntime } from '@effect/platform-bun';
-import { Cause, Effect, Logger, Schema } from 'effect';
+import { Cause, Effect, HashMap, Logger, Schema } from 'effect';
+import { shortGitSha } from '../git-sha.ts';
 import type { OpencodePort } from './opencode-session.ts';
 import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
 import { bunFormatPort, bunGitPort, makeSdkOpencodePort } from './runner.ts';
@@ -77,11 +78,25 @@ export const makeAgentWorkerProgram = (deps: AgentWorkerDeps): Effect.Effect<voi
         yield* Effect.logInfo('agent-worker[review] result emitted');
       }
     }),
-  ).pipe(Effect.orDie);
+  ).pipe(
+    // Every diagnostic this pod emits carries the short git sha of the dispatching
+    // reconciler (see git-sha.ts) — the same value stamped on the `tidepool/git-sha`
+    // Job label — so a misbehaving run is traceable back to its commit from logs
+    // alone, not just from `kubectl get pods -L tidepool/git-sha`.
+    Effect.annotateLogs({ sha: shortGitSha() }),
+    Effect.orDie,
+  );
 
-/** Logger that writes every diagnostic to stderr, keeping stdout for the one result line. */
-const stderrLogger = Logger.make(({ logLevel, message }) => {
-  process.stderr.write(`[agent-worker] ${logLevel.label} ${String(message)}\n`);
+/**
+ * Logger that writes every diagnostic to stderr, keeping stdout for the one
+ * result line. Renders annotations (notably `sha`, see above) inline so
+ * `kubectl logs` shows them without a JSON viewer.
+ */
+const stderrLogger = Logger.make(({ logLevel, message, annotations }) => {
+  const ann = Array.from(HashMap.entries(annotations), ([k, v]) => `${k}=${String(v)}`).join(' ');
+  process.stderr.write(
+    `[agent-worker] ${logLevel.label} ${ann ? `${ann} ` : ''}${String(message)}\n`,
+  );
 });
 
 /**

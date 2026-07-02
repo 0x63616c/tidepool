@@ -362,6 +362,13 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
   no reverse-engineering a docker digest against CI timestamps. The label lives only on the pod
   template, never the Deployment selector (immutable), and uses the repo's `tidepool/*` label
   namespace (symmetric with `tidepool/role|kind|ticket`), not `app.kubernetes.io/version`.
+- **Commit provenance — `sha` log annotation.** The label above answers "which commit is this pod
+  from" only via `kubectl get -L`; `git-sha.ts` (`shortGitSha`, fail-open `dev`) answers it from the
+  logs themselves — a 7-char slice of the same `TIDEPOOL_GIT_SHA` stamped onto EVERY log line (both
+  apps): the reconciler/daemon process (`reconciler.ts` `reconcileForever`, wrapping the whole loop
+  so every boot + settle-round line carries it) and the agent-worker pod (`worker/agent-worker.ts`,
+  rendered by its stderr logger). So `kubectl logs` alone traces a misbehaving line back to a commit,
+  no cross-referencing the pod label needed.
 
 ### Surface & cost visibility
 - **CLI-first, AXI-compliant; no TUI in v1.** `tp ticket add | list | get | logs | transcript`
