@@ -313,6 +313,11 @@ everything upstream). Two levels:
   idempotent: if the forge already shows the PR merged, the merge is skipped and the ticket settles
   straight to `done` instead of attempting (and erroring on) a duplicate merge.
 - **Auto-merge in v1.** No human gate. Escalates to a human only on repeated failure.
+- **Review rubric.** The review agent grades the diff against the ticket's `# Acceptance Criteria`,
+  with CI status as the mechanical evidence gate. `REQUEST_CHANGES` is for unmet acceptance criteria,
+  likely bugs/regressions, scope violations, or missing tests/checks that the diff itself should add.
+  `APPROVE` is correct for a minimal diff that satisfies acceptance and passes CI, even if process
+  artifacts like in-container proof are not pasted into the PR body.
 
 ### Standards (the spec the review agent grades against — mechanical, not vibes)
 - **IDs:** Stripe-style prefixed — `tckt_`, `run_`, `box_`, `pr_` + short lowercase base36

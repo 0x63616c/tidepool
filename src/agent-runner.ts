@@ -110,13 +110,15 @@ export const workPrompt = (ticket: Ticket): string =>
     'The ticket body below is authored markdown (sections like `# Context`, `# Acceptance Criteria`, `# Relevant Files`, `# Approach`, `# Out of Scope`). It may be stale — verify pointers against the current code; the `# Acceptance Criteria` section is authoritative.',
     ticketBlock(ticket),
     STANDARDS,
+    'Address ALL acceptance criteria, and run or explain the relevant verification before finishing.',
     'Implement the ticket directly in this repository. Do not commit or push — the harness handles git.',
   ].join('\n\n');
 
 export const reviewPrompt = (ticket: Ticket, diff: string): string =>
   [
     `You are the review agent for ticket ${ticket.id}.`,
-    'Grade the diff below against the ticket body — specifically its `# Acceptance Criteria` section (the definition of done). Other sections are context/pointers and may be stale.',
+    'Grade whether the diff below satisfies the ticket body — specifically its `# Acceptance Criteria` section (the definition of done). Other sections are context/pointers and may be stale.',
+    'Request changes only for unmet acceptance criteria, likely bugs/regressions, scope violations, or missing tests/checks when the diff itself needs them. Do not reject a correct minimal fix for missing process artifacts such as proof pasted in the PR body when CI or the diff already provides the needed evidence.',
     ticketBlock(ticket),
     'Reply with a short justification, then a final line exactly "VERDICT: APPROVE" or "VERDICT: REQUEST_CHANGES".',
     '--- DIFF ---',

@@ -219,16 +219,21 @@ describe('workPrompt / reviewPrompt', () => {
   it('tells the work agent the body may be stale and criteria are authoritative', () => {
     const p = workPrompt(ticket());
     assert.include(p, '# Acceptance Criteria');
+    assert.match(p, /ALL acceptance criteria/);
+    assert.match(p, /verification/i);
     assert.match(p, /stale/i);
   });
 
-  it('reviewPrompt grades the diff against the acceptance criteria and embeds both', () => {
+  it('reviewPrompt grades the diff against acceptance, not missing ceremony', () => {
     const id = newTicketId();
     const t = ticket({ id, body: '# Acceptance Criteria\n- returns a slug' });
     const p = reviewPrompt(t, 'diff --git a b');
     assert.include(p, `<ticket id="${id}">`);
     assert.include(p, '# Acceptance Criteria');
     assert.include(p, 'diff --git a b');
+    assert.match(p, /request changes/i);
+    assert.match(p, /process artifacts/i);
+    assert.match(p, /PR body/i);
     assert.match(p, /VERDICT: APPROVE/);
     assert.notInclude(p, 'Goal:');
   });
