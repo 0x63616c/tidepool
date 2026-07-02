@@ -9,7 +9,7 @@ import type {
   Ticket,
   TicketNotFound,
 } from './domain.ts';
-import { shortGitSha } from './git-sha.ts';
+import { annotateGitShaLogs } from './git-sha.ts';
 import { newRunId, type RunId, type TicketId } from './ids.ts';
 import { fifoSelector } from './selection.ts';
 import {
@@ -560,4 +560,4 @@ export const reconcileForever = (
     // error) carries the short git sha, so a misbehaving prod pod is traceable
     // back to the exact commit (see git-sha.ts). Wraps the WHOLE loop body, not
     // just the boot line, so it survives across every subsequent settle() round.
-  }).pipe(Effect.annotateLogs({ sha: shortGitSha() }));
+  }).pipe(annotateGitShaLogs);

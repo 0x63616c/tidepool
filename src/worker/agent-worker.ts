@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { BunRuntime } from '@effect/platform-bun';
 import { Cause, Effect, HashMap, Logger, Schema } from 'effect';
-import { shortGitSha } from '../git-sha.ts';
+import { annotateGitShaLogs } from '../git-sha.ts';
 import type { OpencodePort } from './opencode-session.ts';
 import { AgentWorkerConfig, ReviewRunnerResult, RunnerResult } from './protocol.ts';
 import { bunFormatPort, bunGitPort, makeSdkOpencodePort } from './runner.ts';
@@ -83,7 +83,7 @@ export const makeAgentWorkerProgram = (deps: AgentWorkerDeps): Effect.Effect<voi
     // reconciler (see git-sha.ts) — the same value stamped on the `tidepool/git-sha`
     // Job label — so a misbehaving run is traceable back to its commit from logs
     // alone, not just from `kubectl get pods -L tidepool/git-sha`.
-    Effect.annotateLogs({ sha: shortGitSha() }),
+    annotateGitShaLogs,
     Effect.orDie,
   );
 
@@ -108,20 +108,19 @@ const stderrLogger = Logger.make(({ logLevel, message, annotations }) => {
  * contents: a missing mount logs a warning (the session then fails with a clear
  * opencode error) and we never print the file's bytes.
  */
-const provisionOpencodeAuth = async (): Promise<void> => {
-  const src = '/secrets/auth.json';
-  const destDir = join(homedir(), '.local/share/opencode');
-  const dest = join(destDir, 'auth.json');
-  try {
+const provisionOpencodeAuth = (): Effect.Effect<void> =>
+  Effect.tryPromise(async () => {
+    const src = '/secrets/auth.json';
+    const destDir = join(homedir(), '.local/share/opencode');
+    const dest = join(destDir, 'auth.json');
     await mkdir(destDir, { recursive: true });
     await copyFile(src, dest);
-    process.stderr.write('[agent-worker] INFO provisioned opencode auth from /secrets\n');
-  } catch {
-    process.stderr.write(
-      `[agent-worker] WARN no credential at ${src}; opencode may fail to auth\n`,
-    );
-  }
-};
+  }).pipe(
+    Effect.zipRight(Effect.logInfo('provisioned opencode auth from /secrets')),
+    Effect.catchAll(() =>
+      Effect.logWarning('no credential at /secrets/auth.json; opencode may fail to auth'),
+    ),
+  );
 
 if (import.meta.main) {
   // The container's bun + opencode global binaries live on the bun global bin
@@ -131,7 +130,7 @@ if (import.meta.main) {
     .filter((p) => p.length > 0)
     .join(':');
   const program = Effect.gen(function* () {
-    yield* Effect.promise(() => provisionOpencodeAuth());
+    yield* provisionOpencodeAuth();
     yield* makeAgentWorkerProgram({
       git: bunGitPort,
       opencode: makeSdkOpencodePort(),
@@ -148,6 +147,7 @@ if (import.meta.main) {
     // Report any failure to stderr ourselves (stdout is reserved for the result
     // line), then let runMain set the non-zero exit code without re-printing.
     Effect.tapErrorCause((cause) => Effect.logError(Cause.pretty(cause))),
+    annotateGitShaLogs,
     Effect.provide(Logger.replace(Logger.defaultLogger, stderrLogger)),
   );
   BunRuntime.runMain(program, { disableErrorReporting: true, disablePrettyLogger: true });

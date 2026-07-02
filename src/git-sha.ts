@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 /** Length of the log-stamped sha — long enough to disambiguate, short enough to read. */
 const SHORT_SHA_LEN = 7;
 
@@ -17,3 +19,7 @@ export const shortGitSha = (raw: string | undefined = process.env.TIDEPOOL_GIT_S
   const trimmed = raw?.trim() ?? '';
   return trimmed.length >= SHORT_SHA_LEN ? trimmed.slice(0, SHORT_SHA_LEN) : 'dev';
 };
+
+export const annotateGitShaLogs = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> => effect.pipe(Effect.annotateLogs({ sha: shortGitSha() }));
