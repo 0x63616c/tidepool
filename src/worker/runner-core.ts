@@ -91,8 +91,28 @@ export const preCommitCommands = (opts: {
 }): ReadonlyArray<string> =>
   opts.hasFormatScript ? ['bun run format'] : ['bunx biome format --write .'];
 
+/**
+ * Bun's `ShellError` (thrown by every `$\`git ...\`.quiet()` git op) stringifies
+ * to a useless generic "An error has occurred" — the real diagnostic is on
+ * `.stderr` (Buffer-like) + `.exitCode`. Pull those out when present so
+ * `GitFailed.reason` is actually debuggable; fall back to `String(e)` for
+ * anything that isn't shell-shaped (e.g. a plain `Error` in tests).
+ */
+const shellFailureReason = (e: unknown): string => {
+  if (e && typeof e === 'object' && 'stderr' in e) {
+    const err = e as { stderr?: unknown; exitCode?: unknown; message?: unknown };
+    const stderr = err.stderr ? String(err.stderr).trim() : '';
+    const detail = stderr || (typeof err.message === 'string' ? err.message : '') || String(e);
+    return typeof err.exitCode === 'number' ? `exit ${err.exitCode}: ${detail}` : detail;
+  }
+  return String(e);
+};
+
 const gitOp = <A>(op: string, fn: () => Promise<A>): Effect.Effect<A, GitFailed> =>
-  Effect.tryPromise({ try: fn, catch: (e) => new GitFailed({ op, reason: String(e) }) });
+  Effect.tryPromise({
+    try: fn,
+    catch: (e) => new GitFailed({ op, reason: shellFailureReason(e) }),
+  });
 
 const fmtOp = <A>(command: string, fn: () => Promise<A>): Effect.Effect<A, FormatFailed> =>
   Effect.tryPromise({ try: fn, catch: (e) => new FormatFailed({ command, reason: String(e) }) });
