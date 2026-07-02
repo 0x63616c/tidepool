@@ -99,8 +99,8 @@ export const renderTrace = (
     renderRuns(runs),
     renderTimeline(events, runs),
     'help[2]:',
-    `  Run \`tp logs ${ticket.id}\` to read the raw event stream`,
-    '  Run `tp transcript <run_id>` to read an opencode transcript',
+    `  Run \`tp ticket logs ${ticket.id}\` to read the raw event stream`,
+    '  Run `tp ticket transcript <run_id>` to read an opencode transcript',
   ].join('\n');
 };
 
@@ -203,7 +203,7 @@ const renderGlobalCost = (perTicket: ReadonlyArray<TicketRuns>): string => {
     renderModels(allRuns),
     renderTotal(totalOf(allRuns)),
     'help[1]:',
-    '  Run `tp cost <ticket>` to break a single ticket down by run',
+    '  Run `tp ticket get <ticket>` to break a single ticket down by run',
   ].join('\n');
 };
 
