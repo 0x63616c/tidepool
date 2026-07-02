@@ -1,4 +1,4 @@
-import { Data, Deferred, Duration, Effect } from 'effect';
+import { Data, Duration, Effect, Fiber } from 'effect';
 import type { Usage } from '../domain.ts';
 import { parseUsage } from './usage.ts';
 
@@ -319,11 +319,13 @@ const pollProgress = (
   }).pipe(Effect.ignore);
 
 /**
- * Forked collector: drain the event stream into `sink` until our session goes
- * idle (or the stream ends), then signal `done`. Stream errors are swallowed —
- * the final assistant info is appended by `runSession` regardless, so a dropped
+ * Forked collector: drain the event stream into `sink`, logging each interesting
+ * event as it arrives. It exits on `session.idle` or end-of-stream, but is not
+ * relied on to do so — `runSession` interrupts it once the prompt resolves (the
+ * authoritative turn-complete signal). Stream errors are swallowed — the final
+ * assistant info is appended by `runSession` regardless, so a dropped
  * subscription never loses the proof-of-work tokens. Runs under `forkScoped`, so
- * if the session fails before idle the fiber is interrupted at scope close.
+ * it is also interrupted at scope close if the session fails.
  */
 const collectEvents = (
   port: OpencodePort,
@@ -331,7 +333,6 @@ const collectEvents = (
   dir: string,
   sessionId: string,
   sink: Array<unknown>,
-  done: Deferred.Deferred<void>,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     // Pull the SSE stream one event at a time so each can be logged through the
@@ -348,20 +349,22 @@ const collectEvents = (
       if (line !== null) yield* Effect.logInfo(line);
       if (isSessionIdle(ev, sessionId)) break;
     }
-  }).pipe(Effect.ignore, Effect.ensuring(Deferred.succeed(done, undefined)));
+  }).pipe(Effect.ignore);
 
 /**
  * Drive one agent session end-to-end, rolling the events into a `Usage` and
  * surfacing the assistant's reply text. The server is owned by `acquireRelease`
  * so its finalizer (stopServer) runs on success AND failure; the collector runs
- * in a `forkScoped` fiber tied to the same scope. We send the prompt, wait for
- * idle (bounded by a short timeout so a dropped idle event after a completed
- * prompt can't hang the runner), then append the prompt's final assistant info
- * before parsing — guaranteeing non-zero tokens even if the stream dropped the
+ * in a `forkScoped` fiber tied to the same scope. We send the prompt, and once
+ * it resolves (turn complete) we interrupt the collector rather than waiting on
+ * a `session.idle` event — in-cluster the SSE stream delivers only heartbeats,
+ * so awaiting idle stalled every run for the full fallback timeout after the
+ * work was already done. We then append the prompt's final assistant info before
+ * parsing — guaranteeing non-zero tokens even if the stream dropped the
  * cumulative updates.
  *
  * The whole session is bounded by `timeoutMs` (FIX 2): a genuinely stuck server
- * — where `prompt` itself never resolves — would slip past the idle wait, so the
+ * — where `prompt` itself never resolves — never reaches the interrupt, so the
  * outer `timeoutFail` is the hard backstop. On timeout the scope releases
  * (stopServer aborts the server) and we fail with a typed `OpencodeFailed`,
  * which maps to `AgentFailed` upstream so the box is torn down and retried.
@@ -386,8 +389,9 @@ export const runSession = (
       });
 
       const events: Array<unknown> = [];
-      const done = yield* Deferred.make<void>();
-      yield* Effect.forkScoped(collectEvents(port, server, params.dir, sessionId, events, done));
+      const collector = yield* Effect.forkScoped(
+        collectEvents(port, server, params.dir, sessionId, events),
+      );
       yield* Effect.forkScoped(pollProgress(port, server, sessionId, pollIntervalMs));
 
       const { info, text } = yield* Effect.tryPromise({
@@ -401,9 +405,15 @@ export const runSession = (
         catch: fail('prompt'),
       });
 
-      // The prompt has resolved, so idle is imminent; cap the wait well under the
-      // hard timeout so a dropped idle event still yields a successful run.
-      yield* Deferred.await(done).pipe(Effect.timeout('2 minutes'), Effect.ignore);
+      // The prompt resolving is the authoritative "turn complete" signal, so the
+      // work is done here. Stop the collector rather than waiting on a
+      // `session.idle` event: in-cluster the SSE subscription delivers only
+      // heartbeats (never idle, never end-of-stream), so awaiting idle stalled
+      // every run for the full fallback timeout after the work had finished.
+      // Every event that matters for usage/logging has already streamed in
+      // (each message's final update lands as that message completes, well
+      // before the turn ends), and the final assistant `info` is pushed below.
+      yield* Fiber.interrupt(collector);
       events.push({ type: 'message.updated', properties: { info } });
       yield* Effect.logInfo('opencode session complete');
       return { usage: parseUsage(events), text };

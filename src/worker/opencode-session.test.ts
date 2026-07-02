@@ -139,6 +139,25 @@ describe('runSession', () => {
     assert.strictEqual(calls.stopped, 1);
   });
 
+  it('ends on the prompt resolving even when session.idle never arrives (in-cluster SSE delivers only heartbeats)', async () => {
+    // In-cluster, the SSE subscription emits only server.connected/heartbeat —
+    // never a session.idle, and the stream never ends. The old code waited on
+    // that idle event with a 2-minute fallback, so every prod session sat idle
+    // for ~2 minutes after the work was already done. runSession must end when
+    // the prompt resolves, not on an idle signal that in-cluster never comes.
+    const { port } = makeFake({
+      subscribeEvents: async function* () {
+        yield { type: 'server.heartbeat' };
+        // Stream stays open with no further events — exactly like in-cluster.
+        await new Promise<never>(() => {});
+      },
+    });
+    const { text } = await Effect.runPromise(
+      Effect.scoped(runSession(port, { dir: '/tmp/w', model: 'm', prompt: 'go' })),
+    );
+    assert.strictEqual(text, 'VERDICT: APPROVE');
+  });
+
   it('logs a line per interesting opencode event as the session runs', async () => {
     // Observability: while the agent works, the collector must surface each
     // interesting event (tool calls, etc.) on the logger so `kubectl logs`
@@ -158,6 +177,13 @@ describe('runSession', () => {
       subscribeEvents: async function* () {
         yield toolEvent;
         yield idleFor('ses_fake');
+      },
+      // A real prompt takes minutes; the collector drains and logs the event
+      // stream while it runs. Delay so those log lines land before runSession
+      // interrupts the collector on turn completion.
+      prompt: async () => {
+        await new Promise((r) => setTimeout(r, 25));
+        return { info: assistantMsg.properties.info, text: 'VERDICT: APPROVE' };
       },
     });
     await Effect.runPromise(
