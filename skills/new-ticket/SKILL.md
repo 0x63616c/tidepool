@@ -73,7 +73,7 @@ tp ticket add \
   --title "<short imperative title>" \
   --body-file <path/to/body.md> \
   --target "<owner/repo>" \
-  --context prod
+  --context production
 ```
 
 - `--title` is short + imperative; it becomes the PR title / commit subject, not
@@ -82,13 +82,13 @@ tp ticket add \
   exclusive with inline `--body`.
 - `--target` must be a configured repo (run `tp ticket add` with a bad target to
   see the configured list).
-- Omit `--context prod` only when Calum asks for local/dev.
+- Omit `--context production` only when Calum asks for local/dev.
 
 After filing, surface the id and the watch command:
 
 ```bash
-tp ticket get <tckt_id> --context prod        # detail (body truncated; --full for all)
-tp ticket logs <tckt_id> --context prod       # live event stream
+tp ticket get <tckt_id> --context production        # detail (body truncated; --full for all)
+tp ticket logs <tckt_id> --context production       # live event stream
 ```
 
 ## Don'ts
