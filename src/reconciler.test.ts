@@ -113,13 +113,13 @@ describe('reconciler', () => {
   );
 
   it.effect(
-    '(c) resume not restart: in_progress with handles advances to review, agent untouched',
+    '(c) resume shortcut: in_progress with an open PR advances to review without dispatching work',
     () =>
       Effect.gen(function* () {
         const store = yield* makeInMemoryStore;
         const ticket = yield* store.add(newTicket);
 
-        // Model a deploy mid-task: this attempt's work already produced the open PR.
+        // Model a deploy mid-task: zero-based attempt 0 already produced the open PR.
         yield* store.patch(ticket.id, {
           state: 'in_progress',
           branch: 'tp/x',
@@ -129,20 +129,20 @@ describe('reconciler', () => {
           attempts: 0,
         });
 
-        // Reconstruct the reconciler env with a FRESH agent worker — if it dispatches, work ran.
+        const dispatches: DispatchInput[] = [];
+        // Reconstruct the reconciler env with a FRESH agent worker — any dispatch means
+        // the resume shortcut failed and restarted already-completed work.
         const env = Layer.mergeAll(
           baseLayers(store),
           fakeForge({ ci: 'green' }),
-          fakeAgentWorker({ verdict: 'approve' }),
+          fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
         );
 
         yield* step.pipe(Effect.provide(env));
 
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'review');
-
-        const work = (yield* store.runsFor(ticket.id)).filter((r) => r.kind === 'work');
-        assert.strictEqual(work.length, 0);
+        assert.deepStrictEqual(dispatches, []);
       }),
   );
 
@@ -163,12 +163,14 @@ describe('reconciler', () => {
           attempts: 0,
         });
 
+        const dispatches: DispatchInput[] = [];
         const env = Layer.mergeAll(
           baseLayers(store),
           fakeForge({ ci: 'green' }),
           fakeAgentWorker({
             verdict: 'request_changes',
             reviewReason: 'Missing verification proof.\nVERDICT: REQUEST_CHANGES',
+            onDispatch: (input) => dispatches.push(input),
           }),
         );
 
@@ -181,6 +183,7 @@ describe('reconciler', () => {
         assert.strictEqual(final.state, 'in_progress');
         assert.strictEqual(final.prNumber, 7);
         assert.strictEqual(final.attempts, 1);
+        assert.isNull(final.workedAttempt);
         assert.strictEqual(final.reason, 'Missing verification proof.\nVERDICT: REQUEST_CHANGES');
         assert.isNull(final.workHandle);
         // The next step re-dispatches WORK against the existing branch (the worker
@@ -189,6 +192,10 @@ describe('reconciler', () => {
         const reworking = yield* store.byId(ticket.id);
         assert.strictEqual(reworking.state, 'running');
         assert.isNotNull(reworking.workHandle);
+        assert.deepStrictEqual(
+          dispatches.map((d) => d.kind),
+          ['review', 'work'],
+        );
       }),
   );
 

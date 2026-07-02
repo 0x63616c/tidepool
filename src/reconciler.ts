@@ -209,7 +209,9 @@ const retryOrFail = (
       : ticket.prNumber !== null
         ? 'review'
         : 'in_progress';
-    const cleared = { workHandle: null, dispatchedAt: null } as const;
+    const cleared = opts?.rework
+      ? ({ workedAttempt: null, workHandle: null, dispatchedAt: null } as const)
+      : ({ workHandle: null, dispatchedAt: null } as const);
     const to: Ticket['state'] = attempts >= retries ? 'failed' : retryState;
     // The ONE place every retry-or-fail decision is logged, regardless of the
     // 4 call sites (work Failed, CI red, dispatch AgentFailed, review-rejected)
