@@ -463,6 +463,81 @@ describe('K8sAgentWorker (wire)', () => {
     }
   });
 
+  it('dispatch names the Job deterministically by ticket attempt: a same-attempt re-dispatch reuses the exact same Job name (crash-window idempotency)', async () => {
+    const orig = globalThis.fetch;
+    const bodies: string[] = [];
+    globalThis.fetch = ((url: string | URL, init?: RequestInit) => {
+      const m = method(init as { method?: string });
+      if (m === 'POST' && String(url).includes('/jobs') && typeof init?.body === 'string') {
+        bodies.push(init.body);
+        return Promise.resolve(
+          new Response(JSON.stringify({ metadata: { uid: 'u1' } }), { status: 201 }),
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 201 }));
+    }) as typeof fetch;
+
+    // Deliberately NOT overriding genSuffix — exercises the real default, keyed on
+    // `ticket.attempts` rather than `Math.random()`.
+    const defaultSuffixLayer = makeK8sAgentWorker().pipe(
+      Layer.provide(
+        Layer.mergeAll(FetchHttpClient.layer, fakeBroker, k8sWorkerConfigLayer(wireCfg)),
+      ),
+    );
+    const run = <A, E>(f: (w: AgentWorkerApi) => Effect.Effect<A, E>) =>
+      AgentWorker.pipe(
+        Effect.flatMap(f),
+        Effect.provide(defaultSuffixLayer),
+        Effect.runPromiseExit,
+      );
+
+    await run((w) => w.dispatch(workInput));
+    await run((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.strictEqual(bodies.length, 2);
+    const name1 = (JSON.parse(bodies[0] as string) as { metadata: { name: string } }).metadata.name;
+    const name2 = (JSON.parse(bodies[1] as string) as { metadata: { name: string } }).metadata.name;
+    assert.strictEqual(name1, name2, 'same ticket + same attempt must produce the same Job name');
+  });
+
+  it('dispatch treats a 409 Job create as idempotent: GETs the existing Job and proceeds to the Secret', async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = stub((url, m) => {
+      if (m === 'POST' && url.includes('/jobs'))
+        return new Response(JSON.stringify({ message: 'already exists' }), { status: 409 });
+      if (m === 'GET' && url.includes('/jobs/') && url.includes(HANDLE))
+        return new Response(JSON.stringify({ metadata: { uid: 'u1' } }), { status: 200 });
+      if (m === 'POST' && url.includes('/secrets')) return new Response('{}', { status: 201 });
+      return new Response('{}', { status: 200 });
+    }, calls);
+    const exit = await runWorker((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isSuccess(exit));
+    if (Exit.isSuccess(exit)) assert.strictEqual(exit.value, HANDLE);
+    assert.isTrue(calls.some((c) => c.startsWith('GET') && c.includes(HANDLE)));
+  });
+
+  it('dispatch treats a 409 Secret create as idempotent success (crash-retry already created it), with no orphan delete', async () => {
+    const orig = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = stub((url, m) => {
+      if (m === 'POST' && url.includes('/jobs'))
+        return new Response(JSON.stringify({ metadata: { uid: 'u1' } }), { status: 201 });
+      if (m === 'POST' && url.includes('/secrets'))
+        return new Response(JSON.stringify({ message: 'already exists' }), { status: 409 });
+      return new Response('{}', { status: 200 });
+    }, calls);
+    const exit = await runWorker((w) => w.dispatch(workInput));
+    globalThis.fetch = orig;
+
+    assert.isTrue(Exit.isSuccess(exit));
+    if (Exit.isSuccess(exit)) assert.strictEqual(exit.value, HANDLE);
+    assert.isFalse(calls.some((c) => c.startsWith('DELETE')));
+  });
+
   it('cancel: void-success on both 404 and 500, but a 500 is LOGGED (not silently swallowed)', async () => {
     const orig = globalThis.fetch;
 

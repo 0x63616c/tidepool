@@ -453,16 +453,24 @@ const isOk = (status: number): boolean => status >= 200 && status < 300;
 const httpFail = (e: HttpClientError.HttpClientError): Effect.Effect<never, AgentFailed> =>
   Effect.fail(new AgentFailed({ reason: String(e) }));
 
-const defaultSuffix = (): string => Math.random().toString(36).slice(2, 8);
+/**
+ * Deterministic per (ticket, attempt): the SAME ticket attempt always names the
+ * SAME Job. This is what makes a crash between `dispatch()` creating the Job and
+ * the reconciler's `store.patch(state: 'running')` recoverable — a re-dispatch on
+ * retry lands on the exact same Job name instead of `Math.random()`-ing a second
+ * one, so it collides (409 AlreadyExists) rather than double-creating a live Job.
+ * A NEW attempt (retry after a real failure) gets a new name, same as before.
+ */
+const defaultSuffix = (input: DispatchInput): string => String(input.ticket.attempts);
 
 /**
- * `K8sAgentWorker` factory. `genSuffix`/`fetchDiff` are injected (defaulting to a
- * random suffix and the shared REST diff fetch) so the wire behavior is drivable
- * from the kind e2e without real randomness or GitHub.
+ * `K8sAgentWorker` factory. `genSuffix`/`fetchDiff` are injected (defaulting to the
+ * deterministic per-attempt suffix above and the shared REST diff fetch) so the
+ * wire behavior is drivable from the kind e2e without real GitHub.
  */
 export const makeK8sAgentWorker = (
   opts: {
-    readonly genSuffix?: () => string;
+    readonly genSuffix?: (input: DispatchInput) => string;
     readonly fetchDiff?: (i: {
       readonly token: string;
       readonly repo: string;
@@ -521,24 +529,50 @@ export const makeK8sAgentWorker = (
                   catch: (e) => new AgentFailed({ reason: `fetch PR diff: ${e}` }),
                 })
               : '';
-          const handle = workHandleFor(input.kind, input.ticket.id, genSuffix());
+          const handle = workHandleFor(input.kind, input.ticket.id, genSuffix(input));
           const configJson = JSON.stringify(buildAgentWorkerConfig(input, creds, diff));
 
           const jobRes = yield* post(
             jobsUrl,
             buildJobManifest({ handle, config: cfg, input, annotations: workAnnotations(input) }),
           );
-          if (!isOk(jobRes.status)) {
-            const body = yield* decodeJson(ErrorBody, yield* jobRes.json, 'create Job error');
-            return yield* jobRes.status === 429
-              ? Effect.fail(new RateCapped({}))
-              : Effect.fail(
-                  new AgentFailed({
-                    reason: `k8s create Job ${jobRes.status}: ${body.message ?? 'unknown'}`,
-                  }),
+          // A 409 here means THIS EXACT (ticket, attempt) Job already exists — the
+          // deterministic name (see `defaultSuffix`) turned what would have been a
+          // crash-window double-dispatch into a natural collision. Treat it as
+          // idempotent success: fetch the existing Job (for its uid) and carry on
+          // as if this call had created it.
+          const job = yield* jobRes.status === 409
+            ? Effect.gen(function* () {
+                yield* Effect.logInfo('Job already exists; idempotent re-dispatch').pipe(
+                  Effect.annotateLogs({ handle }),
                 );
-          }
-          const job = yield* decodeJson(JobResource, yield* jobRes.json, 'create Job');
+                const existing = yield* client.get(`${jobsUrl}/${handle}`, { headers });
+                if (!isOk(existing.status)) {
+                  const body = yield* decodeJson(
+                    ErrorBody,
+                    yield* existing.json,
+                    'get existing Job error',
+                  );
+                  return yield* Effect.fail(
+                    new AgentFailed({
+                      reason: `k8s get existing Job ${existing.status}: ${body.message ?? 'unknown'}`,
+                    }),
+                  );
+                }
+                return yield* decodeJson(JobResource, yield* existing.json, 'get existing Job');
+              })
+            : isOk(jobRes.status)
+              ? decodeJson(JobResource, yield* jobRes.json, 'create Job')
+              : Effect.gen(function* () {
+                  const body = yield* decodeJson(ErrorBody, yield* jobRes.json, 'create Job error');
+                  return yield* jobRes.status === 429
+                    ? Effect.fail(new RateCapped({}))
+                    : Effect.fail(
+                        new AgentFailed({
+                          reason: `k8s create Job ${jobRes.status}: ${body.message ?? 'unknown'}`,
+                        }),
+                      );
+                });
           const jobUid = job.metadata?.uid;
           // The Secret's ownerReference (→ GC that cascades creds when the Job is
           // deleted) is meaningless without the Job's uid. An empty uid would
@@ -564,7 +598,15 @@ export const makeK8sAgentWorker = (
               labels: jobLabels(input.kind, input.ticket.id, cfg.gitSha),
             }),
           );
-          if (!isOk(secretRes.status)) {
+          if (secretRes.status === 409) {
+            // Same idempotent re-dispatch case as the Job 409 above, just caught
+            // one step later: the crashed first attempt got past the Job POST but
+            // this is our first time seeing it succeed, so the Secret already
+            // exists too. No orphan to clean up — proceed as success.
+            yield* Effect.logInfo('Secret already exists; idempotent re-dispatch').pipe(
+              Effect.annotateLogs({ handle }),
+            );
+          } else if (!isOk(secretRes.status)) {
             const body = yield* decodeJson(ErrorBody, yield* secretRes.json, 'create Secret error');
             // dispatch is non-atomic: the Job exists but has no creds Secret, so
             // its pod would hang until `activeDeadlineSeconds`. Best-effort delete
