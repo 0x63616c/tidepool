@@ -124,6 +124,9 @@ describe('tp help hints', () => {
     expect(
       hinted.filter((command) => !invokable.some((known) => command.startsWith(known))),
     ).toEqual([]);
+    const addHints = hinted.filter((command) => command.startsWith('tp ticket add --title'));
+    expect(addHints).not.toEqual([]);
+    expect(addHints.every((command) => command.includes('--body-file <path|->'))).toBe(true);
   });
 });
 
