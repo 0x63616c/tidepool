@@ -160,6 +160,10 @@ describe('buildJobManifest', () => {
     // worker pod is greppable back to the commit that dispatched it.
     assert.strictEqual(manifest.metadata.labels['tidepool/git-sha'], CFG.gitSha);
     assert.strictEqual(manifest.spec.template.metadata.labels['tidepool/git-sha'], CFG.gitSha);
+    assert.deepInclude(first(manifest.spec.template.spec.containers).env, {
+      name: 'TIDEPOOL_GIT_SHA',
+      value: CFG.gitSha,
+    });
   });
 
   it('surfaces title/body as annotations (restart-safe harvest, no new stdout channel)', () => {
