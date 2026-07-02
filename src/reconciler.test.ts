@@ -251,15 +251,19 @@ describe('reconciler', () => {
         fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
       );
 
-      // round 1: backlog -> in_progress (all three). round 2: in_progress -> dispatch
-      // attempt for each — the cap must let exactly one through.
+      // round 1: the gate now sits AT the backlog exit — only the oldest ticket
+      // (t1) is admitted into `in_progress`; t2/t3 stay `backlog` (no free slot).
+      // round 2: t1 (in_progress) dispatches — no second gate needed, it already
+      // holds the one slot it was admitted with.
       yield* runSteps(2, env);
 
       assert.strictEqual(dispatches.length, 1, 'exactly one dispatch under workers.max=1');
 
       const finals = yield* Effect.forEach([t1, t2, t3], (t) => store.byId(t.id));
       const running = finals.filter((t) => t.state === 'running');
-      const stillWaiting = finals.filter((t) => t.state === 'in_progress');
+      // Blocked tickets never leave `backlog` — the whole-pipeline cap (Decision 1)
+      // gates admission itself, not just the dispatch that used to follow it.
+      const stillWaiting = finals.filter((t) => t.state === 'backlog');
       assert.strictEqual(running.length, 1);
       assert.strictEqual(stillWaiting.length, 2);
     }),
@@ -285,13 +289,132 @@ describe('reconciler', () => {
           fakeAgentWorker({ stuckRunning: true, onDispatch: (input) => dispatches.push(input) }),
         );
 
-        // round 1: backlog -> in_progress. round 2: in_progress -> dispatch attempt,
-        // blocked by the already-running ticket occupying the one worker slot.
+        // The backlog ticket never even leaves `backlog` — the gate blocks it at
+        // the door, before it would consume the (already-occupied) one slot.
         yield* runSteps(2, env);
 
         assert.strictEqual(dispatches.length, 0, 'no dispatch while the one slot is occupied');
         const finalBacklog = yield* store.byId(backlogTicket.id);
-        assert.strictEqual(finalBacklog.state, 'in_progress');
+        assert.strictEqual(finalBacklog.state, 'backlog');
+      }),
+  );
+
+  it.effect(
+    '(j) whole-pipeline cap: a ticket in `review` (no live Job yet) still blocks a backlog ticket',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        // A ticket at the review stage — CI-checked, PR open, but no agent-worker
+        // dispatched yet. Under the OLD `running`-only cap this wouldn't count;
+        // Decision 1 makes the whole pipeline (backlog..review) count.
+        const reviewTicket = yield* store.add(newTicket);
+        yield* store.patch(reviewTicket.id, {
+          state: 'review',
+          branch: 'tp/x',
+          prNumber: 7,
+          prId: newPrId(),
+          workedAttempt: 0,
+          attempts: 0,
+        });
+        const backlogTicket = yield* store.add({ ...newTicket, title: 'Add foo' });
+
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'pending' }), // review ticket parked mid-CI-check, no dispatch
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
+
+        yield* runSteps(1, env);
+
+        const finalBacklog = yield* store.byId(backlogTicket.id);
+        assert.strictEqual(finalBacklog.state, 'backlog', 'review-stage ticket holds the slot');
+      }),
+  );
+
+  it.effect(
+    '(k) mixed work+review at cap (max=2): both occupy slots, review still dispatches, a 3rd is blocked',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const workTicket = yield* store.add(newTicket); // occupies via `running` (work in flight)
+        yield* store.patch(workTicket.id, {
+          state: 'running',
+          workHandle: makeWorkHandle('wh_work'),
+          dispatchedAt: 0,
+        });
+        const reviewTicket = yield* store.add({ ...newTicket, title: 'Add foo' }); // occupies via `review`
+        yield* store.patch(reviewTicket.id, {
+          state: 'review',
+          branch: 'tp/y',
+          prNumber: 9,
+          prId: newPrId(),
+          workedAttempt: 0,
+          attempts: 0,
+        });
+        const backlogTicket = yield* store.add({ ...newTicket, title: 'Add baz' }); // 3rd, over cap
+
+        const dispatches: DispatchInput[] = [];
+        const maxTwo: Config = { ...testConfig, workers: { ...testConfig.workers, max: 2 } };
+        const env = Layer.mergeAll(
+          Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, maxTwo)),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({
+            stuckRunning: true,
+            onDispatch: (input) => dispatches.push(input),
+          }),
+        );
+
+        yield* runSteps(1, env);
+
+        // The review ticket already held its slot (whole-pipeline cap, Decision 1)
+        // — it is NOT re-gated at its own dispatch site; it dispatches normally.
+        assert.strictEqual(dispatches.length, 1);
+        assert.strictEqual(dispatches[0]?.kind, 'review');
+        const finalReview = yield* store.byId(reviewTicket.id);
+        assert.strictEqual(finalReview.state, 'running');
+
+        // 2 slots occupied (workTicket running, reviewTicket now running too) —
+        // the 3rd ticket stays blocked in backlog.
+        const finalBacklog = yield* store.byId(backlogTicket.id);
+        assert.strictEqual(finalBacklog.state, 'backlog');
+      }),
+  );
+
+  it.effect(
+    '(l) a failure frees the slot for the OLDEST deferred ticket (FIFO), which then dispatches',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const t1 = yield* store.add(newTicket); // already running, about to fail permanently
+        yield* store.patch(t1.id, {
+          state: 'running',
+          workHandle: makeWorkHandle('wh_t1'),
+          dispatchedAt: 0,
+        });
+        const t2 = yield* store.add({ ...newTicket, title: 'Add foo' }); // older waiter
+        const t3 = yield* store.add({ ...newTicket, title: 'Add bar' }); // newer waiter
+
+        const oneRetry: Config = { ...testConfig, retries: 1 };
+        const env = Layer.mergeAll(
+          Layer.merge(Layer.succeed(TicketStore, store), Layer.succeed(AppConfig, oneRetry)),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve', pollFails: 'worker crashed' }),
+        );
+
+        // step 1: t1's poll fails and (retries=1) immediately fails the ticket,
+        // freeing its slot within the SAME round; t2 (oldest waiter) is admitted
+        // into `in_progress`; t3 stays `backlog` (still no free slot).
+        yield* runSteps(1, env);
+        const afterFail = yield* Effect.forEach([t1, t2, t3], (t) => store.byId(t.id));
+        assert.strictEqual(afterFail[0]?.state, 'failed');
+        assert.strictEqual(afterFail[1]?.state, 'in_progress', 't2 (oldest waiter) admitted');
+        assert.strictEqual(afterFail[2]?.state, 'backlog', 't3 (newer waiter) still blocked');
+
+        // step 2: t2 actually dispatches (reaches `running`); t3 is still blocked.
+        yield* runSteps(1, env);
+        const afterDispatch = yield* Effect.forEach([t2, t3], (t) => store.byId(t.id));
+        assert.strictEqual(afterDispatch[0]?.state, 'running', 't2 dispatches once admitted');
+        assert.strictEqual(afterDispatch[1]?.state, 'backlog');
       }),
   );
 

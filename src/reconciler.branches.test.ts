@@ -49,11 +49,90 @@ describe('reconciler failure branches', () => {
         fakeAgentWorker({ failWork: 'rate' }),
       );
 
-      yield* settle().pipe(Effect.provide(env));
+      // Exactly 2 steps (backlog → in_progress → dispatch-fails-rate → rate_capped),
+      // not `settle()` — `rate_capped` is immediately re-picked (Decision 2b, see
+      // below), so a settle() loop would keep cycling it and never reach a stable
+      // fixpoint; this test only cares about the single rate-cap transition.
+      yield* Effect.forEach([0, 1], () => step, { discard: true }).pipe(Effect.provide(env));
 
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'rate_capped');
     }),
+  );
+
+  it.effect(
+    '(Decision 2b) a rate_capped ticket with no PR is re-picked into in_progress on the next step',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* store.patch(ticket.id, { state: 'rate_capped', reason: 'rate-capped' });
+
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
+
+        yield* step.pipe(Effect.provide(env));
+
+        const final = yield* store.byId(ticket.id);
+        assert.strictEqual(final.state, 'in_progress');
+      }),
+  );
+
+  it.effect(
+    '(Decision 2b) a rate_capped ticket with an open PR is re-picked into review on the next step',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const ticket = yield* store.add(newTicket);
+        yield* store.patch(ticket.id, {
+          state: 'rate_capped',
+          reason: 'rate-capped',
+          branch: 'tp/x',
+          prNumber: 7,
+          prId: newPrId(),
+          workedAttempt: 0,
+        });
+
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
+
+        yield* step.pipe(Effect.provide(env));
+
+        const final = yield* store.byId(ticket.id);
+        assert.strictEqual(final.state, 'review');
+      }),
+  );
+
+  it.effect(
+    '(Decision 2b) a rate_capped ticket still holds its workers.max slot — a fresh backlog ticket is blocked',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const rateCappedTicket = yield* store.add(newTicket);
+        yield* store.patch(rateCappedTicket.id, { state: 'rate_capped', reason: 'rate-capped' });
+        const backlogTicket = yield* store.add({ ...newTicket, title: 'Add foo' });
+
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ verdict: 'approve' }),
+        );
+
+        yield* step.pipe(Effect.provide(env));
+
+        const finalBacklog = yield* store.byId(backlogTicket.id);
+        assert.strictEqual(
+          finalBacklog.state,
+          'backlog',
+          'blocked while the rate_capped ticket holds the slot',
+        );
+      }),
   );
 
   it.effect('merge conflict on an approved+green PR → maps back to in_progress', () =>

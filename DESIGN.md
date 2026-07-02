@@ -150,6 +150,26 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
   - **auth:** one coordinated credential refresher (trivially satisfied at N=1; needs the broker at N>1).
   - **merge safety:** N=1 serializes tickets → each branches off the *latest* main and merges before
     the next starts → merge conflicts essentially can't occur.
+- **`workers.max` caps the WHOLE PIPELINE, not just live agent Jobs** (tckt_hardencap). A ticket
+  occupies a slot from the moment it leaves `backlog` until it reaches a terminal state (`done` |
+  `failed`) — i.e. `in_progress` | `running` | `review` | `rate_capped` all count. At `max=1` this
+  means exactly ONE ticket flows dispatch → work → PR → review → merge before the next is even
+  allowed to leave `backlog`; a `rate_capped` ticket still holds its slot (it's mid-pipeline,
+  waiting out a provider limit, and is re-picked into `in_progress`/`review` on the next reconcile
+  tick — never "idle" while occupying a slot). This is the concrete mechanism behind the merge-safety
+  bullet above. Implementation: a single admission check at the `backlog` exit
+  (`src/selection.ts`'s `fifoSelector.admit`) — every other transition moves a ticket between two
+  states it already occupies, so nothing downstream re-checks the cap. Ticket selection (which
+  ticket gets the next free slot) is FIFO (`store-sql.ts`'s `ORDER BY seq`) behind a small seam
+  (`TicketSelector`) so a future policy (priority, `--blocked-by`) can swap in without touching the
+  reconciler.
+  - **Known HA limitation (not fixed, lower priority):** `fifoSelector.admit` is read-then-act, not
+    `SELECT ... FOR UPDATE`. It is race-free only because `step` iterates tickets sequentially
+    (no `concurrency`) and the reconciler itself runs at `replicas: 1` + `Recreate` (tenet 3:
+    reconciler is the only mover — singular, not plural). Two concurrent reconcilers could both
+    read the same free slot and admit two tickets. Fixing this (a real `FOR UPDATE`, or a
+    Postgres advisory lock around the admission read+patch) is deferred until the reconciler is
+    ever run at `replicas > 1`.
 - **The "concurrency milestone" (raising N>1) unlocks two things together:** (a) **credential broker**
   — main box is the sole `auth.json` refresher, serving short-lived creds to workers (the networked
   form of how one laptop runs many opencode sessions off one shared file); (b) **concurrent-merge /
