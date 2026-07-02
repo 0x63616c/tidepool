@@ -19,7 +19,13 @@ RUN apt-get update \
     curl \
     unzip \
     ca-certificates \
+    shellcheck \
   && rm -rf /var/lib/apt/lists/*
+
+# shfmt: same pinned version CI installs (.github/workflows/ci.yml), so agents'
+# local `bun run check` (lint:sh) matches CI exactly.
+RUN curl -sSfL https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64 -o /usr/local/bin/shfmt \
+  && chmod +x /usr/local/bin/shfmt
 
 # opencode: the SDK (imported by the runner) + the binary (spawned by
 # createOpencodeServer), at pinned versions.
