@@ -320,16 +320,18 @@ The cost nightmare (runaway box creation) must be blocked *outside* our code, th
 ### Deploy & GitOps for the control plane itself
 > Post-migration the control plane is a k8s Deployment (Talos/Pulumi cluster), not a box. The
 > box/cloud-init/systemd deploy path below is retired; the k8s flow is authoritative.
-- **Ongoing deploy = push-based, fully automatic on merge to `main`:**
-  - *Images:* `images.yml` builds + pushes `control-plane` + `agent-worker` to ghcr, tagged `:${sha}`
-    (immutable per commit) + `:latest`.
-  - *Apply:* `infra.yml` up-job resolves **this commit's** freshly-built image to a digest
-    (polls ghcr, fails closed if absent) and `pulumi up`s with it (`config.ts` `pickImage` prefers the
+- **Ongoing deploy = push-based, fully automatic on merge to `main`, one workflow
+  (`deploy.yml`), `apply` depending on `build-images` via `needs:`:**
+  - *Images:* `build-images` job builds + pushes `control-plane` + `agent-worker` to ghcr, tagged
+    `:${sha}` (immutable per commit) + `:latest`, then resolves each to a digest in the same job
+    (guaranteed present, no poll) and exposes them as job outputs.
+  - *Apply:* `apply` job (`needs: build-images`) reads those digests straight from
+    `needs.build-images.outputs` and `pulumi up`s with them (`config.ts` `pickImage` prefers the
     `TIDEPOOL_DEPLOY_*_IMAGE` override over the git-pinned default, rejecting any non-`@sha256` ref).
     The control-plane Deployment rerolls (RollingUpdate); in-flight worker Jobs are untouched; new
     Jobs inherit the new agent-worker image via `TIDEPOOL_AGENT_WORKER_IMAGE`. No hand-editing a
     pinned digest, no approval gate (personal scale; `environment: production` can re-add reviewers).
-  - *Infra changes (`infra/**`):* PR → `pulumi preview`; merge → the same up-job applies.
+  - *Infra changes (`infra/**`):* PR → `preview` job runs `pulumi preview`; merge → `apply` runs.
 - Control-plane state is in Postgres, so a reroll is a brief reconcile pause, not lost work; the
   reconciler resumes polling existing work handles on restart.
 - **Commit provenance — `tidepool/git-sha` pod label.** The up-job passes `github.sha` as
