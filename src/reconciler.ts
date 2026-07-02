@@ -364,6 +364,48 @@ const recordContention = (
     return { exhausted, ticket: patched };
   });
 
+const blockedByCondition = (ticket: Ticket) =>
+  ticket.conditions.find((c) => c.type === 'blocked_by');
+
+const reconcileBlockedBy = (
+  store: TicketStoreApi,
+  ticket: Ticket,
+  all: ReadonlyArray<Ticket>,
+): Effect.Effect<boolean, TicketNotFound> =>
+  Effect.gen(function* () {
+    const blockedBy = blockedByCondition(ticket);
+    if (blockedBy === undefined) return false;
+
+    const blockers = blockedBy.ids.map((id) => all.find((t) => t.id === id));
+    const terminalBlocker = blockers.find(
+      (t) => t?.phase === 'failed' || t?.conditions.some((c) => c.type === 'needs_human'),
+    );
+    if (terminalBlocker !== undefined) {
+      const hasNeedsHuman = ticket.conditions.some((c) => c.type === 'needs_human');
+      if (!hasNeedsHuman) {
+        const reason = `dependency terminal: ${terminalBlocker.id}`;
+        yield* store.patch(ticket.id, {
+          conditions: [...ticket.conditions, { type: 'needs_human', reason }],
+          reason,
+        });
+        yield* store.appendEvents([
+          transitionEvent(ticket.id, `condition set: needs_human (${reason})`),
+        ]);
+      }
+      return true;
+    }
+
+    if (blockers.every((t) => t?.phase === 'done')) {
+      yield* store.patch(ticket.id, {
+        conditions: ticket.conditions.filter((c) => c.type !== 'blocked_by'),
+      });
+      yield* store.appendEvents([transitionEvent(ticket.id, 'condition cleared: blocked_by')]);
+      return true;
+    }
+
+    return true;
+  });
+
 /**
  * Tri-state settle from the forge's ground truth for a ticket's PR — the closed
  * loop that catches an external merge, a crash between `forge.merge` succeeding
@@ -637,6 +679,10 @@ const stepTicket = (
     // dispatches. `rate_capped` is transient and clears immediately; hold
     // conditions remain until an operator or a later ticket changes them.
     if (ticket.conditions.length > 0) {
+      const blocked = yield* store
+        .list()
+        .pipe(Effect.flatMap((all) => reconcileBlockedBy(store, ticket, all)));
+      if (blocked) return;
       if (ticket.conditions.some((c) => c.type === 'needs_human' || c.type === 'main_red')) return;
       const to = deriveStateFromPhase({ ...ticket, conditions: [] });
       yield* Effect.logInfo('clearing rate_capped condition; re-picking ticket').pipe(

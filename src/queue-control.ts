@@ -50,8 +50,12 @@ export class TargetNotConfigured extends Schema.TaggedError<TargetNotConfigured>
   { repo: Schema.String, configured: Schema.Array(Schema.String) },
 ) {}
 
+export class InvalidBlockedBy extends Schema.TaggedError<InvalidBlockedBy>()('InvalidBlockedBy', {
+  reason: Schema.String,
+}) {}
+
 export interface QueueControlApi {
-  readonly add: (input: NewTicket) => Effect.Effect<Ticket, TargetNotConfigured>;
+  readonly add: (input: NewTicket) => Effect.Effect<Ticket, TargetNotConfigured | InvalidBlockedBy>;
   readonly list: (q: ListTicketsQuery) => Effect.Effect<Page<Ticket>>;
   readonly breakers: () => Effect.Effect<ReadonlyArray<CircuitBreaker>>;
   readonly get: (id: TicketId) => Effect.Effect<Ticket, TicketNotFound>;
@@ -73,6 +77,59 @@ const paginateById = <A extends { readonly id: string }>(
   return { items, nextCursor };
 };
 
+const queueEvent = (ticketId: Ticket['id'], line: string): RunEvent => ({
+  ticketId,
+  runId: null,
+  boxId: null,
+  source: 'control-plane',
+  ts: Date.now(),
+  level: 'info',
+  line,
+});
+
+const validateBlockedBy = (
+  input: NewTicket,
+  existing: ReadonlyArray<Ticket>,
+): Effect.Effect<void, InvalidBlockedBy> => {
+  const ids = input.blockedBy ?? [];
+  const requestedId = (input as NewTicket & { readonly id?: TicketId }).id;
+  if (requestedId !== undefined && ids.includes(requestedId)) {
+    return Effect.fail(
+      new InvalidBlockedBy({ reason: `blocked_by cannot reference self: ${requestedId}` }),
+    );
+  }
+  if (new Set(ids).size !== ids.length) {
+    return Effect.fail(
+      new InvalidBlockedBy({ reason: 'blocked_by contains duplicate ticket ids' }),
+    );
+  }
+  const byId = new Map(existing.map((t) => [t.id, t]));
+  const missing = ids.find((id) => !byId.has(id));
+  if (missing !== undefined) {
+    return Effect.fail(new InvalidBlockedBy({ reason: `blocked_by ticket not found: ${missing}` }));
+  }
+
+  const visit = (id: TicketId, path: ReadonlyArray<TicketId>): InvalidBlockedBy | null => {
+    if (path.includes(id)) {
+      return new InvalidBlockedBy({ reason: `blocked_by cycle rejected at ${id}` });
+    }
+    const ticket = byId.get(id);
+    const blockedBy = ticket?.conditions.find((c) => c.type === 'blocked_by');
+    if (blockedBy === undefined) return null;
+    for (const next of blockedBy.ids) {
+      const error = visit(next, [...path, id]);
+      if (error !== null) return error;
+    }
+    return null;
+  };
+
+  for (const id of ids) {
+    const error = visit(id, []);
+    if (error !== null) return Effect.fail(error);
+  }
+  return Effect.void;
+};
+
 /**
  * Local adapter: `QueueControl` over the in-process `TicketStore`. Dev + tests
  * use this (no server). Paging is an in-memory newest-first slice — fine at
@@ -89,7 +146,19 @@ export const LocalQueueControl = Layer.effect(
     return {
       add: (input) =>
         repos.includes(input.target)
-          ? store.add(input)
+          ? Effect.gen(function* () {
+              yield* store
+                .list()
+                .pipe(Effect.flatMap((tickets) => validateBlockedBy(input, tickets)));
+              const ticket = yield* store.add(input);
+              const blockedBy = input.blockedBy ?? [];
+              if (blockedBy.length > 0) {
+                yield* store.appendEvents([
+                  queueEvent(ticket.id, `condition set: blocked_by (${blockedBy.join(',')})`),
+                ]);
+              }
+              return ticket;
+            })
           : Effect.fail(new TargetNotConfigured({ repo: input.target, configured: repos })),
       list: (q) =>
         store.list().pipe(

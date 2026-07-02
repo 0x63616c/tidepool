@@ -90,6 +90,92 @@ describe('transition table: queued', () => {
       assert.strictEqual(dispatches.filter((d) => d.ticket.id === ticket.id).length, 0);
     }),
   );
+
+  it.effect('row 40: blocked_by open dependency holds queued without occupying capacity', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const blocker = yield* store.add({ ...newTicket, title: 'Blocker' });
+      const ticket = yield* store.add({
+        ...newTicket,
+        title: 'Dependent',
+        blockedBy: [blocker.id],
+      });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(1, env);
+
+      const held = yield* store.byId(ticket.id);
+      assert.strictEqual(held.phase, 'queued');
+      assert.deepStrictEqual(held.conditions, [{ type: 'blocked_by', ids: [blocker.id] }]);
+      assert.strictEqual((yield* store.byId(blocker.id)).phase, 'working');
+    }),
+  );
+
+  it.effect('row 41: blocked_by clears only after all blockers are done, then admits', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const a = yield* store.add({ ...newTicket, title: 'A' });
+      const b = yield* store.add({ ...newTicket, title: 'B' });
+      const ticket = yield* store.add({
+        ...newTicket,
+        title: 'Dependent',
+        blockedBy: [a.id, b.id],
+      });
+      yield* store.patch(a.id, { phase: 'done' });
+      const env = Layer.mergeAll(
+        baseLayers(store, { ...testConfig, workers: { ...testConfig.workers, max: 10 } }),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(1, env);
+      assert.deepStrictEqual((yield* store.byId(ticket.id)).conditions, [
+        { type: 'blocked_by', ids: [a.id, b.id] },
+      ]);
+
+      yield* store.patch(b.id, { phase: 'done' });
+      yield* runSteps(2, env);
+
+      const admitted = yield* store.byId(ticket.id);
+      assert.strictEqual(admitted.phase, 'working');
+      assert.deepStrictEqual(admitted.conditions, []);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isTrue(events.some((e) => e.line === 'condition cleared: blocked_by'));
+    }),
+  );
+
+  it.effect('row 42: terminal dependency keeps blocked_by and adds needs_human', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const blocker = yield* store.add({ ...newTicket, title: 'Blocker' });
+      const ticket = yield* store.add({
+        ...newTicket,
+        title: 'Dependent',
+        blockedBy: [blocker.id],
+      });
+      yield* store.patch(blocker.id, { phase: 'failed' });
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(1, env);
+
+      const held = yield* store.byId(ticket.id);
+      assert.strictEqual(held.phase, 'queued');
+      assert.deepStrictEqual(held.conditions, [
+        { type: 'blocked_by', ids: [blocker.id] },
+        { type: 'needs_human', reason: `dependency terminal: ${blocker.id}` },
+      ]);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isTrue(events.some((e) => e.line.includes('condition set: needs_human')));
+    }),
+  );
 });
 
 describe('transition table: working', () => {

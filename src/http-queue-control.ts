@@ -11,15 +11,17 @@ import { QueueControl, type QueueControlApi } from './queue-control.ts';
  * defects; only the declared domain errors stay in the typed channel.
  */
 
-/** Keep the one expected domain error tag; any other failure is a defect (transport/decode). */
+/** Keep expected domain error tags; any other failure is a defect (transport/decode). */
 const domainOnly =
-  <Tag extends string>(tag: Tag) =>
+  <Tag extends string>(...tags: ReadonlyArray<Tag>) =>
   <A, E extends { readonly _tag: string }, R>(
     eff: Effect.Effect<A, E, R>,
   ): Effect.Effect<A, Extract<E, { readonly _tag: Tag }>, R> =>
     eff.pipe(
       Effect.catchAll((e) =>
-        e._tag === tag ? Effect.fail(e as Extract<E, { readonly _tag: Tag }>) : Effect.die(e),
+        tags.includes(e._tag as Tag)
+          ? Effect.fail(e as Extract<E, { readonly _tag: Tag }>)
+          : Effect.die(e),
       ),
     );
 
@@ -32,7 +34,9 @@ export const HttpQueueControl = (
       const client = yield* HttpApiClient.make(queueApi, { baseUrl });
       return {
         add: (input) =>
-          client.tickets.add({ payload: input }).pipe(domainOnly('TargetNotConfigured')),
+          client.tickets
+            .add({ payload: input })
+            .pipe(domainOnly('TargetNotConfigured', 'InvalidBlockedBy')),
         list: (q) =>
           client.tickets
             .list({

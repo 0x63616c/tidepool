@@ -42,6 +42,7 @@ export const TicketCondition = Schema.Union(
   Schema.Struct({ type: Schema.Literal('rate_capped') }),
   Schema.Struct({ type: Schema.Literal('needs_human'), reason: Schema.String }),
   Schema.Struct({ type: Schema.Literal('main_red'), sha: Schema.String }),
+  Schema.Struct({ type: Schema.Literal('blocked_by'), ids: Schema.Array(TicketId) }),
 );
 export type TicketCondition = typeof TicketCondition.Type;
 
@@ -210,6 +211,7 @@ export const NewTicket = Schema.Struct({
   title: Schema.String,
   body: Schema.String,
   target: Schema.String,
+  blockedBy: Schema.optional(Schema.Array(TicketId)),
 });
 export type NewTicket = typeof NewTicket.Type;
 

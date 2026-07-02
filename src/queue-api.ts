@@ -10,7 +10,7 @@ import {
   TicketNotFound,
 } from './domain.ts';
 import { RunId, TicketId } from './ids.ts';
-import { Page, TargetNotConfigured } from './queue-control.ts';
+import { InvalidBlockedBy, Page, TargetNotConfigured } from './queue-control.ts';
 
 /**
  * The queue-control HTTP surface — the wire form of `QueueControl`. Read +
@@ -48,7 +48,8 @@ const tickets = HttpApiGroup.make('tickets')
     HttpApiEndpoint.post('add', '/tickets')
       .setPayload(NewTicket)
       .addSuccess(Ticket)
-      .addError(TargetNotConfigured, { status: 422 }),
+      .addError(TargetNotConfigured, { status: 422 })
+      .addError(InvalidBlockedBy, { status: 422 }),
   )
   .add(HttpApiEndpoint.get('list', '/tickets').setUrlParams(ListParams).addSuccess(Page(Ticket)))
   .add(HttpApiEndpoint.get('breakers', '/breakers').addSuccess(Schema.Array(CircuitBreaker)))

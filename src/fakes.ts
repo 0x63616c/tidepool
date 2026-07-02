@@ -52,6 +52,7 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
   const api: TicketStoreApi = {
     add: (input) =>
       Ref.modify(tickets, (cur) => {
+        const blockedBy = input.blockedBy ?? [];
         const ticket: Ticket = {
           id: newTicketId(),
           title: input.title,
@@ -59,7 +60,7 @@ export const makeInMemoryStore: Effect.Effect<TicketStoreApi> = Effect.gen(funct
           target: input.target,
           state: 'backlog',
           phase: 'queued',
-          conditions: [],
+          conditions: blockedBy.length === 0 ? [] : [{ type: 'blocked_by', ids: blockedBy }],
           branch: null,
           prNumber: null,
           prId: null,
