@@ -1,5 +1,5 @@
 import type { SqlClient } from '@effect/sql/SqlClient';
-import { Effect, Schema } from 'effect';
+import { Effect, Either, Schema } from 'effect';
 import { Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
 import { newTicketId, type TicketId } from './ids.ts';
 import type { TicketStoreApi } from './services.ts';
@@ -18,6 +18,8 @@ import type { TicketStoreApi } from './services.ts';
  */
 
 const decodeTicket = Schema.decodeUnknownSync(Ticket);
+
+const decodeTicketEither = Schema.decodeUnknownEither(Ticket);
 
 const decodeRun = Schema.decodeUnknownSync(Run);
 
@@ -86,6 +88,18 @@ const ticketFromRow = (row: unknown): Ticket => {
   });
 };
 
+/** Decode for list(): one corrupt historical row must not take down the store. */
+const ticketFromRowEither = (row: unknown) => {
+  const r = row as Record<string, unknown>;
+  return decodeTicketEither({
+    ...r,
+    prNumber: num(r.prNumber),
+    attempts: num(r.attempts),
+    workedAttempt: num(r.workedAttempt),
+    dispatchedAt: num(r.dispatchedAt),
+  });
+};
+
 /** Options threading the one portable-DDL difference between backings. */
 export interface StoreSqlOptions {
   /** Insertion-order column for deterministic list/history reads. */
@@ -143,7 +157,25 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
     list: () =>
       sql`SELECT ${sql.literal(TICKET_COLS)} FROM tickets ORDER BY ${order}`.pipe(
         Effect.orDie,
-        Effect.map((rows) => rows.map(ticketFromRow)),
+        Effect.flatMap((rows) =>
+          Effect.gen(function* () {
+            const tickets: Ticket[] = [];
+            for (const row of rows) {
+              const decoded = ticketFromRowEither(row);
+              if (Either.isRight(decoded)) {
+                tickets.push(decoded.right);
+                continue;
+              }
+              yield* Effect.logError('quarantined undecodable ticket row').pipe(
+                Effect.annotateLogs({
+                  rowId: String((row as Record<string, unknown>).id),
+                  decodeFailure: String(decoded.left),
+                }),
+              );
+            }
+            return tickets;
+          }),
+        ),
       ),
     patch: (id, patch) =>
       Effect.gen(function* () {
