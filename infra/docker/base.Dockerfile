@@ -27,6 +27,16 @@ RUN apt-get update \
 RUN curl -sSfL https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64 -o /usr/local/bin/shfmt \
   && chmod +x /usr/local/bin/shfmt
 
+# gitleaks: pinned so lefthook's pre-commit gate (lefthook.yml) has a `gitleaks`
+# binary on PATH inside the agent-worker sandbox. No prebuilt Debian package, so
+# pull the release tarball directly (CI's gitleaks/gitleaks-action installs its
+# own binary independently — .github/workflows/ci.yml — and remains the
+# authoritative gate).
+RUN curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz \
+  && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+  && chmod +x /usr/local/bin/gitleaks \
+  && rm /tmp/gitleaks.tar.gz
+
 # opencode: the SDK (imported by the runner) + the binary (spawned by
 # createOpencodeServer), at pinned versions.
 RUN bun add -g @opencode-ai/sdk@1.17.11 opencode-ai@1.17.11
