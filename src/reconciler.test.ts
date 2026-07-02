@@ -1,10 +1,17 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Duration, Effect, Fiber, HashMap, Layer, Logger, Ref, TestClock } from 'effect';
 import { AppConfig, type Config, defineConfig } from './config.ts';
+import { makeWorkHandle } from './domain.ts';
 import { fakeAgentWorker, fakeForge, makeInMemoryStore } from './fakes.ts';
 import { newPrId } from './ids.ts';
 import { reconcileForever, settle, step } from './reconciler.ts';
-import { type AgentWorker, type Forge, TicketStore, type TicketStoreApi } from './services.ts';
+import {
+  type AgentWorker,
+  type DispatchInput,
+  type Forge,
+  TicketStore,
+  type TicketStoreApi,
+} from './services.ts';
 
 /**
  * Loop-logic validation (DESIGN §Validation, level 1): the reconciler driven to
@@ -228,6 +235,64 @@ describe('reconciler', () => {
       // Nothing harvested yet — the run is recorded only when poll succeeds.
       assert.strictEqual((yield* store.runsFor(ticket.id)).length, 0);
     }),
+  );
+
+  it.effect('(h) admission gate: workers.max=1 with 3 ready tickets dispatches exactly one', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const t1 = yield* store.add(newTicket);
+      const t2 = yield* store.add({ ...newTicket, title: 'Add foo' });
+      const t3 = yield* store.add({ ...newTicket, title: 'Add bar' });
+
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ ci: 'green' }),
+        fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
+      );
+
+      // round 1: backlog -> in_progress (all three). round 2: in_progress -> dispatch
+      // attempt for each — the cap must let exactly one through.
+      yield* runSteps(2, env);
+
+      assert.strictEqual(dispatches.length, 1, 'exactly one dispatch under workers.max=1');
+
+      const finals = yield* Effect.forEach([t1, t2, t3], (t) => store.byId(t.id));
+      const running = finals.filter((t) => t.state === 'running');
+      const stillWaiting = finals.filter((t) => t.state === 'in_progress');
+      assert.strictEqual(running.length, 1);
+      assert.strictEqual(stillWaiting.length, 2);
+    }),
+  );
+
+  it.effect(
+    '(i) admission gate: workers.max=1 with one ticket already running blocks a backlog ticket',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* makeInMemoryStore;
+        const runningTicket = yield* store.add(newTicket);
+        yield* store.patch(runningTicket.id, {
+          state: 'running',
+          workHandle: makeWorkHandle('wh_seed'),
+          dispatchedAt: 0,
+        });
+        const backlogTicket = yield* store.add({ ...newTicket, title: 'Add foo' });
+
+        const dispatches: DispatchInput[] = [];
+        const env = Layer.mergeAll(
+          baseLayers(store),
+          fakeForge({ ci: 'green' }),
+          fakeAgentWorker({ stuckRunning: true, onDispatch: (input) => dispatches.push(input) }),
+        );
+
+        // round 1: backlog -> in_progress. round 2: in_progress -> dispatch attempt,
+        // blocked by the already-running ticket occupying the one worker slot.
+        yield* runSteps(2, env);
+
+        assert.strictEqual(dispatches.length, 0, 'no dispatch while the one slot is occupied');
+        const finalBacklog = yield* store.byId(backlogTicket.id);
+        assert.strictEqual(finalBacklog.state, 'in_progress');
+      }),
   );
 
   it.effect('(g) running + poll Running: waits, no transition, no run recorded', () =>
