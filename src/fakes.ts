@@ -5,6 +5,7 @@ import {
   CredentialError,
   MergeConflict,
   makeWorkHandle,
+  type PrLifecycle,
   RateCapped,
   type ReviewVerdict,
   type Run,
@@ -109,6 +110,12 @@ export const InMemoryTicketStore = Layer.effect(TicketStore, makeInMemoryStore);
 export interface FakeForgeOptions {
   readonly ci?: CIStatus;
   readonly failMerge?: boolean;
+  /** Scripted ground truth for `prState` — default `'open'` (today's behavior unaffected). */
+  readonly prLifecycle?: PrLifecycle;
+  /** `mergeSha` reported alongside `prLifecycle: 'merged'`. */
+  readonly mergeSha?: string;
+  /** Spy hook: called with every `merge` attempt (assert idempotency — no duplicate merge). */
+  readonly onMerge?: (input: { readonly repo: string; readonly prNumber: number }) => void;
 }
 
 export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
@@ -117,6 +124,7 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
     Effect.gen(function* () {
       const counter = yield* Ref.make(1000);
       const ci = opts.ci ?? 'green';
+      const prLifecycle = opts.prLifecycle ?? 'open';
       return {
         openPR: (input) =>
           Effect.map(
@@ -127,11 +135,18 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
               url: `https://github.com/${input.repo}/pull/${number}`,
             }),
           ),
+        prState: (input) =>
+          Effect.succeed({
+            state: prLifecycle,
+            mergeSha: prLifecycle === 'merged' ? (opts.mergeSha ?? `sha_${input.prNumber}`) : null,
+          }),
         checks: () => Effect.succeed(ci),
-        merge: (input) =>
-          opts.failMerge
+        merge: (input) => {
+          opts.onMerge?.(input);
+          return opts.failMerge
             ? Effect.fail(new MergeConflict({ prNumber: input.prNumber }))
-            : Effect.succeed({ sha: `sha_${input.prNumber}` }),
+            : Effect.succeed({ sha: `sha_${input.prNumber}` });
+        },
       };
     }),
   );

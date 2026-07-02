@@ -15,6 +15,7 @@ import { fifoSelector } from './selection.ts';
 import {
   AgentWorker,
   Forge,
+  type PrState,
   TicketStore,
   type TicketStoreApi,
   type WorkResult,
@@ -145,6 +146,51 @@ const retryOrFail = (
     ? store.patch(ticket.id, { attempts, state: 'failed', reason, ...cleared })
     : store.patch(ticket.id, { attempts, state: retryState, reason, ...cleared });
 };
+
+/**
+ * Tri-state settle from the forge's ground truth for a ticket's PR — the closed
+ * loop that catches an external merge, a crash between `forge.merge` succeeding
+ * and the `done` patch landing, and a merge call that succeeded remotely but
+ * errored client-side (all three leave `PR merged ∧ ticket ≠ done` without this
+ * check). Callers run this BEFORE any CI check, review dispatch, or merge
+ * attempt, so drift never has a chance to start. Returns `true` iff the ticket
+ * was settled to a terminal state from the forge's state (the caller must
+ * `return` immediately); `false` means the PR is still open at the forge and
+ * the caller should proceed exactly as before.
+ */
+const settleFromPrState = (
+  store: TicketStoreApi,
+  ticket: Ticket,
+  prNumber: number,
+  prState: PrState,
+): Effect.Effect<boolean, TicketNotFound> =>
+  Effect.gen(function* () {
+    if (prState.state === 'merged') {
+      yield* Effect.logInfo('PR already merged at the forge; settling ticket done').pipe(
+        Effect.annotateLogs({ pr: prNumber, sha: prState.mergeSha }),
+      );
+      yield* store.patch(ticket.id, {
+        state: 'done',
+        mergeSha: prState.mergeSha,
+        workHandle: null,
+        dispatchedAt: null,
+      });
+      return true;
+    }
+    if (prState.state === 'closed') {
+      yield* Effect.logWarning('PR closed without merge; failing ticket (no retry)').pipe(
+        Effect.annotateLogs({ pr: prNumber }),
+      );
+      yield* store.patch(ticket.id, {
+        state: 'failed',
+        reason: 'pr-closed-unmerged',
+        workHandle: null,
+        dispatchedAt: null,
+      });
+      return true;
+    }
+    return false;
+  });
 
 const stepTicket = (
   ticket: Ticket,
@@ -352,6 +398,15 @@ const stepTicket = (
               return;
             }
 
+            // Ground truth before merging (idempotent merge): a prior
+            // `forge.merge` may already have succeeded on GitHub — either the
+            // control plane crashed before the `done` patch landed, or the
+            // merge call itself succeeded remotely but errored client-side
+            // (network timeout, ambiguous 405/409). Re-observing here settles
+            // from that instead of attempting a duplicate merge.
+            const preMergeState = yield* forge.prState({ repo: ticket.target, prNumber });
+            if (yield* settleFromPrState(store, ticket, prNumber, preMergeState)) return;
+
             // approve + green → auto-merge → done.
             const merged = yield* forge.merge({ repo: ticket.target, prNumber });
             yield* Effect.logInfo('merged PR; ticket done').pipe(
@@ -376,6 +431,12 @@ const stepTicket = (
           yield* store.patch(ticket.id, { state: 'in_progress' });
           return;
         }
+
+        // Ground truth FIRST — before any CI check or review dispatch — so an
+        // external merge/close is observed and settled instead of the ticket
+        // drifting on toward a duplicate re-dispatch (closes the loop).
+        const prState = yield* forge.prState({ repo: ticket.target, prNumber });
+        if (yield* settleFromPrState(store, ticket, prNumber, prState)) return;
 
         const ci = yield* forge.checks({ repo: ticket.target, prNumber });
         if (ci === 'pending') return; // wait; next tick re-checks

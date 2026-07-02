@@ -188,6 +188,7 @@ describe('reconciler failure branches', () => {
       // failing checks call, so the failure is injected through a test-local layer.
       const flakyForge = Layer.succeed(Forge, {
         openPR: () => Effect.die('unused'),
+        prState: () => Effect.succeed({ state: 'open', mergeSha: null }),
         checks: () => Effect.fail(new ForgeError({ op: 'checks', reason: 'github 503' })),
         merge: () => Effect.die('unused'),
       });

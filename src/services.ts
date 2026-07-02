@@ -6,6 +6,7 @@ import type {
   ForgeError,
   MergeConflict,
   NewTicket,
+  PrLifecycle,
   RateCapped,
   ReviewVerdict,
   Run,
@@ -82,8 +83,23 @@ export interface OpenPRInput {
   readonly body: string;
 }
 
+export interface PrState {
+  readonly state: PrLifecycle;
+  readonly mergeSha: string | null;
+}
+
 export interface ForgeApi {
   readonly openPR: (input: OpenPRInput) => Effect.Effect<PullRequest, ForgeError>;
+  /**
+   * Ground truth for a PR — merged/closed/open, read fresh from the forge. The
+   * reconciler calls this FIRST for any ticket that carries a PR, before any CI
+   * check, review dispatch, or merge attempt — that ordering is what closes the
+   * loop (external merges/closes/lost-replies are observed, not assumed away).
+   */
+  readonly prState: (input: {
+    readonly repo: string;
+    readonly prNumber: number;
+  }) => Effect.Effect<PrState, ForgeError>;
   readonly checks: (input: {
     readonly repo: string;
     readonly prNumber: number;

@@ -1,7 +1,7 @@
 import { Octokit } from '@octokit/rest';
 import { $ } from 'bun';
 import { Effect, Layer } from 'effect';
-import { type CIStatus, ForgeError, MergeConflict } from './domain.ts';
+import { type CIStatus, ForgeError, MergeConflict, type PrLifecycle } from './domain.ts';
 import { newPrId } from './ids.ts';
 import { Forge, type ForgeApi } from './services.ts';
 
@@ -49,6 +49,17 @@ export const commitStatusState = (state: string): CheckState => {
 export const classifyMergeError = (status: number): 'conflict' | 'forge' =>
   status === 405 || status === 409 ? 'conflict' : 'forge';
 
+/**
+ * Map GitHub's pull wire state to our tri-state `PrLifecycle`. `merged` takes
+ * priority over `state` — GitHub always sets `state: 'closed'` alongside
+ * `merged: true`, so checking `merged` first is what tells a merge apart from
+ * a plain close (the distinction the reconciler's tri-state settle depends on).
+ */
+export const prLifecycleOf = (row: {
+  readonly merged: boolean;
+  readonly state: string;
+}): PrLifecycle => (row.merged ? 'merged' : row.state === 'closed' ? 'closed' : 'open');
+
 /** Split an `owner/name` slug into its parts. */
 export const parseRepo = (repo: string): { readonly owner: string; readonly name: string } => {
   const [owner, name] = repo.split('/');
@@ -72,6 +83,11 @@ export interface CheckRunRow {
 export interface CommitStatusRow {
   readonly state: string;
 }
+export interface PullStateRow {
+  readonly merged: boolean;
+  readonly state: string;
+  readonly mergeCommitSha: string | null;
+}
 export interface GithubRest {
   readonly createPull: (p: {
     readonly owner: string;
@@ -86,6 +102,12 @@ export interface GithubRest {
     readonly repo: string;
     readonly pull_number: number;
   }) => Promise<string>;
+  /** Read a PR's own lifecycle — the ground truth `prState` reads through. */
+  readonly pullState: (p: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly pull_number: number;
+  }) => Promise<PullStateRow>;
   readonly checkRuns: (p: {
     readonly owner: string;
     readonly repo: string;
@@ -128,6 +150,15 @@ export const makeGithubForge = (rest: GithubRest): ForgeApi => ({
         catch: (e) => new ForgeError({ op: 'openPR', reason: String(e) }),
       });
       return { id: newPrId(), number: pr.number, url: pr.url };
+    }),
+  prState: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      const row = yield* Effect.tryPromise({
+        try: () => rest.pullState({ owner, repo: name, pull_number: input.prNumber }),
+        catch: (e) => new ForgeError({ op: 'prState', reason: String(e) }),
+      });
+      return { state: prLifecycleOf(row), mergeSha: row.mergeCommitSha };
     }),
   checks: (input) =>
     Effect.gen(function* () {
@@ -182,6 +213,12 @@ export const octokitRest = (token: string): GithubRest => {
       octokit.pulls
         .get({ owner: p.owner, repo: p.repo, pull_number: p.pull_number })
         .then((r) => r.data.head.sha),
+    pullState: (p) =>
+      octokit.pulls.get({ owner: p.owner, repo: p.repo, pull_number: p.pull_number }).then((r) => ({
+        merged: r.data.merged,
+        state: r.data.state,
+        mergeCommitSha: r.data.merge_commit_sha,
+      })),
     checkRuns: (p) =>
       octokit.checks
         .listForRef({ owner: p.owner, repo: p.repo, ref: p.ref })
