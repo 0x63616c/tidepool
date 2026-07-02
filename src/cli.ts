@@ -57,9 +57,9 @@ const renderTickets = (tickets: ReadonlyArray<Ticket>): string => {
       '  Run `tp ticket add --title "..." --goal "..." --target "<owner/repo>"` to add one',
     ].join('\n');
   }
-  const rows = tickets.map((t) => `  ${t.id},${t.title},${t.state},${t.target}`);
+  const rows = tickets.map((t) => `  ${t.id},${t.state},${t.target},${t.title}`);
   return [
-    `tickets[${tickets.length}]{id,title,state,target}:`,
+    `tickets[${tickets.length}]{id,state,target,title}:`,
     ...rows,
     'help[1]:',
     '  Run `tp ticket add --title "..." --goal "..." --target "<owner/repo>"` to add one',
