@@ -1,10 +1,10 @@
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Option } from 'effect';
-import type { Run, RunEvent, TicketNotFound } from './domain.ts';
+import type { Run, RunEvent, Ticket, TicketNotFound } from './domain.ts';
 import { InMemoryTicketStore } from './fakes.ts';
-import { newBoxId, newRunId, newTicketId, type RunId, type TicketId } from './ids.ts';
+import { newBoxId, newPrId, newRunId, newTicketId, type RunId, type TicketId } from './ids.ts';
 import { TicketStore, type TicketStoreApi } from './services.ts';
-import { costReport, traceReport } from './trace.ts';
+import { costReport, renderTicketHeader, traceReport } from './trace.ts';
 
 /**
  * `tp trace` / `tp cost` read the durable data the reconciler persists (runs +
@@ -37,6 +37,68 @@ const run = (over: Partial<Run> & Pick<Run, 'id' | 'ticketId' | 'kind'>): Run =>
 const event = (
   over: Partial<RunEvent> & Pick<RunEvent, 'ticketId' | 'source' | 'ts' | 'line'>,
 ): RunEvent => ({ runId: null, boxId: null, level: null, ...over });
+
+const ticket = (over: Partial<Ticket> & Pick<Ticket, 'id'>): Ticket => ({
+  title: 't',
+  goal: 'g',
+  target: 't/repo',
+  state: 'backlog',
+  branch: null,
+  prNumber: null,
+  prId: null,
+  mergeSha: null,
+  attempts: 0,
+  workedAttempt: null,
+  reason: null,
+  workHandle: null,
+  dispatchedAt: null,
+  ...over,
+});
+
+describe('renderTicketHeader', () => {
+  it('prints every ticket field, including the full multi-line goal', () => {
+    const prId = newPrId();
+    const t = ticket({
+      id: newTicketId(),
+      title: 'Add slugify',
+      goal: 'line one\nline two',
+      target: 't/repo',
+      state: 'failed',
+      branch: 'tp/tckt_abc-add-slugify',
+      prNumber: 42,
+      prId,
+      mergeSha: 'deadbeef',
+      attempts: 2,
+      workedAttempt: 1,
+      reason: 'AgentFailed: boom',
+      dispatchedAt: 1700000000000,
+    });
+    const out = renderTicketHeader(t);
+    assert.include(out, t.id);
+    assert.include(out, 'Add slugify');
+    assert.include(out, 'line one');
+    assert.include(out, 'line two');
+    assert.include(out, 't/repo');
+    assert.include(out, 'failed');
+    assert.include(out, 'tp/tckt_abc-add-slugify');
+    assert.include(out, '42');
+    assert.include(out, prId);
+    assert.include(out, 'deadbeef');
+    assert.include(out, 'attempts: 2');
+    assert.include(out, 'worked-attempt: 1');
+    assert.include(out, 'AgentFailed: boom');
+  });
+
+  it('renders every nullable field as "-", never "null"/"undefined"', () => {
+    const out = renderTicketHeader(ticket({ id: newTicketId() }));
+    assert.notInclude(out, 'null');
+    assert.notInclude(out, 'undefined');
+    assert.include(out, '  branch: -');
+    assert.include(out, 'worked-attempt: -');
+    assert.include(out, '  reason: -');
+    assert.include(out, '  dispatched: -');
+  });
+});
 
 describe('traceReport', () => {
   it.effect('orders the timeline by ts regardless of insertion order', () =>

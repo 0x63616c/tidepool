@@ -76,6 +76,32 @@ const renderTimeline = (events: ReadonlyArray<RunEvent>, runs: ReadonlyArray<Run
   ].join('\n');
 };
 
+/** Render a nullable scalar as `-`; never the literal string "null"/"undefined". */
+const orDash = (v: string | number | null): string => (v === null ? '-' : String(v));
+
+/**
+ * Ticket-header block — every field the store row itself carries (title, goal,
+ * target, state, branch/PR/merge reattach handles, attempt bookkeeping),
+ * always printed in full including the whole multi-line goal. Pure over
+ * `Ticket` alone (no runs/events dependency), so `tp ticket get` can show what
+ * a ticket was asked to do even before it has ever been dispatched.
+ */
+export const renderTicketHeader = (ticket: Ticket): string =>
+  [
+    `ticket: ${ticket.id}`,
+    `  title: ${ticket.title}`,
+    `  state: ${ticket.state}`,
+    `  target: ${ticket.target}`,
+    `  branch: ${orDash(ticket.branch)}`,
+    `  pr: ${orDash(ticket.prNumber)} (prId ${orDash(ticket.prId)})`,
+    `  merge: ${orDash(ticket.mergeSha)}`,
+    `  attempts: ${ticket.attempts}, worked-attempt: ${orDash(ticket.workedAttempt)}`,
+    `  dispatched: ${ticket.dispatchedAt === null ? '-' : new Date(ticket.dispatchedAt).toISOString()}`,
+    `  reason: ${orDash(ticket.reason)}`,
+    '  goal: |',
+    ...ticket.goal.split('\n').map((line) => `    ${line}`),
+  ].join('\n');
+
 /** Pure trace renderer — reused by `tp ticket get` (fed from QueueControl data). */
 export const renderTrace = (
   ticket: Ticket,

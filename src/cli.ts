@@ -29,7 +29,7 @@ import { HttpQueueControl } from './http-queue-control.ts';
 import { RunId, TicketId } from './ids.ts';
 import { LocalQueueControl, QueueControl, type TargetNotConfigured } from './queue-control.ts';
 import { AppConfigLive, ticketStoreLive } from './runtime.ts';
-import { renderTicketCost, renderTrace } from './trace.ts';
+import { renderTicketCost, renderTicketHeader, renderTrace } from './trace.ts';
 
 /**
  * `tp` — the control-plane CLI. A pure queue-control CLIENT: every ticket verb
@@ -157,7 +157,11 @@ export const getAction = (
       limit: 1000,
       cursor: null,
     });
-    return [renderTrace(ticket, runs, events.items), renderTicketCost(id, runs)].join('\n');
+    return [
+      renderTicketHeader(ticket),
+      renderTrace(ticket, runs, events.items),
+      renderTicketCost(id, runs),
+    ].join('\n');
   });
 
 // ── rendering helpers for the observability read path ────────────────────────
