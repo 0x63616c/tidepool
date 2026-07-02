@@ -658,6 +658,8 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
                   : { state: 'merged' as const, mergeSha: 'deadbeef' },
             ),
           checks: () => Effect.succeed('green' as const),
+          isBranchUpToDate: () => Effect.succeed(true),
+          updateBranch: () => Effect.void,
           merge: (input: { readonly repo: string; readonly prNumber: number }) => {
             mergeCalls.push(input.prNumber);
             return Effect.succeed({ sha: 'should-not-be-used' });

@@ -440,7 +440,7 @@ const stepTicket = (
                 yield* store.appendEvents(workCaptures(ticket.id, finalizedRun.id, work));
 
               // Open the PR on first work; on a retry the fix is on the same branch.
-              const branch = branchFor(ticket);
+              const branch = ticket.branch ?? branchFor(ticket);
               if (ticket.prNumber === null) {
                 const pr = yield* forge.openPR({
                   repo: ticket.target,
@@ -600,7 +600,7 @@ const stepTicket = (
         // Dispatch the work agent-worker; store the reattach handle + dispatch
         // time (phase stays `working`). The work runs out of band; we poll it
         // each tick.
-        const branch = branchFor(ticket);
+        const branch = ticket.branch ?? branchFor(ticket);
         const now = yield* Clock.currentTimeMillis;
         yield* recordDispatch(store, {
           ticketId: ticket.id,
@@ -762,7 +762,67 @@ const stepTicket = (
         const prState = yield* forge.prState({ repo: ticket.target, prNumber });
         if (yield* settleFromPrState(store, ticket, prNumber, prState)) return;
 
-        // approved + green → auto-merge → done.
+        const branch = ticket.branch;
+        if (branch === null) {
+          // Inconsistent: PR exists but branch handle is gone. Re-drive work.
+          yield* store.patch(ticket.id, {
+            phase: 'working',
+            workHandle: null,
+            dispatchedAt: null,
+          });
+          yield* store.appendEvents([transitionEvent(ticket.id, 'phase: merging -> working')]);
+          return;
+        }
+
+        const upToDate = yield* forge.isBranchUpToDate({ repo: ticket.target, base, branch });
+        if (!upToDate) {
+          yield* Effect.logInfo('merge gate: branch behind main; updating before merge').pipe(
+            Effect.annotateLogs({ pr: prNumber, branch, base }),
+          );
+          yield* store.appendEvents([transitionEvent(ticket.id, 'merge gate: branch behind main')]);
+          const updated = yield* forge.updateBranch({ repo: ticket.target, prNumber }).pipe(
+            Effect.as(true),
+            Effect.catchTag('MergeConflict', () =>
+              Effect.gen(function* () {
+                yield* Effect.logWarning('merge gate: update conflict; dispatching rework').pipe(
+                  Effect.annotateLogs({ pr: prNumber, branch, base }),
+                );
+                yield* store.patch(ticket.id, {
+                  phase: 'working',
+                  workedAttempt: null,
+                  workHandle: null,
+                  dispatchedAt: null,
+                });
+                yield* store.appendEvents([
+                  transitionEvent(ticket.id, 'merge gate: update conflict'),
+                  transitionEvent(ticket.id, `phase: ${ticket.phase} -> working`),
+                ]);
+                return false;
+              }),
+            ),
+          );
+          if (!updated) return;
+          yield* Effect.logInfo('merge gate: branch updated; returning to reviewing').pipe(
+            Effect.annotateLogs({ pr: prNumber, branch, base }),
+          );
+          yield* store.patch(ticket.id, {
+            phase: 'reviewing',
+            workHandle: null,
+            dispatchedAt: null,
+          });
+          yield* store.appendEvents([
+            transitionEvent(ticket.id, 'merge gate: branch updated'),
+            transitionEvent(ticket.id, `phase: ${ticket.phase} -> reviewing`),
+          ]);
+          return;
+        }
+
+        yield* Effect.logInfo('merge gate: branch up to date').pipe(
+          Effect.annotateLogs({ pr: prNumber, branch, base }),
+        );
+        yield* store.appendEvents([transitionEvent(ticket.id, 'merge gate: branch up to date')]);
+
+        // approved + green + fresh against current base → auto-merge → done.
         const merged = yield* forge.merge({ repo: ticket.target, prNumber });
         yield* Effect.logInfo('merged PR; ticket done').pipe(
           Effect.annotateLogs({ pr: prNumber, sha: merged.sha }),
