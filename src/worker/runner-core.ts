@@ -1,4 +1,5 @@
-import { Data, Effect } from 'effect';
+import { mkdir, rm } from 'node:fs/promises';
+import { Data, Duration, Effect, Schedule } from 'effect';
 import { type OpencodeFailed, type OpencodePort, runSession } from './opencode-session.ts';
 import type {
   ReviewRunnerConfig,
@@ -118,6 +119,13 @@ const gitOp = <A>(op: string, fn: () => Promise<A>): Effect.Effect<A, GitFailed>
     catch: (e) => new GitFailed({ op, reason: shellFailureReason(e) }),
   });
 
+const gitNetOp = <A>(op: string, fn: () => Promise<A>): Effect.Effect<A, GitFailed> =>
+  gitOp(op, fn).pipe(
+    Effect.retry(
+      Schedule.exponential(Duration.millis(100)).pipe(Schedule.intersect(Schedule.recurs(2))),
+    ),
+  );
+
 const fmtOp = <A>(command: string, fn: () => Promise<A>): Effect.Effect<A, FormatFailed> =>
   Effect.tryPromise({ try: fn, catch: (e) => new FormatFailed({ command, reason: String(e) }) });
 
@@ -133,9 +141,16 @@ export const makeRunner =
     Effect.gen(function* () {
       const { git, opencode, format } = deps;
       yield* Effect.logInfo(`cloning ${config.base} into ${config.dir}`);
-      yield* gitOp('clone', () =>
-        git.clone({ cloneUrl: config.cloneUrl, base: config.base, dir: config.dir }),
-      );
+      let cloneAttempt = 0;
+      yield* gitNetOp('clone', async () => {
+        if (cloneAttempt > 0) {
+          // A mid-transfer clone failure can leave partial contents that poison retries.
+          await rm(config.dir, { recursive: true, force: true });
+          await mkdir(config.dir, { recursive: true });
+        }
+        cloneAttempt += 1;
+        return git.clone({ cloneUrl: config.cloneUrl, base: config.base, dir: config.dir });
+      });
       yield* gitOp('branch', () => git.checkoutBranch(config.dir, config.branch));
       yield* gitOp('config', () => git.configUser(config.dir));
 
@@ -170,7 +185,7 @@ export const makeRunner =
       yield* gitOp('add', () => git.addAll(config.dir));
       yield* gitOp('commit', () => git.commit(config.dir, config.commitMsg));
       const commitSha = (yield* gitOp('headSha', () => git.headSha(config.dir))).trim();
-      yield* gitOp('push', () => git.push(config.dir, config.branch));
+      yield* gitNetOp('push', () => git.push(config.dir, config.branch));
       yield* Effect.logInfo(`pushed ${commitSha}`);
 
       return { commitSha, usage };
