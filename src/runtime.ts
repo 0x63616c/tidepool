@@ -57,6 +57,23 @@ export type WorkerBackend = 'local' | 'k8s';
 export const workerBackend = (): WorkerBackend =>
   process.env.TIDEPOOL_AGENT_WORKER === 'k8s' ? 'k8s' : 'local';
 
+/**
+ * The agent-worker Job's `activeDeadlineSeconds` (Ticket D). Must exceed
+ * `DEFAULT_SESSION_TIMEOUT_MS` (60 min, see `opencode-session.ts`) or k8s kills
+ * the pod mid-session; the default 3900s (65 min) leaves ~5 min slack for the
+ * post-session git commit/push after the opencode session itself completes.
+ */
+export const workerDeadlineSeconds = (): number =>
+  Number(envOr('TIDEPOOL_WORKER_DEADLINE_SEC', '3900'));
+
+/**
+ * The agent-worker Job's `ttlSecondsAfterFinished` — how long a finished/failed
+ * Job (and its pod) stays around before k8s GCs it. Widened to 86400s (24h) so
+ * `kubectl get pods` still shows a completed/crashed agent run for post-mortem,
+ * well clear of the reconciler's poll interval.
+ */
+export const workerTtlSeconds = (): number => Number(envOr('TIDEPOOL_WORKER_TTL_SEC', '86400'));
+
 /** sqlite store, scoped so its connection closes (flushes) at the end of a run. */
 export const SqliteTicketStore = Layer.scoped(
   TicketStore,
@@ -119,8 +136,8 @@ export const inClusterK8sConfig: Effect.Effect<K8sWorkerConfig> = Effect.gen(fun
     command: ['bun', 'run', '/app/src/worker/agent-worker.ts'],
     cpuRequest: envOr('TIDEPOOL_WORKER_CPU_REQUEST', '2'),
     memRequest: envOr('TIDEPOOL_WORKER_MEM_REQUEST', '2Gi'),
-    activeDeadlineSeconds: Number(envOr('TIDEPOOL_WORKER_DEADLINE_SEC', '1800')),
-    ttlSecondsAfterFinished: Number(envOr('TIDEPOOL_WORKER_TTL_SEC', '600')),
+    activeDeadlineSeconds: workerDeadlineSeconds(),
+    ttlSecondsAfterFinished: workerTtlSeconds(),
   };
 });
 

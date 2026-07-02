@@ -142,6 +142,10 @@ export const makeSdkOpencodePort = (): OpencodePort => {
       const text = parts.flatMap((p) => (p.type === 'text' ? [p.text] : [])).join('');
       return { info, text };
     },
+    listMessages: async (_server, sessionId) => {
+      const res = await required().client.session.messages({ path: { id: sessionId } });
+      return res.data ?? [];
+    },
   };
 };
 

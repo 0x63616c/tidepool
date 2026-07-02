@@ -67,6 +67,7 @@ const fakeOpencode = (text: string): OpencodePort => ({
     yield { type: 'session.idle', properties: { sessionID: 'ses_fake' } };
   },
   prompt: async () => ({ info: assistantInfo, text }),
+  listMessages: async () => [],
 });
 
 const runWith = async (config: unknown, opencode: OpencodePort): Promise<Array<string>> => {
