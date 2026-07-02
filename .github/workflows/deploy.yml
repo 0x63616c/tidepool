@@ -1,12 +1,17 @@
-name: infra
+name: deploy
 
-# Tidepool Kubernetes cluster (Pulumi, infra/pulumi/cluster).
-#   PR   → `pulumi preview` (read-only: computes the plan, creates NOTHING).
-#   main → `pulumi up`, but the job runs in the `production` GitHub Environment,
-#          which requires a human (Calum) to click approve. So MERGING is safe —
-#          the live apply pauses for a human, never auto-spends (tenet 6).
-#          On success the job comments the deploy result on the merged PR — squash
-#          merges break GitHub's native PR↔deployment link, so we post it ourselves.
+# Build the tidepool images (shared base → control-plane + agent-worker) and
+# deploy the Kubernetes cluster (Pulumi, infra/pulumi/cluster) — one workflow so
+# `apply` depends on `build-images` via `needs:` instead of polling ghcr.
+#   PR   → `build-images` builds (no push) to prove the Dockerfiles are valid;
+#          `preview` runs `pulumi preview` (read-only) when infra-relevant paths
+#          changed.
+#   main → `build-images` builds + pushes to ghcr by tag (:${sha} + :latest),
+#          then `apply` runs `pulumi up` with THIS commit's freshly-built image
+#          digests — no human gate (personal scale, blast radius small).
+#          On success it comments the deploy result on the merged PR — squash
+#          merges break GitHub's native PR↔deployment link, so we post it
+#          ourselves.
 #
 # Secrets flow: SOPS_AGE_KEY (the `ci` age key) is the ONLY GitHub Actions secret.
 # It decrypts the hcloud token, Hetzner S3 creds, and the Pulumi config passphrase
@@ -17,42 +22,16 @@ name: infra
 on:
   push:
     branches: [main]
-    # App-source paths are included so a CODE change (baked into the control-plane +
-    # agent-worker images) auto-deploys: the deploy-job resolves the new image digest and
-    # rerolls. Kept OFF pull_request below so code PRs don't run the (barman-red,
-    # secret-touching) infra preview — deploy happens only on merge.
-    paths:
-      - 'src/**'
-      - 'package.json'
-      - 'bun.lock'
-      - 'infra/docker/**'
-      - 'infra/pulumi/cluster/**'
-      - '.github/workflows/infra.yml'
-      - 'secrets/hcloud_api_token.enc.yaml'
-      - 'secrets/hetzner_s3_credentials.enc.yaml'
-      - 'secrets/pulumi_config_passphrase.enc.yaml'
-      - '.sops.yaml'
   pull_request:
-    paths:
-      - 'infra/pulumi/cluster/**'
-      - '.github/workflows/infra.yml'
-      - 'secrets/hcloud_api_token.enc.yaml'
-      - 'secrets/hetzner_s3_credentials.enc.yaml'
-      - 'secrets/pulumi_config_passphrase.enc.yaml'
-      - '.sops.yaml'
 
 permissions:
   contents: read
-  packages: read # deploy-job pulls the current commit's image digests from ghcr (auto-deploy)
-  pull-requests: write # deploy-job comments the deploy result on the merged PR (GitLab-style visibility)
-  deployments: read # deploy-job reads the environment deployment url for the PR comment
-
-# Never cancel an in-flight apply; previews are cheap enough to let run.
-concurrency:
-  group: infra-${{ github.ref }}
-  cancel-in-progress: false
+  packages: write # build-images pushes to ghcr
+  pull-requests: write # apply comments the deploy result on the merged PR (GitLab-style visibility)
+  deployments: read # apply reads the environment deployment url for the PR comment
 
 env:
+  REGISTRY: ghcr.io
   WORK_DIR: infra/pulumi/cluster
   STACK: production
   # Self-managed Pulumi state on Hetzner Object Storage (public, non-secret).
@@ -61,9 +40,47 @@ env:
   SOPS_VERSION: v3.13.2
 
 jobs:
-  preview:
-    if: github.event_name == 'pull_request'
+  # Path gate for the two secrets-touching jobs below — the workflow's own push/
+  # pull_request triggers are unconditional so build-images always builds+validates
+  # (matches its old images.yml behavior), and preview/apply instead gate on this
+  # job's output (matches infra.yml's old per-event path filters).
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      preview: ${{ steps.filter.outputs.preview }}
+      apply: ${{ steps.filter.outputs.apply }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            preview:
+              - 'infra/pulumi/cluster/**'
+              - '.github/workflows/deploy.yml'
+              - 'secrets/hcloud_api_token.enc.yaml'
+              - 'secrets/hetzner_s3_credentials.enc.yaml'
+              - 'secrets/pulumi_config_passphrase.enc.yaml'
+              - '.sops.yaml'
+            apply:
+              - 'src/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'infra/docker/**'
+              - 'infra/pulumi/cluster/**'
+              - '.github/workflows/deploy.yml'
+              - 'secrets/hcloud_api_token.enc.yaml'
+              - 'secrets/hetzner_s3_credentials.enc.yaml'
+              - 'secrets/pulumi_config_passphrase.enc.yaml'
+              - '.sops.yaml'
+
+  preview:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.preview == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: infra-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -103,13 +120,101 @@ jobs:
           cloud-url: ${{ env.PULUMI_BACKEND_URL }}
         # PULUMI_CONFIG_PASSPHRASE is exported to $GITHUB_ENV from sops above.
 
-  deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  build-images:
     runs-on: ubuntu-latest
-    # Fully automatic: a merge to main builds images (images.yml) then this job
-    # resolves the current commit's digests and applies — no human gate (personal
-    # scale, blast radius small). The `production` environment is kept as a GitHub
-    # deployment label only; add required reviewers here to reintroduce a gate.
+    concurrency:
+      # push-to-main builds keyed by sha — apply needs: this job's outputs for a
+      # specific sha, so one push must never cancel another push's in-flight
+      # build. PR builds still dedupe/cancel by ref.
+      group: images-${{ github.event_name == 'push' && github.sha || github.ref }}
+      cancel-in-progress: true
+    outputs:
+      control-plane-image: ${{ steps.resolve.outputs.control-plane-image }}
+      agent-worker-image: ${{ steps.resolve.outputs.agent-worker-image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Lowercase the owner — ghcr repository paths must be lowercase, GitHub
+      # org/user names may not be.
+      - name: compute image prefix
+        id: prefix
+        run: echo "value=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/tidepool" >>"$GITHUB_OUTPUT"
+
+      # Base first (GHA-cached so an unchanged Dockerfile is a cache hit instead
+      # of the ~6-8min cold rebuild — this is where the expensive apt/opencode
+      # layers live). `--load` puts it in the local docker daemon; the two
+      # derived builds then use plain `docker build` (not buildx), since the
+      # docker-container driver buildx needs for GHA caching can't see a
+      # locally-loaded image for FROM resolution — it tries to pull it from
+      # Docker Hub instead. Derived images are cheap (just COPY app source onto
+      # base), so plain local-daemon builds in parallel is the right tradeoff.
+      - name: build base
+        run: >
+          docker buildx build -f infra/docker/base.Dockerfile
+          --cache-from type=gha,scope=base --cache-to type=gha,scope=base,mode=max
+          --load -t tidepool-base:latest .
+      - name: build control-plane + agent-worker (parallel)
+        run: |
+          set -eu
+          docker build -f infra/docker/control-plane.Dockerfile \
+            --build-arg BASE_IMAGE=tidepool-base:latest \
+            -t tidepool-control-plane:latest . &
+          pids=("$!")
+          docker build -f infra/docker/agent-worker.Dockerfile \
+            --build-arg BASE_IMAGE=tidepool-base:latest \
+            -t tidepool-agent-worker:latest . &
+          pids+=("$!")
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
+          done
+          exit "$status"
+
+      - name: log in to ghcr
+        if: github.event_name == 'push'
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login "$REGISTRY" -u '${{ github.actor }}' --password-stdin
+
+      - name: tag + push
+        if: github.event_name == 'push'
+        run: |
+          set -eux
+          prefix='${{ steps.prefix.outputs.value }}'
+          sha='${{ github.sha }}'
+          for img in base control-plane agent-worker; do
+            local_tag="tidepool-${img}:latest"
+            docker tag "$local_tag" "${prefix}-${img}:${sha}"
+            docker tag "$local_tag" "${prefix}-${img}:latest"
+            docker push "${prefix}-${img}:${sha}"
+            docker push "${prefix}-${img}:latest"
+          done
+
+      # Just-pushed, so a single inspect is guaranteed to find it — no poll.
+      # apply consumes these directly via needs.build-images.outputs.
+      - name: resolve pushed digests
+        if: github.event_name == 'push'
+        id: resolve
+        run: |
+          set -eu
+          prefix='${{ steps.prefix.outputs.value }}'
+          sha='${{ github.sha }}'
+          for img in control-plane agent-worker; do
+            digest=$(docker buildx imagetools inspect "${prefix}-${img}:${sha}" --format '{{.Manifest.Digest}}')
+            echo "${img}-image=${prefix}-${img}@${digest}" >>"$GITHUB_OUTPUT"
+          done
+
+  apply:
+    needs: [changes, build-images]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.apply == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      # Never cancel an in-flight apply; concurrent merges queue and run serially.
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
+    # Fully automatic: build-images builds+pushes, this job applies with those
+    # digests — no human gate (personal scale, blast radius small). The
+    # `production` environment is kept as a GitHub deployment label only; add
+    # required reviewers here to reintroduce a gate.
     environment: production
     steps:
       - uses: actions/checkout@v4
@@ -146,7 +251,7 @@ jobs:
           aws_secret=$(sops -d --extract '["secret_access_key"]' secrets/hetzner_s3_credentials.enc.yaml)
           pulumi_passphrase=$(sops -d --extract '["pulumi_config_passphrase"]' secrets/pulumi_config_passphrase.enc.yaml)
           # PR-6.5 (human-approved tenet-9 widening): the control-plane k8s Secret
-          # is seeded from these two. deploy-job ONLY — preview renders them empty.
+          # is seeded from these two. apply job ONLY — preview renders them empty.
           forge_token=$(sops -d --extract '["forge_github_token"]' secrets/forge_github_token.enc.yaml)
           opencode_auth=$(sops -d --extract '["runner_opencode_auth_json"]' secrets/runner_opencode_auth_json.enc.yaml)
           echo "::add-mask::$hcloud_token"; echo "::add-mask::$aws_key"; echo "::add-mask::$aws_secret"
@@ -178,46 +283,11 @@ jobs:
           [ -n "$ip" ] || { echo "could not resolve runner IP"; exit 1; }
           echo "::add-mask::$ip"
           echo "TIDEPOOL_CI_RUNNER_CIDR=${ip}/32" >>"$GITHUB_ENV"
-      - name: resolve this commit's image digests (auto-deploy)
-        run: |
-          # Merge→deploy: reroll with THIS commit's freshly-built images. images.yml
-          # (which pushes :${sha}) runs in parallel with this job, so poll ghcr for
-          # the tag, and FAIL CLOSED if it never appears — a merge must never apply a
-          # stale image. config.ts (pickImage) prefers these over the git-pinned
-          # default and rejects a non-@sha256 ref.
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          # Diagnostics MUST go to stderr — stdout is captured as the resolved ref,
-          # so a "waiting..." line on stdout would poison $GITHUB_ENV (invalid format).
-          resolve() {
-            repo="$1"
-            tries=0
-            until digest=$(docker buildx imagetools inspect "ghcr.io/0x63616c/${repo}:${{ github.sha }}" --format '{{.Manifest.Digest}}' 2>/dev/null); do
-              tries=$((tries + 1))
-              # 60×10s = 10min. images.yml runs in parallel and a rapid series of
-              # merges cancels-in-progress → a cold base-image rebuild (~6-8min), so
-              # a 5min window could time out before the image lands (it did once).
-              if [ "$tries" -ge 60 ]; then
-                echo "timed out waiting for ghcr.io/0x63616c/${repo}:${{ github.sha }}" >&2
-                return 1
-              fi
-              echo "waiting for ${repo}:${{ github.sha }} (attempt ${tries})..." >&2
-              sleep 10
-            done
-            printf 'ghcr.io/0x63616c/%s@%s' "$repo" "$digest"
-          }
-          # Assign first so `set -e` fails the step closed if a resolve times out,
-          # rather than writing an empty override.
-          cp=$(resolve tidepool-control-plane)
-          aw=$(resolve tidepool-agent-worker)
-          {
-            echo "TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE=${cp}"
-            echo "TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE=${aw}"
-          } >>"$GITHUB_ENV"
       - name: ensure Pulumi state bucket exists (bootstrap seam)
         # Pulumi can't create its own backend (circular), so this idempotent step
         # (re)creates tidepool-pulumi-state from the sops-decrypted S3 keys already in
         # $GITHUB_ENV — making a keys-only cold start (scorched-earth → rebuild) fully
-        # hands-free. RGW-idempotent, so a normal deploy is a no-op. deploy job ONLY:
+        # hands-free. RGW-idempotent, so a normal deploy is a no-op. apply job ONLY:
         # preview is read-only and must never create a resource. AWS_REGION is the
         # top-level env; AWS_ACCESS_KEY_ID/SECRET come from the decrypt step above.
         run: bash infra/pulumi/cluster/ensure-state-bucket.sh
@@ -236,9 +306,9 @@ jobs:
           # Consumed by config.ts → firewall control-port allow-list (self-healing;
           # next apply overwrites this /32 with the new runner IP).
           TIDEPOOL_CI_RUNNER_CIDR: ${{ env.TIDEPOOL_CI_RUNNER_CIDR }}
-          # Auto-deploy: current-commit image digests → config.ts pickImage override.
-          TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE: ${{ env.TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE }}
-          TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE: ${{ env.TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE }}
+          # Auto-deploy: build-images job's just-pushed digests → config.ts pickImage override.
+          TIDEPOOL_DEPLOY_CONTROL_PLANE_IMAGE: ${{ needs.build-images.outputs.control-plane-image }}
+          TIDEPOOL_DEPLOY_AGENT_WORKER_IMAGE: ${{ needs.build-images.outputs.agent-worker-image }}
           # Provenance: stamp this commit as the tidepool/git-sha label on the
           # reconciler + (rethreaded) every worker pod → config.ts GIT_SHA.
           TIDEPOOL_GIT_SHA: ${{ github.sha }}
