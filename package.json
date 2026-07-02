@@ -18,6 +18,7 @@
     "test": "bun --bun vitest run",
     "commitlint": "commitlint --last --verbose",
     "kube": "bash infra/scripts/kubeconfig.sh",
+    "skills:link": "bash infra/scripts/link-skills.sh",
     "seal:hashes": "bash infra/scripts/redaction-hashes.sh",
     "check:secrets": "bash infra/scripts/redaction-hashes.sh --check",
     "check": "biome check . && bun run lint:sh && bun run typecheck && bun run test",
