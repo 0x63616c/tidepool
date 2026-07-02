@@ -61,13 +61,33 @@ export const parseVerdict = (text: string): ReviewVerdict => {
  * message (not the agent) so the graded standard — ticket id first, then a
  * conventional subject — holds mechanically every time.
  */
+const MAX_HEADER_LENGTH = 100;
+
+const normalizedSubject = (title: string): string => {
+  const trimmed = title.trim().replace(/\s+/g, ' ');
+  const subject = trimmed.length === 0 ? 'update' : trimmed;
+  return subject.charAt(0).toLowerCase() + subject.slice(1);
+};
+
+const truncateSubject = (subject: string, maxLength: number): string => {
+  if (subject.length <= maxLength) return subject;
+  if (maxLength <= 3) return subject.slice(0, maxLength);
+  return `${subject.slice(0, maxLength - 3).trimEnd()}...`;
+};
+
+const boundedHeader = (prefix: string, title: string, suffix = ''): string => {
+  const maxSubjectLength = MAX_HEADER_LENGTH - prefix.length - suffix.length;
+  return `${prefix}${truncateSubject(normalizedSubject(title), maxSubjectLength)}${suffix}`;
+};
+
 export const commitMessage = (ticket: { readonly id: string; readonly title: string }): string =>
-  `#${ticket.id} feat: ${ticket.title}`;
+  boundedHeader(`#${ticket.id} feat: `, ticket.title);
 
 // ── opencode orchestration ───────────────────────────────────────────────────
 
 /** PR title/body are derived from the ticket so they're deterministic. */
-export const workTitle = (ticket: Ticket): string => `feat: ${ticket.title} (${ticket.id})`;
+export const workTitle = (ticket: { readonly id: string; readonly title: string }): string =>
+  boundedHeader('feat: ', ticket.title, ` (${ticket.id})`);
 export const workBody = (ticket: Ticket): string => ticket.goal;
 
 /** Split a `provider/model` config string into the SDK's `{providerID, modelID}`. */

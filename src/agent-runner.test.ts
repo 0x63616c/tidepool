@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { commitMessage, fetchPrDiff, parseUsage, parseVerdict } from './agent-runner.ts';
+import { commitMessage, fetchPrDiff, parseUsage, parseVerdict, workTitle } from './agent-runner.ts';
 
 /**
  * Usage parsing is the proof-of-real-work signal (`tp doctor` asserts non-zero
@@ -101,6 +101,25 @@ describe('commitMessage', () => {
     assert.strictEqual(msg, '#tckt_001 feat: add slugify');
     // Must satisfy the repo's commit header pattern.
     assert.match(msg, /^#(tckt_[0-9a-z]+) (\w+)(?:\(([^)]+)\))?: (.+)$/);
+  });
+
+  it('keeps generated commit and PR headers valid for long capitalized ticket titles', () => {
+    const ticket = {
+      id: 'tckt_52d1ao2ab0',
+      title:
+        'Fix The Reconciler Commit Message And Pull Request Title Generation For Long Capitalized Ticket Titles',
+      goal: 'irrelevant',
+    };
+
+    const commit = commitMessage(ticket);
+    const title = workTitle(ticket);
+
+    assert.isAtMost(commit.length, 100);
+    assert.isAtMost(title.length, 100);
+    assert.match(commit, /^#tckt_52d1ao2ab0 feat: [a-z]/);
+    assert.match(title, /^feat: [a-z]/);
+    assert.include(commit, '#tckt_52d1ao2ab0 feat: ');
+    assert.include(title, ' (tckt_52d1ao2ab0)');
   });
 });
 
