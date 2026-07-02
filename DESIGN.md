@@ -75,10 +75,15 @@ laptop ──(git push ticket file)──▶ GitHub ◀──(poll)── contro
 > delivers only `server.connected`/`server.heartbeat` — zero session/tool events (proven by in-cluster
 > repro) — so the old event-collector-only logging went silent right after "opencode server started",
 > making a healthy 40-minute run look hung. The runner now also **polls** the opencode server's
-> `GET /session/:id/message` snapshot every few seconds (`opencode-session.ts#pollProgress`), diffs it
-> against the last poll via the pure `diffMessages` reducer, and logs one line per tool/part that's new
-> or changed — so `kubectl logs` shows real progress instead of going dark. The SSE collector is kept
-> (harmless, and correct for local dev where SSE does deliver events).
+> `GET /session/:id/message` snapshot every second (`opencode-session.ts#DEFAULT_POLL_INTERVAL_MS`,
+> was 3s), diffs it against the last poll via the pure `diffMessages` reducer, and logs one line per
+> tool/part that's new or changed — so `kubectl logs` shows real progress instead of going dark. It
+> also streams the assistant's actual `text`/`reasoning` content (delta-only per poll, labelled
+> `[text]`/`[reasoning]`, tracked via a length-encoded signature so growing parts aren't re-logged in
+> full each time), and logs the real diff/patch for completed file-editing tool calls (`edit` /
+> `apply_patch` / `write` / `patch` — prefers a ready-made unified patch, falls back to an
+> old/new-string pair or raw written content), labelled `[diff]`. The SSE collector is kept (harmless,
+> and correct for local dev where SSE does deliver events).
 
 ---
 

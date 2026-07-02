@@ -26,7 +26,7 @@ import { parseUsage } from './usage.ts';
 export const DEFAULT_SESSION_TIMEOUT_MS = 60 * 60 * 1000;
 
 /** How often the progress poller re-fetches `listMessages` (see `pollProgress`). */
-const DEFAULT_POLL_INTERVAL_MS = 3000;
+export const DEFAULT_POLL_INTERVAL_MS = 1000;
 
 /** What one driven session yields: token accounting plus the assistant's reply. */
 export interface SessionOutcome {
@@ -171,10 +171,70 @@ export const describeEvent = (ev: unknown): string | null => {
   }
 };
 
-/** Signature that changes exactly when a part is "worth re-logging" — new id, or (for tool parts) a status transition. */
+/**
+ * Signature that changes exactly when a part is "worth re-logging" — new id,
+ * (for tool parts) a status transition, or (for text/reasoning parts) growth
+ * in the streamed text's length. Encoding the length in the signature itself
+ * (`text:42`) lets `diffMessages` detect growth without a second map.
+ */
 const partSignature = (part: Record<string, unknown>): string => {
-  const status = part.type === 'tool' && isRecord(part.state) ? str(part.state.status) : null;
-  return `${String(part.type)}:${status ?? ''}`;
+  if (part.type === 'tool') {
+    const status = isRecord(part.state) ? str(part.state.status) : null;
+    return `tool:${status ?? ''}`;
+  }
+  if ((part.type === 'text' || part.type === 'reasoning') && typeof part.text === 'string') {
+    return `${part.type}:${part.text.length}`;
+  }
+  return `${String(part.type)}:`;
+};
+
+/** Tool names that write file content — worth logging the actual diff/patch for, not just a title. */
+const EDIT_TOOLS = new Set(['edit', 'apply_patch', 'write', 'patch']);
+
+/**
+ * Best-effort diff/patch extraction for a completed file-editing tool call.
+ * Prefers a ready-made unified diff (`input.patch`/`input.diff`, e.g. the
+ * `apply_patch` tool's shape seen in production); falls back to an
+ * old/new-string pair, then raw written content. `null` if the tool isn't an
+ * editing tool, hasn't completed yet, or carries none of these shapes.
+ */
+const describeToolDiff = (part: Record<string, unknown>): string | null => {
+  if (part.type !== 'tool') return null;
+  const tool = str(part.tool);
+  if (!tool || !EDIT_TOOLS.has(tool)) return null;
+  const state = isRecord(part.state) ? part.state : {};
+  if (str(state.status) !== 'completed') return null;
+  const input = isRecord(state.input) ? state.input : {};
+  const patch = str(input.patch) ?? str(input.diff);
+  if (patch) return `[diff] ${tool}:\n${patch}`;
+  const oldString = str(input.oldString);
+  const newString = str(input.newString);
+  if (oldString !== null || newString !== null) {
+    return `[diff] ${tool}:\n--- before\n${oldString ?? ''}\n+++ after\n${newString ?? ''}`;
+  }
+  const content = str(input.content);
+  if (content !== null) return `[diff] ${tool} write:\n${content}`;
+  return null;
+};
+
+/** Prefix for a streamed text/reasoning delta line, keyed by part type. */
+const TEXT_DELTA_LABELS: Record<string, string> = { text: '[text]', reasoning: '[reasoning]' };
+
+/**
+ * New substring of a growing text/reasoning part since the last poll, so only
+ * the delta is logged rather than the whole accumulated text each time. The
+ * previously-logged length is recovered from `prevSig` (`"text:<len>"`), the
+ * same signature `partSignature` just produced for this part.
+ */
+const describeTextDelta = (
+  part: Record<string, unknown>,
+  prevSig: string | undefined,
+): string | null => {
+  const label = TEXT_DELTA_LABELS[String(part.type)];
+  if (!label || typeof part.text !== 'string') return null;
+  const prevLen = prevSig ? Number(prevSig.slice(prevSig.indexOf(':') + 1)) || 0 : 0;
+  const delta = part.text.slice(Math.max(0, prevLen));
+  return delta.length > 0 ? `${label} ${delta}` : null;
 };
 
 /**
@@ -182,9 +242,11 @@ const partSignature = (part: Record<string, unknown>): string => {
  * part-id -> last-logged-signature map from the previous poll and the latest
  * full `listMessages` snapshot (`Array<{info, parts}>`), returns the log lines
  * for parts that are new or whose signature changed, plus the updated map —
- * so a part already logged at its current status is never re-logged. Total
- * over `unknown` — a malformed message or part is skipped, never thrown, so
- * `pollProgress`'s loop can never die on a shape it didn't expect.
+ * so a part already logged at its current status/text-length is never
+ * re-logged. A single changed part can emit multiple lines (e.g. a completed
+ * edit tool logs both its status summary and its diff). Total over `unknown`
+ * — a malformed message or part is skipped, never thrown, so `pollProgress`'s
+ * loop can never die on a shape it didn't expect.
  */
 export const diffMessages = (
   seen: ReadonlyMap<string, string>,
@@ -196,11 +258,16 @@ export const diffMessages = (
     if (!isRecord(msg) || !Array.isArray(msg.parts)) continue;
     for (const part of msg.parts) {
       if (!isRecord(part) || typeof part.id !== 'string') continue;
+      const prevSig = seen.get(part.id);
       const sig = partSignature(part);
-      if (next.get(part.id) === sig) continue;
+      if (prevSig === sig) continue;
       next.set(part.id, sig);
-      const line = describeToolPart(part);
-      if (line !== null) lines.push(line);
+      const toolLine = describeToolPart(part);
+      if (toolLine !== null) lines.push(toolLine);
+      const diffLine = describeToolDiff(part);
+      if (diffLine !== null) lines.push(diffLine);
+      const textLine = describeTextDelta(part, prevSig);
+      if (textLine !== null) lines.push(textLine);
     }
   }
   return { lines, seen: next };
