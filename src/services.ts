@@ -110,6 +110,15 @@ export interface ForgeApi {
     readonly repo: string;
     readonly prNumber: number;
   }) => Effect.Effect<CIStatus, ForgeError>;
+  readonly isBranchUpToDate: (input: {
+    readonly repo: string;
+    readonly base: string;
+    readonly branch: string;
+  }) => Effect.Effect<boolean, ForgeError>;
+  readonly updateBranch: (input: {
+    readonly repo: string;
+    readonly prNumber: number;
+  }) => Effect.Effect<void, ForgeError | MergeConflict>;
   readonly merge: (input: {
     readonly repo: string;
     readonly prNumber: number;

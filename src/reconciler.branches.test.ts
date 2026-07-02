@@ -195,6 +195,8 @@ describe('reconciler failure branches', () => {
         openPR: () => Effect.die('unused'),
         prState: () => Effect.succeed({ state: 'open', mergeSha: null }),
         checks: () => Effect.fail(new ForgeError({ op: 'checks', reason: 'github 503' })),
+        isBranchUpToDate: () => Effect.die('unused'),
+        updateBranch: () => Effect.die('unused'),
         merge: () => Effect.die('unused'),
       });
 

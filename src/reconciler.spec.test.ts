@@ -237,6 +237,134 @@ describe('transition table: merging (resumable, idempotent)', () => {
     }),
   );
 
+  it.effect('row 25a: branch behind main → update branch, return to reviewing, no merge', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'merging',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: 0,
+      });
+      const updates: number[] = [];
+      const merges: number[] = [];
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({
+          ci: 'green',
+          branchUpToDate: false,
+          onUpdateBranch: ({ prNumber }) => updates.push(prNumber),
+          onMerge: ({ prNumber }) => merges.push(prNumber),
+        }),
+        fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+      );
+
+      yield* runSteps(1, env);
+
+      const t = yield* store.byId(ticket.id);
+      assert.strictEqual(t.phase, 'reviewing');
+      assert.strictEqual(t.attempts, 0, 'freshness update must not spend an attempt');
+      assert.deepStrictEqual(updates, [7]);
+      assert.deepStrictEqual(merges, []);
+      assert.strictEqual(dispatches.length, 0);
+      const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
+      assert.includeMembers(
+        events.map((e) => e.line),
+        [
+          'merge gate: branch behind main',
+          'merge gate: branch updated',
+          'phase: merging -> reviewing',
+        ],
+      );
+    }),
+  );
+
+  it.effect('row 25b: branch up to date + green + approved → merge proceeds', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'merging',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: 0,
+      });
+      const updates: number[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({
+          branchUpToDate: true,
+          onUpdateBranch: ({ prNumber }) => updates.push(prNumber),
+        }),
+        fakeAgentWorker({}),
+      );
+
+      yield* runSteps(1, env);
+
+      const t = yield* store.byId(ticket.id);
+      assert.strictEqual(t.phase, 'done');
+      assert.isNotNull(t.mergeSha);
+      assert.deepStrictEqual(updates, []);
+      const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
+      assert.include(
+        events.map((e) => e.line),
+        'merge gate: branch up to date',
+      );
+    }),
+  );
+
+  it.effect('row 25c: update-branch conflict → working rework, no attempt spent, PR reused', () =>
+    Effect.gen(function* () {
+      const store = yield* makeInMemoryStore;
+      const ticket = yield* store.add(newTicket);
+      yield* store.patch(ticket.id, {
+        phase: 'merging',
+        branch: 'tp/x',
+        prNumber: 7,
+        prId: newPrId(),
+        workedAttempt: 0,
+      });
+      const dispatches: DispatchInput[] = [];
+      const env = Layer.mergeAll(
+        baseLayers(store),
+        fakeForge({ branchUpToDate: false, failUpdateBranch: true }),
+        fakeAgentWorker({ onDispatch: (d) => dispatches.push(d) }),
+      );
+
+      yield* runSteps(2, env);
+
+      const t = yield* store.byId(ticket.id);
+      assert.strictEqual(t.phase, 'working');
+      assert.strictEqual(t.attempts, 0);
+      assert.strictEqual(t.branch, 'tp/x');
+      assert.strictEqual(t.prNumber, 7);
+      assert.isNull(t.workedAttempt);
+      assert.deepStrictEqual(
+        dispatches.map((d) => (d.kind === 'work' ? [d.kind, d.branch] : [d.kind, d.prNumber])),
+        [['work', 'tp/x']],
+      );
+      const events = yield* store.eventsFor({ ticketId: ticket.id, source: 'control-plane' });
+      assert.includeMembers(
+        events.map((e) => e.line),
+        [
+          'merge gate: branch behind main',
+          'merge gate: update conflict',
+          'phase: merging -> working',
+        ],
+      );
+
+      yield* runSteps(1, env);
+      const reviewed = yield* store.byId(ticket.id);
+      assert.strictEqual(reviewed.phase, 'reviewing');
+      assert.strictEqual(reviewed.branch, 'tp/x');
+      assert.strictEqual(reviewed.prNumber, 7);
+    }),
+  );
+
   it.effect('crash-resume: ticket found in merging with open PR merges WITHOUT any dispatch', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;

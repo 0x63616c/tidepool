@@ -49,6 +49,10 @@ export const commitStatusState = (state: string): CheckState => {
 export const classifyMergeError = (status: number): 'conflict' | 'forge' =>
   status === 405 || status === 409 ? 'conflict' : 'forge';
 
+/** GitHub reports update-branch conflicts as a validation/conflict status. */
+export const classifyUpdateBranchError = (status: number): 'conflict' | 'forge' =>
+  status === 409 || status === 422 ? 'conflict' : 'forge';
+
 /**
  * Map GitHub's pull wire state to our tri-state `PrLifecycle`. `merged` takes
  * priority over `state` — GitHub always sets `state: 'closed'` alongside
@@ -118,6 +122,17 @@ export interface GithubRest {
     readonly repo: string;
     readonly ref: string;
   }) => Promise<ReadonlyArray<CommitStatusRow>>;
+  readonly compare: (p: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly base: string;
+    readonly head: string;
+  }) => Promise<{ readonly status: string }>;
+  readonly updateBranch: (p: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly pull_number: number;
+  }) => Promise<void>;
   /** Squash-merge; rejects with an error carrying an HTTP `status` on failure. */
   readonly squashMerge: (p: {
     readonly owner: string;
@@ -181,6 +196,26 @@ export const makeGithubForge = (rest: GithubRest): ForgeApi => ({
       ];
       return combineCI(states);
     }),
+  isBranchUpToDate: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      const row = yield* Effect.tryPromise({
+        try: () => rest.compare({ owner, repo: name, base: input.base, head: input.branch }),
+        catch: (e) => new ForgeError({ op: 'isBranchUpToDate', reason: String(e) }),
+      });
+      return row.status === 'identical' || row.status === 'ahead';
+    }),
+  updateBranch: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      yield* Effect.tryPromise({
+        try: () => rest.updateBranch({ owner, repo: name, pull_number: input.prNumber }),
+        catch: (e) =>
+          classifyUpdateBranchError(httpStatusOf(e)) === 'conflict'
+            ? new MergeConflict({ prNumber: input.prNumber })
+            : new ForgeError({ op: 'updateBranch', reason: String(e) }),
+      });
+    }),
   merge: (input) =>
     Effect.gen(function* () {
       const { owner, name } = parseRepo(input.repo);
@@ -229,6 +264,18 @@ export const octokitRest = (token: string): GithubRest => {
       octokit.repos
         .listCommitStatusesForRef({ owner: p.owner, repo: p.repo, ref: p.ref })
         .then((r) => r.data.map((s) => ({ state: s.state }))),
+    compare: (p) =>
+      octokit.repos
+        .compareCommitsWithBasehead({
+          owner: p.owner,
+          repo: p.repo,
+          basehead: `${p.base}...${p.head}`,
+        })
+        .then((r) => ({ status: r.data.status })),
+    updateBranch: (p) =>
+      octokit.pulls
+        .updateBranch({ owner: p.owner, repo: p.repo, pull_number: p.pull_number })
+        .then(() => undefined),
     squashMerge: (p) =>
       octokit.pulls
         .merge({ owner: p.owner, repo: p.repo, pull_number: p.pull_number, merge_method: 'squash' })

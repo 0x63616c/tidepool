@@ -121,6 +121,10 @@ export const InMemoryTicketStore = Layer.effect(TicketStore, makeInMemoryStore);
 export interface FakeForgeOptions {
   readonly ci?: CIStatus;
   readonly failMerge?: boolean;
+  /** Scripted freshness result for the merge gate — default up-to-date. */
+  readonly branchUpToDate?: boolean;
+  /** Make `updateBranch` fail with a conflict (drives merge-gate rework). */
+  readonly failUpdateBranch?: boolean;
   /** Scripted ground truth for `prState` — default `'open'` (today's behavior unaffected). */
   readonly prLifecycle?: PrLifecycle;
   /** Per-PR-number ground truth override; unlisted PRs fall back to `prLifecycle`. */
@@ -129,6 +133,8 @@ export interface FakeForgeOptions {
   readonly mergeSha?: string;
   /** Spy hook: called with every `merge` attempt (assert idempotency — no duplicate merge). */
   readonly onMerge?: (input: { readonly repo: string; readonly prNumber: number }) => void;
+  /** Spy hook: called with every merge-gate branch update. */
+  readonly onUpdateBranch?: (input: { readonly repo: string; readonly prNumber: number }) => void;
 }
 
 export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
@@ -156,6 +162,13 @@ export const fakeForge = (opts: FakeForgeOptions = {}): Layer.Layer<Forge> =>
           });
         },
         checks: () => Effect.succeed(ci),
+        isBranchUpToDate: () => Effect.succeed(opts.branchUpToDate ?? true),
+        updateBranch: (input) => {
+          opts.onUpdateBranch?.(input);
+          return opts.failUpdateBranch
+            ? Effect.fail(new MergeConflict({ prNumber: input.prNumber }))
+            : Effect.void;
+        },
         merge: (input) => {
           opts.onMerge?.(input);
           return opts.failMerge

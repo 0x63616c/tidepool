@@ -14,6 +14,8 @@ const fakeRest = (over: Partial<GithubRest> = {}): GithubRest => ({
   pullState: () => Promise.resolve({ merged: false, state: 'open', mergeCommitSha: null }),
   checkRuns: () => Promise.resolve([]),
   commitStatuses: () => Promise.resolve([]),
+  compare: () => Promise.resolve({ status: 'identical' }),
+  updateBranch: () => Promise.resolve(),
   squashMerge: () => Promise.resolve({ sha: 'merged-sha' }),
   ...over,
 });
@@ -51,6 +53,51 @@ describe('makeGithubForge', () => {
         }),
       );
       assert.strictEqual(yield* red.checks({ repo: 'o/r', prNumber: 42 }), 'red');
+    }),
+  );
+
+  it.effect('isBranchUpToDate compares base to branch without leaking GitHub types', () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = [];
+      const forge = makeGithubForge(
+        fakeRest({
+          compare: (p) => {
+            calls.push(p);
+            return Promise.resolve({ status: 'behind' });
+          },
+        }),
+      );
+
+      assert.isFalse(
+        yield* forge.isBranchUpToDate({ repo: 'o/r', base: 'main', branch: 'tp/tckt_x' }),
+      );
+      assert.deepStrictEqual(calls, [{ owner: 'o', repo: 'r', base: 'main', head: 'tp/tckt_x' }]);
+    }),
+  );
+
+  it.effect('updateBranch calls the PR update API and maps conflicts', () =>
+    Effect.gen(function* () {
+      const calls: unknown[] = [];
+      const ok = makeGithubForge(
+        fakeRest({
+          updateBranch: (p) => {
+            calls.push(p);
+            return Promise.resolve();
+          },
+        }),
+      );
+      yield* ok.updateBranch({ repo: 'o/r', prNumber: 42 });
+      assert.deepStrictEqual(calls, [{ owner: 'o', repo: 'r', pull_number: 42 }]);
+
+      const conflict = makeGithubForge(
+        fakeRest({ updateBranch: () => Promise.reject({ status: 422 }) }),
+      );
+      const exit = yield* Effect.exit(conflict.updateBranch({ repo: 'o/r', prNumber: 42 }));
+      assert.isTrue(
+        exit._tag === 'Failure' &&
+          exit.cause._tag === 'Fail' &&
+          exit.cause.error._tag === 'MergeConflict',
+      );
     }),
   );
 
