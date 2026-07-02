@@ -47,10 +47,10 @@ const renderRuns = (runs: ReadonlyArray<Run>): string => {
   if (runs.length === 0) return 'runs: 0 runs recorded';
   const rows = runs.map(
     (r) =>
-      `  ${r.id},${r.kind},${r.boxId ?? '-'},${r.boxProvider ?? '-'},${r.usage.tokensIn},${r.usage.tokensOut},${r.usage.wallTimeSec}`,
+      `  ${r.id},${r.kind},${r.status},${r.reason ?? '-'},${r.boxId ?? '-'},${r.boxProvider ?? '-'},${r.usage?.tokensIn ?? '-'},${r.usage?.tokensOut ?? '-'},${r.usage?.wallTimeSec ?? '-'}`,
   );
   return [
-    `runs[${runs.length}]{run_id,kind,box_id,provider,tokens_in,tokens_out,wall_time_sec}:`,
+    `runs[${runs.length}]{run_id,kind,status,reason,box_id,provider,tokens_in,tokens_out,wall_time_sec}:`,
     ...rows,
   ].join('\n');
 };
@@ -174,9 +174,9 @@ const emptyTally = (): Tally => ({ runs: 0, tokensIn: 0, tokensOut: 0, wallTimeS
 
 const add = (t: Tally, r: Run): Tally => ({
   runs: t.runs + 1,
-  tokensIn: t.tokensIn + r.usage.tokensIn,
-  tokensOut: t.tokensOut + r.usage.tokensOut,
-  wallTimeSec: t.wallTimeSec + r.usage.wallTimeSec,
+  tokensIn: t.tokensIn + (r.usage?.tokensIn ?? 0),
+  tokensOut: t.tokensOut + (r.usage?.tokensOut ?? 0),
+  wallTimeSec: t.wallTimeSec + (r.usage?.wallTimeSec ?? 0),
 });
 
 const totalOf = (runs: ReadonlyArray<Run>): Tally => runs.reduce(add, emptyTally());
@@ -186,7 +186,7 @@ const byModel = (runs: ReadonlyArray<Run>): ReadonlyArray<readonly [string, Tall
   const order: string[] = [];
   const map = new Map<string, Tally>();
   for (const r of runs) {
-    const key = r.usage.model;
+    const key = r.usage?.model ?? 'no-usage';
     if (!map.has(key)) {
       map.set(key, emptyTally());
       order.push(key);
@@ -217,12 +217,12 @@ export const renderTicketCost = (ticketId: TicketId, runs: ReadonlyArray<Run>): 
   if (runs.length === 0) return `cost: ticket ${ticketId} has no runs yet`;
   const rows = runs.map(
     (r) =>
-      `  ${r.id},${r.kind},${r.usage.model},${r.usage.tokensIn},${r.usage.tokensOut},${r.usage.wallTimeSec}`,
+      `  ${r.id},${r.kind},${r.status},${r.usage?.model ?? '-'},${r.usage?.tokensIn ?? '-'},${r.usage?.tokensOut ?? '-'},${r.usage?.wallTimeSec ?? '-'}`,
   );
   return [
     `${COST_HEADER}`,
     `  ticket: ${ticketId}`,
-    `runs[${runs.length}]{run_id,kind,model,tokens_in,tokens_out,wall_time_sec}:`,
+    `runs[${runs.length}]{run_id,kind,status,model,tokens_in,tokens_out,wall_time_sec}:`,
     ...rows,
     renderModels(runs),
     renderTotal(totalOf(runs)),

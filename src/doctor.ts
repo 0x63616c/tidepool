@@ -97,7 +97,10 @@ export const gatherDoctorFacts: Effect.Effect<DoctorFacts, never, TicketStore | 
     for (const ticket of tickets) {
       const runs = yield* store.runsFor(ticket.id);
       for (const run of runs) {
-        latestRunTokens = Math.max(latestRunTokens, run.usage.tokensIn + run.usage.tokensOut);
+        latestRunTokens = Math.max(
+          latestRunTokens,
+          (run.usage?.tokensIn ?? 0) + (run.usage?.tokensOut ?? 0),
+        );
         if (run.kind === 'work') {
           // Runs are returned oldest-first; keep the last (most recent) work run's provider.
           latestWorkRunBoxProvider = run.boxProvider;

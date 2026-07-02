@@ -28,6 +28,10 @@ const seed = (
   }).pipe(Effect.provide(InMemoryTicketStore));
 
 const run = (over: Partial<Run> & Pick<Run, 'id' | 'ticketId' | 'kind'>): Run => ({
+  status: 'succeeded',
+  reason: null,
+  dispatchedAt: 100,
+  finishedAt: 200,
   boxId: null,
   boxProvider: null,
   usage: { model: 'sonnet', tokensIn: 100, tokensOut: 50, wallTimeSec: 1 },

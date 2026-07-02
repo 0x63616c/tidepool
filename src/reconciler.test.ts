@@ -81,10 +81,11 @@ describe('reconciler', () => {
       assert.strictEqual(work.length, 1);
       assert.strictEqual(review.length, 1);
       // Non-zero tokens prove a real run happened (no indexing — avoids non-null assertion).
-      const tokensIn = work.reduce((n, r) => n + r.usage.tokensIn, 0);
-      const tokensOut = work.reduce((n, r) => n + r.usage.tokensOut, 0);
+      const tokensIn = work.reduce((n, r) => n + (r.usage?.tokensIn ?? 0), 0);
+      const tokensOut = work.reduce((n, r) => n + (r.usage?.tokensOut ?? 0), 0);
       assert.isTrue(tokensIn > 0);
       assert.isTrue(tokensOut > 0);
+      assert.isTrue(runs.every((r) => r.status === 'succeeded' && r.finishedAt !== null));
     }),
   );
 
@@ -257,7 +258,11 @@ describe('reconciler', () => {
       assert.match(final.reason ?? '', /deadline/);
       assert.isNull(final.workHandle);
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.filter((e) => /deadline/.test(e.line)).length, 1);
+      assert.isAtLeast(events.filter((e) => /deadline/.test(e.line)).length, 1);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'reaped');
+      assert.strictEqual(runs[0]?.reason, 'deadline-exceeded');
     }),
   );
 
@@ -280,8 +285,16 @@ describe('reconciler', () => {
       assert.isNotNull(final.workHandle); // reattach handle persisted
       assert.isNotNull(final.dispatchedAt); // deadline clock persisted
       assert.isNotNull(final.branch); // branch fixed at dispatch
-      // Nothing harvested yet — the run is recorded only when poll succeeds.
-      assert.strictEqual((yield* store.runsFor(ticket.id)).length, 0);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.kind, 'work');
+      assert.strictEqual(runs[0]?.status, 'running');
+      assert.strictEqual(runs[0]?.dispatchedAt, final.dispatchedAt);
+      assert.isNull(runs[0]?.usage ?? null);
+      const events = yield* store.eventsFor({ ticketId: ticket.id });
+      assert.isTrue(
+        events.some((e) => e.runId === runs[0]?.id && /run dispatched: work/.test(e.line)),
+      );
     }),
   );
 
@@ -483,7 +496,9 @@ describe('reconciler', () => {
       const final = yield* store.byId(ticket.id);
       assert.strictEqual(final.state, 'running'); // stayed put — poll said Running
       assert.isNotNull(final.workHandle);
-      assert.strictEqual((yield* store.runsFor(ticket.id)).length, 0);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'running');
     }),
   );
 });
@@ -592,6 +607,10 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
         assert.strictEqual(dispatches[0]?.kind, 'review');
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'running');
+        const runs = yield* store.runsFor(ticket.id);
+        assert.strictEqual(runs.length, 1);
+        assert.strictEqual(runs[0]?.kind, 'review');
+        assert.strictEqual(runs[0]?.status, 'running');
       }),
   );
 
@@ -743,7 +762,7 @@ describe('reconcileForever', () => {
 
 /**
  * Observability: every typed failure must leave a durable trace — a `reason` on
- * the ticket and exactly one control-plane/error event — and a successful run
+ * the ticket, control-plane/error events, and finalized run ledger rows — and a successful run
  * must persist whatever the worker captured, linked to that run's id.
  */
 describe('reconciler observability', () => {
@@ -773,11 +792,10 @@ describe('reconciler observability', () => {
       assert.isNotNull(final.reason);
 
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.length, 1);
-      const [event] = events;
-      assert.isDefined(event);
-      assert.strictEqual(event.source, 'control-plane');
-      assert.strictEqual(event.level, 'error');
+      assert.isTrue(events.some((e) => e.source === 'control-plane' && e.level === 'error'));
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'failed');
     }),
   );
 
@@ -797,11 +815,13 @@ describe('reconciler observability', () => {
       assert.strictEqual(final.state, 'failed');
       assert.strictEqual(final.attempts, 2);
       assert.isNotNull(final.reason);
-      assert.strictEqual((yield* store.eventsFor({ ticketId: ticket.id })).length, 1);
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'failed');
     }),
   );
 
-  it.effect('worker-side poll Failed → retried + exactly one control-plane/error event', () =>
+  it.effect('worker-side poll Failed → retried + control-plane/error event', () =>
     Effect.gen(function* () {
       const store = yield* makeInMemoryStore;
       const ticket = yield* inProgress(store, 0);
@@ -820,11 +840,11 @@ describe('reconciler observability', () => {
       assert.isNotNull(final.reason);
       assert.isNull(final.workHandle);
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.length, 1);
-      const [event] = events;
-      assert.isDefined(event);
-      assert.strictEqual(event.source, 'control-plane');
-      assert.strictEqual(event.level, 'error');
+      assert.isTrue(events.some((e) => e.source === 'control-plane' && e.level === 'error'));
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'failed');
+      assert.strictEqual(runs[0]?.reason, 'worker exited non-zero');
     }),
   );
 
@@ -869,10 +889,11 @@ describe('reconciler observability', () => {
       assert.strictEqual(final.state, 'rate_capped');
       assert.strictEqual(final.reason, 'rate-capped');
       const events = yield* store.eventsFor({ ticketId: ticket.id });
-      assert.strictEqual(events.length, 1);
-      const [event] = events;
-      assert.isDefined(event);
-      assert.strictEqual(event.source, 'control-plane');
+      assert.isTrue(events.some((e) => e.source === 'control-plane'));
+      const runs = yield* store.runsFor(ticket.id);
+      assert.strictEqual(runs.length, 1);
+      assert.strictEqual(runs[0]?.status, 'failed');
+      assert.strictEqual(runs[0]?.reason, 'rate-capped');
     }),
   );
 

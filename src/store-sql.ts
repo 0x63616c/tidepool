@@ -43,12 +43,16 @@ interface RunRow {
   readonly id: string;
   readonly ticketId: string;
   readonly kind: string;
+  readonly status: string;
+  readonly reason: string | null;
+  readonly dispatchedAt: number;
+  readonly finishedAt: number | null;
   readonly boxId: string | null;
   readonly boxProvider: string | null;
-  readonly model: string;
-  readonly tokensIn: number;
-  readonly tokensOut: number;
-  readonly wallTimeSec: number;
+  readonly model: string | null;
+  readonly tokensIn: number | null;
+  readonly tokensOut: number | null;
+  readonly wallTimeSec: number | null;
 }
 
 /**
@@ -66,14 +70,21 @@ const runFromRow = (r: RunRow): Run =>
     id: r.id,
     ticketId: r.ticketId,
     kind: r.kind,
+    status: r.status,
+    reason: r.reason,
+    dispatchedAt: Number(r.dispatchedAt),
+    finishedAt: num(r.finishedAt),
     boxId: r.boxId,
     boxProvider: r.boxProvider,
-    usage: {
-      model: r.model,
-      tokensIn: Number(r.tokensIn),
-      tokensOut: Number(r.tokensOut),
-      wallTimeSec: Number(r.wallTimeSec),
-    },
+    usage:
+      r.model === null || r.tokensIn === null || r.tokensOut === null || r.wallTimeSec === null
+        ? null
+        : {
+            model: r.model,
+            tokensIn: Number(r.tokensIn),
+            tokensOut: Number(r.tokensOut),
+            wallTimeSec: Number(r.wallTimeSec),
+          },
   });
 
 /** Decode a ticket row, coercing the numeric columns off the raw driver row. */
@@ -199,12 +210,40 @@ export const makeStoreApi = (sql: SqlClient, opts: StoreSqlOptions): TicketStore
       }),
     addRun: (run) =>
       sql`
-        INSERT INTO runs (id, ticket_id, kind, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
-        VALUES (${run.id}, ${run.ticketId}, ${run.kind}, ${run.boxId}, ${run.boxProvider}, ${run.usage.model}, ${run.usage.tokensIn}, ${run.usage.tokensOut}, ${run.usage.wallTimeSec})
+        INSERT INTO runs (id, ticket_id, kind, status, reason, dispatched_at, finished_at, box_id, box_provider, usage_model, usage_tokens_in, usage_tokens_out, usage_wall_time_sec)
+        VALUES (${run.id}, ${run.ticketId}, ${run.kind}, ${run.status}, ${run.reason}, ${run.dispatchedAt}, ${run.finishedAt}, ${run.boxId}, ${run.boxProvider}, ${run.usage?.model ?? null}, ${run.usage?.tokensIn ?? null}, ${run.usage?.tokensOut ?? null}, ${run.usage?.wallTimeSec ?? null})
       `.pipe(Effect.orDie, Effect.asVoid),
+    finalizeOpenRun: (ticketId, patch) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<RunRow>`
+          UPDATE runs SET
+            status = ${patch.status},
+            reason = ${patch.reason},
+            finished_at = ${patch.finishedAt},
+            usage_model = ${patch.usage?.model ?? null},
+            usage_tokens_in = ${patch.usage?.tokensIn ?? null},
+            usage_tokens_out = ${patch.usage?.tokensOut ?? null},
+            usage_wall_time_sec = ${patch.usage?.wallTimeSec ?? null}
+          WHERE id = (
+            SELECT id FROM runs
+            WHERE ticket_id = ${ticketId} AND status = 'running'
+            ORDER BY ${order} DESC
+            LIMIT 1
+          )
+          RETURNING id, ticket_id AS "ticketId", kind, status, reason,
+                    dispatched_at AS "dispatchedAt", finished_at AS "finishedAt",
+                    box_id AS "boxId", box_provider AS "boxProvider",
+                    usage_model AS "model", usage_tokens_in AS "tokensIn",
+                    usage_tokens_out AS "tokensOut", usage_wall_time_sec AS "wallTimeSec"
+        `.pipe(Effect.orDie);
+        const row = rows[0];
+        return row === undefined ? null : runFromRow(row);
+      }),
     runsFor: (id) =>
       sql<RunRow>`
-        SELECT id, ticket_id AS "ticketId", kind, box_id AS "boxId",
+        SELECT id, ticket_id AS "ticketId", kind, status, reason,
+               dispatched_at AS "dispatchedAt", finished_at AS "finishedAt",
+               box_id AS "boxId",
                box_provider AS "boxProvider",
                usage_model AS "model", usage_tokens_in AS "tokensIn",
                usage_tokens_out AS "tokensOut", usage_wall_time_sec AS "wallTimeSec"
