@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Effect, Exit, Logger } from 'effect';
+import { Cause, Effect, Exit, Logger } from 'effect';
 import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_SESSION_TIMEOUT_MS,
@@ -111,6 +111,13 @@ describe('runSession', () => {
         exit.cause.error instanceof OpencodeFailed,
       true,
     );
+  });
+
+  it('renders the real reason (not the generic "An error has occurred") through Cause.pretty, since that is the only place worker errors are logged', () => {
+    const cause = Cause.fail(new OpencodeFailed({ op: 'server', reason: 'no port available' }));
+    const rendered = Cause.pretty(cause);
+    assert.strictEqual(rendered.includes('no port available'), true);
+    assert.strictEqual(rendered.includes('An error has occurred'), false);
   });
 
   it('(FIX 2) fails OpencodeFailed and releases the server when the hard timeout elapses', async () => {

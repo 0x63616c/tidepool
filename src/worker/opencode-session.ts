@@ -85,7 +85,11 @@ export interface OpencodePort {
 export class OpencodeFailed extends Data.TaggedError('OpencodeFailed')<{
   readonly op: string;
   readonly reason: string;
-}> {}
+}> {
+  override get message(): string {
+    return `${this.op}: ${this.reason}`;
+  }
+}
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 
