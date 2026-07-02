@@ -122,6 +122,17 @@ export interface GithubRest {
     readonly repo: string;
     readonly ref: string;
   }) => Promise<ReadonlyArray<CommitStatusRow>>;
+  readonly closePull: (p: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly pull_number: number;
+  }) => Promise<void>;
+  readonly createIssueComment: (p: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly issue_number: number;
+    readonly body: string;
+  }) => Promise<void>;
   readonly compare: (p: {
     readonly owner: string;
     readonly repo: string;
@@ -146,6 +157,27 @@ export const httpStatusOf = (e: unknown): number =>
   typeof e === 'object' && e !== null && 'status' in e && typeof e.status === 'number'
     ? e.status
     : 0;
+
+const checksForRef = (
+  rest: GithubRest,
+  input: { readonly repo: string; readonly ref: string; readonly op: string },
+): Effect.Effect<CIStatus, ForgeError> =>
+  Effect.gen(function* () {
+    const { owner, name } = parseRepo(input.repo);
+    const runs = yield* Effect.tryPromise({
+      try: () => rest.checkRuns({ owner, repo: name, ref: input.ref }),
+      catch: (e) => new ForgeError({ op: input.op, reason: String(e) }),
+    });
+    const statuses = yield* Effect.tryPromise({
+      try: () => rest.commitStatuses({ owner, repo: name, ref: input.ref }),
+      catch: (e) => new ForgeError({ op: input.op, reason: String(e) }),
+    });
+    const states = [
+      ...runs.map((r) => checkRunState(r.status, r.conclusion)),
+      ...statuses.map((s) => commitStatusState(s.state)),
+    ];
+    return combineCI(states);
+  });
 
 /** Build the `ForgeApi` over a `GithubRest` port. */
 export const makeGithubForge = (rest: GithubRest): ForgeApi => ({
@@ -182,20 +214,10 @@ export const makeGithubForge = (rest: GithubRest): ForgeApi => ({
         try: () => rest.headSha({ owner, repo: name, pull_number: input.prNumber }),
         catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
       });
-      const runs = yield* Effect.tryPromise({
-        try: () => rest.checkRuns({ owner, repo: name, ref: sha }),
-        catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
-      });
-      const statuses = yield* Effect.tryPromise({
-        try: () => rest.commitStatuses({ owner, repo: name, ref: sha }),
-        catch: (e) => new ForgeError({ op: 'checks', reason: String(e) }),
-      });
-      const states = [
-        ...runs.map((r) => checkRunState(r.status, r.conclusion)),
-        ...statuses.map((s) => commitStatusState(s.state)),
-      ];
-      return combineCI(states);
+      return yield* checksForRef(rest, { repo: input.repo, ref: sha, op: 'checks' });
     }),
+  checksForCommitOnMain: (input) =>
+    checksForRef(rest, { repo: input.repo, ref: input.sha, op: 'checksForCommitOnMain' }),
   isBranchUpToDate: (input) =>
     Effect.gen(function* () {
       const { owner, name } = parseRepo(input.repo);
@@ -225,6 +247,24 @@ export const makeGithubForge = (rest: GithubRest): ForgeApi => ({
           classifyMergeError(httpStatusOf(e)) === 'conflict'
             ? new MergeConflict({ prNumber: input.prNumber })
             : new ForgeError({ op: 'merge', reason: String(e) }),
+      });
+    }),
+  closePR: (input) =>
+    Effect.gen(function* () {
+      const { owner, name } = parseRepo(input.repo);
+      yield* Effect.tryPromise({
+        try: () =>
+          rest.createIssueComment({
+            owner,
+            repo: name,
+            issue_number: input.prNumber,
+            body: input.comment,
+          }),
+        catch: (e) => new ForgeError({ op: 'closePR', reason: String(e) }),
+      });
+      yield* Effect.tryPromise({
+        try: () => rest.closePull({ owner, repo: name, pull_number: input.prNumber }),
+        catch: (e) => new ForgeError({ op: 'closePR', reason: String(e) }),
       });
     }),
 });
@@ -264,6 +304,14 @@ export const octokitRest = (token: string): GithubRest => {
       octokit.repos
         .listCommitStatusesForRef({ owner: p.owner, repo: p.repo, ref: p.ref })
         .then((r) => r.data.map((s) => ({ state: s.state }))),
+    closePull: (p) =>
+      octokit.pulls
+        .update({ owner: p.owner, repo: p.repo, pull_number: p.pull_number, state: 'closed' })
+        .then(() => undefined),
+    createIssueComment: (p) =>
+      octokit.issues
+        .createComment({ owner: p.owner, repo: p.repo, issue_number: p.issue_number, body: p.body })
+        .then(() => undefined),
     compare: (p) =>
       octokit.repos
         .compareCommitsWithBasehead({

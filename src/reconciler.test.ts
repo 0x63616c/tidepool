@@ -548,7 +548,7 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
     });
 
   it.effect(
-    'PR merged externally while ticket sits in review → done (with merge_sha), no CI check, no dispatch',
+    'PR merged externally while ticket sits in review → verifying → done, no PR CI check, no dispatch',
     () =>
       Effect.gen(function* () {
         const store = yield* makeInMemoryStore;
@@ -561,6 +561,13 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
           fakeForge({ prLifecycle: 'merged', mergeSha: 'deadbeef' }),
           fakeAgentWorker({ verdict: 'approve', onDispatch: (input) => dispatches.push(input) }),
         );
+
+        yield* runSteps(1, env);
+
+        const verifying = yield* store.byId(ticket.id);
+        assert.strictEqual(verifying.phase, 'verifying');
+        assert.strictEqual(verifying.mergeSha, 'deadbeef');
+        assert.isNull(verifying.workHandle);
 
         yield* runSteps(1, env);
 
@@ -658,12 +665,14 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
                   : { state: 'merged' as const, mergeSha: 'deadbeef' },
             ),
           checks: () => Effect.succeed('green' as const),
+          checksForCommitOnMain: () => Effect.succeed('green' as const),
           isBranchUpToDate: () => Effect.succeed(true),
           updateBranch: () => Effect.void,
           merge: (input: { readonly repo: string; readonly prNumber: number }) => {
             mergeCalls.push(input.prNumber);
             return Effect.succeed({ sha: 'should-not-be-used' });
           },
+          closePR: () => Effect.void,
         };
         const crashProneForge = Layer.succeed(Forge, forgeApi);
 
@@ -676,8 +685,9 @@ describe('reconciler: closed-loop PR-state reconciliation (tri-state)', () => {
         // step 1: reviewing → prState 'open' (call #1) → CI green → dispatch review.
         // step 2: poll Succeeded/Review(approve) → phase merging (no forge call).
         // step 3: merging → prState 'merged' (call #2, the post-crash
-        // re-observation) → settle done WITHOUT calling forge.merge.
-        yield* runSteps(3, env);
+        // re-observation) → verifying WITHOUT calling forge.merge.
+        // step 4: main checks on mergeSha are green → done.
+        yield* runSteps(4, env);
 
         const final = yield* store.byId(ticket.id);
         assert.strictEqual(final.state, 'done');

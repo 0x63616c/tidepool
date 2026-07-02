@@ -14,6 +14,8 @@ const fakeRest = (over: Partial<GithubRest> = {}): GithubRest => ({
   pullState: () => Promise.resolve({ merged: false, state: 'open', mergeCommitSha: null }),
   checkRuns: () => Promise.resolve([]),
   commitStatuses: () => Promise.resolve([]),
+  closePull: () => Promise.resolve(),
+  createIssueComment: () => Promise.resolve(),
   compare: () => Promise.resolve({ status: 'identical' }),
   updateBranch: () => Promise.resolve(),
   squashMerge: () => Promise.resolve({ sha: 'merged-sha' }),

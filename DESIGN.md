@@ -289,8 +289,8 @@ everything upstream). Two levels:
   comments/relations — a dead end for a system we want to *beef up*. So: DB, not files.)
   - **Created** via `tp ticket add` → the `QueueControl` seam (in-process locally, or the daemon's
     HTTP API remotely); the reconciler is still the only mover.
-  - **Done** = a DB state transition the reconciler makes after auto-merge (review ✅ + CI ✅ +
-    merged), recording pr id + merge SHA + usage. Not "a file moved." Queryable.
+  - **Done** = a DB state transition the reconciler makes after auto-merge and main verifies green
+    on the merge SHA, recording pr id + merge SHA + usage. Not "a file moved." Queryable.
   - **Beefable** — deps, comments, priority, attempts, retries, links = columns/tables.
   - `target` is a column (`tidepool-testbed`): control plane owns the backlog, work lands on the
     target. The backlog-lives-with-the-brain / work-lands-on-target split is normal, not weird.
@@ -301,9 +301,9 @@ everything upstream). Two levels:
 - **Transcripts/usage** also sqlite + files on the main-box volume, never git.
 - **Lifecycle (phase machine, async dispatch+poll):** `queued → working (dispatch work agent-worker;
   poll; Succeeded → open PR) → reviewing (CI green → dispatch review agent-worker; poll the verdict)
-  → merging (approve; idempotent merge next tick) → done`, with rework loops `reviewing → working`
-  (request_changes / red CI / merge conflict) and `verifying` reserved for post-merge main-green
-  verification (wave 3). An in-flight dispatch is the `workHandle` + `dispatchedAt` on the ticket
+  → merging (approve; idempotent merge next tick) → verifying (main checks on merge SHA) → done`,
+  with rework loops `reviewing → working` (request_changes / red CI / merge conflict). An in-flight
+  dispatch is the `workHandle` + `dispatchedAt` on the ticket
   (phase unchanged); a poll `Failed` maps to retry (or sets the `rate_capped` condition — a gate that
   blocks dispatch, clears next tick, and never spends an attempt) and
   `now - dispatchedAt > deadline` reaps the worker (`cancel`). Every phase transition and condition
@@ -321,12 +321,12 @@ everything upstream). Two levels:
   whole-pipeline cap slot (freezing the pipeline). Fix: `Forge.prState({ repo, prNumber })` reads the
   PR's real lifecycle (`open | merged | closed`) straight from GitHub. Any ticket that carries a PR
   reads this FIRST — before any CI check, review dispatch, or merge attempt, so drift never has a
-  chance to start — and branches tri-state: `merged` → settle `done` (merge sha from the forge, not
-  from the reconciler's own call), `closed` (not merged) → settle `failed` with no retry (a
+  chance to start — and branches tri-state: `merged` → settle `verifying` (merge sha from the forge,
+  not from the reconciler's own call), `closed` (not merged) → settle `failed` with no retry (a
   deliberately-closed PR must not loop into duplicate PRs), `open` → proceed exactly as before. The
   same check runs again immediately before the approve-path `forge.merge` call, making the merge
-  idempotent: if the forge already shows the PR merged, the merge is skipped and the ticket settles
-  straight to `done` instead of attempting (and erroring on) a duplicate merge.
+  idempotent: if the forge already shows the PR merged, the merge is skipped and the ticket verifies
+  that merge SHA instead of attempting (and erroring on) a duplicate merge.
 - **Auto-merge in v1.** No human gate. Escalates to a human only on repeated failure.
 
 ### Standards (the spec the review agent grades against — mechanical, not vibes)

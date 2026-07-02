@@ -41,6 +41,7 @@ export type TicketPhase = typeof TicketPhase.Type;
 export const TicketCondition = Schema.Union(
   Schema.Struct({ type: Schema.Literal('rate_capped') }),
   Schema.Struct({ type: Schema.Literal('needs_human'), reason: Schema.String }),
+  Schema.Struct({ type: Schema.Literal('main_red'), sha: Schema.String }),
 );
 export type TicketCondition = typeof TicketCondition.Type;
 
